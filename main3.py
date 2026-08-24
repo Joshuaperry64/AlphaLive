@@ -189,6 +189,40 @@ tools = [
             ),
         ]
     ),
+    types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="list_directory",
+                description="List files and folders in a given directory.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["path"],
+                    properties={"path": genai.types.Schema(type=genai.types.Type.STRING)},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="read_file",
+                description="Read the contents of a local file.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["path"],
+                    properties={"path": genai.types.Schema(type=genai.types.Type.STRING)},
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="write_file",
+                description="Write text content to a local file.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["path", "content"],
+                    properties={
+                        "path": genai.types.Schema(type=genai.types.Type.STRING),
+                        "content": genai.types.Schema(type=genai.types.Type.STRING),
+                    },
+                ),
+            ),
+        ]
+    ),
 ]
 
 res_map = {
@@ -871,6 +905,19 @@ class AudioLoop:
             elif name == "update_personality":
                 success = self.mm.update_personality(args.get("trait_name",""), args.get("trait_value",""))
                 result = {"result": "Personality updated." if success else "Failed."}
+            elif name == "list_directory":
+                items = os.listdir(args.get("path", "."))
+                result = {"result": f"Contents: {', '.join(items)}"}
+            elif name == "read_file":
+                with open(args.get("path", ""), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if len(content) > 15000:
+                    content = content[:15000] + "\n...[TRUNCATED]"
+                result = {"result": content}
+            elif name == "write_file":
+                with open(args.get("path", ""), "w", encoding="utf-8") as f:
+                    f.write(args.get("content", ""))
+                result = {"result": "File written successfully."}
         except Exception as e:
             result = {"error": f"Failed to execute {name}: {str(e)}"}
 

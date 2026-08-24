@@ -91,28 +91,28 @@ DEFAULT_CONFIG = {
         "ApiKey": "", "Session": "deziree",
         "Modal": "enabled", "Memory": "enabled",
         "AlphaCoreInstruction": "enabled",
+        "AutonomousControl": "disabled",
     },
     "main.py": {
         "AudioMode": "half", "VisionMode": "continuous",
         "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
-        "Tools": "enabled", "MCP": "disabled", "Proactivity": "enabled",
-        "AutonomousControl": "disabled",
+        "Tools": "enabled", "FileSystem": "enabled", "MCP": "disabled", "Proactivity": "enabled",
         "Resolution": "medium", "ChunkSize": "1024",
         "TriggerTokens": "104857", "TargetTokens": "52428",
     },
     "main2.py": {
         "AudioMode": "half", "VisionMode": "screen",
         "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
-        "Playwright": "enabled", "Headless": "false",
-        "AutonomousControl": "disabled",
+        "Playwright": "enabled", "FileSystem": "enabled", "Headless": "false",
+        "Proactivity": "enabled",
         "ThinkingLevel": "medium", "Resolution": "low",
         "ChunkSize": "1024", "TriggerTokens": "104857", "TargetTokens": "52428",
     },
     "main3.py": {
         "AudioMode": "half", "VisionMode": "screen",
         "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
-        "DesktopControl": "enabled", "ThinkingLevel": "high",
-        "AutonomousControl": "disabled",
+        "DesktopControl": "enabled", "FileSystem": "enabled", "ThinkingLevel": "high",
+        "Proactivity": "enabled",
         "Resolution": "high", "ChunkSize": "1024",
         "TriggerTokens": "104857", "TargetTokens": "52428",
     },
@@ -1453,13 +1453,13 @@ class GlobalPanel(QWidget):
 
 ENGINE_FIELDS = {
     "main.py": [
-        # (key, type, opts/range, tooltip)
         ("AudioMode",     "combo",  ["half","full","muted"],             "half=push-to-talk feel; full=always on; muted=no mic"),
         ("VisionMode",    "combo",  ["on-demand","continuous","screen"], "Vision input source"),
         ("InputMode",     "combo",  ["both","voice","text"],             "Accepted input channels"),
         ("VoiceOutput",   "toggle", None,                               "Enable TTS audio response"),
         ("Voice",         "combo",  VOICES,                             "Gemini TTS voice"),
         ("Tools",         "toggle", None,                               "Enable code execution tool"),
+        ("FileSystem",    "toggle", None,                               "Enable local file system tools"),
         ("MCP",           "toggle", None,                               "Enable MCP tools (Playwright etc.)"),
         ("Proactivity",   "toggle", None,                               "Allow Alpha to speak unprompted"),
         ("Resolution",    "combo",  ["low","medium","high"],            "Media resolution sent to the model"),
@@ -1474,8 +1474,9 @@ ENGINE_FIELDS = {
         ("VoiceOutput",   "toggle", None,                              "Enable TTS"),
         ("Voice",         "combo",  VOICES,                            "TTS voice"),
         ("Playwright",    "toggle", None,                              "Enable Playwright browser tools"),
+        ("FileSystem",    "toggle", None,                               "Enable local file system tools"),
         ("Headless",      "combo",  ["false","true"],                  "Run browser headlessly"),
-        ("AutonomousControl", "toggle", None,                           "Continuously loop actions without user input"),
+        ("Proactivity",   "toggle", None,                               "Allow Alpha to speak unprompted"),
         ("ThinkingLevel", "combo",  ["low","medium","high"],           "Model reasoning depth"),
         ("Resolution",    "combo",  ["low","medium","high"],           "Screen capture quality"),
         ("ChunkSize",     "spin",   (256, 8192, 256),                  "Audio chunk size"),
@@ -1489,7 +1490,8 @@ ENGINE_FIELDS = {
         ("VoiceOutput",   "toggle", None,                              "Enable TTS"),
         ("Voice",         "combo",  VOICES,                            "TTS voice"),
         ("DesktopControl","toggle", None,                              "Enable PyAutoGUI desktop control tools"),
-        ("AutonomousControl", "toggle", None,                           "Continuously loop actions without user input"),
+        ("FileSystem",    "toggle", None,                               "Enable local file system tools"),
+        ("Proactivity",   "toggle", None,                               "Allow Alpha to speak unprompted"),
         ("ThinkingLevel", "combo",  ["low","medium","high"],           "Reasoning depth"),
         ("Resolution",    "combo",  ["low","medium","high"],           "Screenshot quality"),
         ("ChunkSize",     "spin",   (256, 8192, 256),                  "Audio chunk size"),
@@ -1501,7 +1503,7 @@ ENGINE_FIELDS = {
 SECTIONS = {
     "Audio & Vision":     ["AudioMode","VisionMode","InputMode","VoiceOutput","Voice","ChunkSize"],
     "Model Parameters":   ["ThinkingLevel","Resolution","TriggerTokens","TargetTokens"],
-    "Tools & Automation": ["Tools","MCP","Playwright","DesktopControl","Headless","Proactivity","AutonomousControl"],
+    "Tools & Automation": ["Tools","FileSystem","MCP","Playwright","DesktopControl","Headless","Proactivity"],
 }
 
 
@@ -1759,8 +1761,9 @@ class LaunchSidebar(QFrame):
         g = self._cfg.get("Global", {})
         self._modal_sw  = CyberToggle(g.get("Modal",  "enabled") == "enabled")
         self._memory_sw = CyberToggle(g.get("Memory", "enabled") == "enabled")
+        self._auto_sw   = CyberToggle(g.get("AutonomousControl", "disabled") == "enabled")
 
-        for label, sw in [("Modal Proxy", self._modal_sw), ("Memory", self._memory_sw)]:
+        for label, sw in [("Modal Proxy", self._modal_sw), ("Memory", self._memory_sw), ("Autonomous", self._auto_sw)]:
             r = QHBoxLayout()
             r.addWidget(lbl(label, 9))
             r.addStretch()
@@ -1833,6 +1836,7 @@ class LaunchSidebar(QFrame):
         self._cfg.setdefault("Global", {})
         self._cfg["Global"]["Modal"]  = "enabled" if self._modal_sw.isChecked()  else "disabled"
         self._cfg["Global"]["Memory"] = "enabled" if self._memory_sw.isChecked() else "disabled"
+        self._cfg["Global"]["AutonomousControl"] = "enabled" if self._auto_sw.isChecked() else "disabled"
         self.launch_requested.emit(self._selected)
 
     def set_running(self, v: bool):

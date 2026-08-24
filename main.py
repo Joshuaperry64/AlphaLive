@@ -180,7 +180,20 @@ class AudioLoop:
         
         result = {"error": f"Unknown tool: {fc_name}"}
         try:
-            if fc_name == "memorize_fact":
+            if fc_name == "list_directory":
+                items = os.listdir(fc_args.get("path", "."))
+                result = {"result": f"Contents: {', '.join(items)}"}
+            elif fc_name == "read_file":
+                with open(fc_args.get("path", ""), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if len(content) > 15000:
+                    content = content[:15000] + "\n...[TRUNCATED]"
+                result = {"result": content}
+            elif fc_name == "write_file":
+                with open(fc_args.get("path", ""), "w", encoding="utf-8") as f:
+                    f.write(fc_args.get("content", ""))
+                result = {"result": "File written successfully."}
+            elif fc_name == "memorize_fact":
                 success = self.mm.memorize_fact(fc_args.get("subject", ""), fc_args.get("predicate", ""), fc_args.get("object_", ""), fc_args.get("source", "conversation"))
                 result = {"result": "Fact memorized successfully." if success else "Failed to memorize fact."}
             elif fc_name == "recall_knowledge":
@@ -229,7 +242,20 @@ class AudioLoop:
         
         result = {"error": f"Unknown tool: {fc_name}"}
         try:
-            if fc_name == "memorize_fact":
+            if fc_name == "list_directory":
+                items = os.listdir(fc_args.get("path", "."))
+                result = {"result": f"Contents: {', '.join(items)}"}
+            elif fc_name == "read_file":
+                with open(fc_args.get("path", ""), "r", encoding="utf-8") as f:
+                    content = f.read()
+                if len(content) > 15000:
+                    content = content[:15000] + "\n...[TRUNCATED]"
+                result = {"result": content}
+            elif fc_name == "write_file":
+                with open(fc_args.get("path", ""), "w", encoding="utf-8") as f:
+                    f.write(fc_args.get("content", ""))
+                result = {"result": "File written successfully."}
+            elif fc_name == "memorize_fact":
                 success = self.mm.memorize_fact(fc_args.get("subject", ""), fc_args.get("predicate", ""), fc_args.get("object_", ""), fc_args.get("source", "conversation"))
                 result = {"result": "Fact memorized successfully." if success else "Failed to memorize fact."}
             elif fc_name == "recall_knowledge":
@@ -248,6 +274,7 @@ class AudioLoop:
         
         resp_dict = {
             "name": fc_name,
+            "id": data.get("id"),
             "response": {"result": result}
         }
         if self.websocket:
@@ -493,6 +520,42 @@ async def main():
 
     if args.tools == "enabled":
         tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
+        
+    if engine_cfg.get("FileSystem", "enabled") == "enabled":
+        tools.append(types.Tool(
+            function_declarations=[
+                types.FunctionDeclaration(
+                    name="list_directory",
+                    description="List files and folders in a given directory.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["path"],
+                        properties={"path": genai.types.Schema(type=genai.types.Type.STRING)},
+                    ),
+                ),
+                types.FunctionDeclaration(
+                    name="read_file",
+                    description="Read the contents of a local file.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["path"],
+                        properties={"path": genai.types.Schema(type=genai.types.Type.STRING)},
+                    ),
+                ),
+                types.FunctionDeclaration(
+                    name="write_file",
+                    description="Write text content to a local file.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["path", "content"],
+                        properties={
+                            "path": genai.types.Schema(type=genai.types.Type.STRING),
+                            "content": genai.types.Schema(type=genai.types.Type.STRING),
+                        },
+                    ),
+                ),
+            ]
+        ))
 
     config = types.LiveConnectConfig(
         response_modalities=["AUDIO"] if args.voice_output == "enabled" else ["TEXT"],

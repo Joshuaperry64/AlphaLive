@@ -1,0 +1,15 @@
+PyQt6
+pyqtgraph
+opencv-python
+google-genai
+pyaudio
+pillow
+mss
+requests
+numpy
+playwright
+websockets
+chromadb
+pyautogui
+keyboard
+python-dotenv

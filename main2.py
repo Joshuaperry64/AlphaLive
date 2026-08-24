@@ -1047,6 +1047,7 @@ class AudioLoop:
     async def handle_tool_call_ws(self, data):
         """Handle tool calls from the Modal proxy (includes Playwright tools)."""
         name = data.get("name", "")
+        fc_id = data.get("id", "")
         args = data.get("args", {})
         print(f"\n\n[Tool Executing] {name} with args: {args}")
         result = {"error": f"Unknown function call: {name}"}
@@ -1085,7 +1086,7 @@ class AudioLoop:
         if self.websocket is not None:
             await self.websocket.send(json.dumps({
                 "type": "tool_response",
-                "response": {"name": name, "response": {"result": result}}
+                "response": {"name": name, "id": fc_id, "response": {"result": result}}
             }))
 
         import keyboard
@@ -1146,7 +1147,8 @@ class AudioLoop:
 
     async def _run_modal(self):
         """Route through the Modal WebSocket proxy. Playwright runs locally for browser control."""
-        config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=True)
+        # Use by_alias=False to generate snake_case keys so the Proxy can validate it fully
+        config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=False)
         try:
             # Playwright always starts locally — it controls YOUR browser
             async with async_playwright() as p:

@@ -1462,7 +1462,6 @@ ENGINE_FIELDS = {
         ("Tools",         "toggle", None,                               "Enable code execution tool"),
         ("MCP",           "toggle", None,                               "Enable MCP tools (Playwright etc.)"),
         ("Proactivity",   "toggle", None,                               "Allow Alpha to speak unprompted"),
-        ("AutonomousControl", "toggle", None,                           "Continuously loop actions without user input (100% proactive)"),
         ("Resolution",    "combo",  ["low","medium","high"],            "Media resolution sent to the model"),
         ("ChunkSize",     "spin",   (256, 8192, 256),                   "PyAudio read chunk size in bytes"),
         ("TriggerTokens", "spin",   (10000, 200000, 1000),              "Tokens before context compression fires"),
@@ -1476,6 +1475,7 @@ ENGINE_FIELDS = {
         ("Voice",         "combo",  VOICES,                            "TTS voice"),
         ("Playwright",    "toggle", None,                              "Enable Playwright browser tools"),
         ("Headless",      "combo",  ["false","true"],                  "Run browser headlessly"),
+        ("AutonomousControl", "toggle", None,                           "Continuously loop actions without user input"),
         ("ThinkingLevel", "combo",  ["low","medium","high"],           "Model reasoning depth"),
         ("Resolution",    "combo",  ["low","medium","high"],           "Screen capture quality"),
         ("ChunkSize",     "spin",   (256, 8192, 256),                  "Audio chunk size"),
@@ -1489,6 +1489,7 @@ ENGINE_FIELDS = {
         ("VoiceOutput",   "toggle", None,                              "Enable TTS"),
         ("Voice",         "combo",  VOICES,                            "TTS voice"),
         ("DesktopControl","toggle", None,                              "Enable PyAutoGUI desktop control tools"),
+        ("AutonomousControl", "toggle", None,                           "Continuously loop actions without user input"),
         ("ThinkingLevel", "combo",  ["low","medium","high"],           "Reasoning depth"),
         ("Resolution",    "combo",  ["low","medium","high"],           "Screenshot quality"),
         ("ChunkSize",     "spin",   (256, 8192, 256),                  "Audio chunk size"),
@@ -1768,6 +1769,24 @@ class LaunchSidebar(QFrame):
 
         root.addWidget(hsep())
         
+        root.addWidget(lbl("MODAL ENDPOINT", 8, C["neon_blue"], True, spacing=2))
+        mdl_row = QHBoxLayout()
+        
+        self._deploy_btn = QPushButton("DEPLOY")
+        self._deploy_btn.setFixedHeight(28)
+        self._deploy_btn.clicked.connect(self._do_deploy_modal)
+        
+        self._stop_mdl_btn = QPushButton("STOP APP")
+        self._stop_mdl_btn.setFixedHeight(28)
+        self._stop_mdl_btn.setObjectName("btn_danger")
+        self._stop_mdl_btn.clicked.connect(self._do_stop_modal)
+        
+        mdl_row.addWidget(self._deploy_btn)
+        mdl_row.addWidget(self._stop_mdl_btn)
+        root.addLayout(mdl_row)
+
+        root.addWidget(hsep())
+        
         self._calib_btn = QPushButton("CALIBRATE (main3)")
         self._calib_btn.setFixedHeight(30)
         self._calib_btn.clicked.connect(self._do_calib)
@@ -1797,6 +1816,12 @@ class LaunchSidebar(QFrame):
         self._selected = eng
         for e, b in self._eng_btns.items():
             b.setChecked(e == eng)
+
+    def _do_deploy_modal(self):
+        subprocess.Popen("modal deploy modalmode.py", shell=True)
+
+    def _do_stop_modal(self):
+        subprocess.Popen("modal app stop alphalive-proxy", shell=True)
 
     def _do_calib(self):
         self.calib_requested.emit()

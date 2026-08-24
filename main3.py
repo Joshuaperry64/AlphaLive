@@ -948,24 +948,8 @@ class AudioLoop:
 
     async def _run_modal(self):
         """Route through the Modal WebSocket proxy."""
-        # Strip system_instruction and tools from the config - they are too large for the
-        # LiveConnectConfig handshake. We send them as the first text injection after connecting.
-        config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=True)
-        config_payload.pop("systemInstruction", None)
-        config_payload.pop("tools", None)
-
-        # Build system injection text (condensed system prompt + tool definitions)
-        tool_descriptions = "\n".join([
-            f"- mouse_click(x, y, button): Click a screen coordinate with left/right/middle button",
-            f"- mouse_drag(start_x, start_y, end_x, end_y, button): Click and drag between two coordinates",
-            f"- mouse_scroll(clicks): Scroll the mouse wheel (positive=up, negative=down)",
-            f"- type_text(text): Type text on the keyboard",
-            f"- press_key(key): Press a specific keyboard key",
-            f"- memorize_fact(subject, predicate, object_, source): Save a fact to memory",
-            f"- recall_knowledge(query_subject): Fetch facts from memory",
-            f"- write_diary_entry(content, session_name, sentiment): Log a diary entry",
-            f"- update_personality(trait_name, trait_value): Update personality trait in memory",
-        ])
+        # Use by_alias=False to generate snake_case keys so the Proxy can validate it natively
+        config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=False)
 
         try:
             while True:

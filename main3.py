@@ -46,7 +46,7 @@ CHUNK_SIZE = int(engine_cfg.get("ChunkSize", 1024))
 MODEL = "models/gemini-3.1-flash-live-preview"
 
 DEFAULT_MODE = engine_cfg.get("VisionMode", "screen")
-AUTONOMOUS = engine_cfg.get("AutonomousControl", "disabled").lower() in ("enabled", "true")
+AUTONOMOUS = global_cfg.get("AutonomousControl", "disabled").lower() in ("enabled", "true")
 api_key = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", global_cfg.get("ApiKey", "")))
 WS_URL = os.environ.get("ALPHALIVE_WS_URL", "off")
 client = genai.Client(

@@ -1,12 +1,3 @@
-#!/usr/bin/env python3
-"""
-AlphaLive GUI - Cyberpunk Control Interface
-AlphaCore v4.0 -- Sentient Interface Layer
-
-Dark aesthetic, heavily animated, cyber-themed control center
-for the AlphaLive AI system.
-"""
-
 import os
 import sys
 if sys.platform == 'win32':

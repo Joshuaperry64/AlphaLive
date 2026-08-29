@@ -1,5 +1,5 @@
 import modal
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import asyncio
 import json
 import base64
@@ -20,6 +20,12 @@ image = modal.Image.debian_slim().pip_install(
 @web_app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    send_lock = asyncio.Lock()
+
+    async def send_json(payload):
+        # Starlette/WebSocket sends must not race across proxy tasks.
+        async with send_lock:
+            await websocket.send_json(payload)
     
     try:
         init_data = await websocket.receive_text()
@@ -45,16 +51,17 @@ async def websocket_endpoint(websocket: WebSocket):
                         while True:
                             turn = session.receive()
                             async for response in turn:
-                                sc = response.server_content
-                                if sc and sc.model_turn:
+                                sc = getattr(response, "server_content", None)
+                                if sc and getattr(sc, "model_turn", None):
                                     for part in sc.model_turn.parts:
-                                        if part.inline_data and hasattr(part.inline_data, 'data'):
-                                            b64_audio = base64.b64encode(part.inline_data.data).decode('utf-8')
-                                            await websocket.send_json({"type": "audio", "data": b64_audio})
+                                        inline_data = getattr(part, "inline_data", None)
+                                        if inline_data and hasattr(inline_data, 'data'):
+                                            b64_audio = base64.b64encode(inline_data.data).decode('utf-8')
+                                            await send_json({"type": "audio", "data": b64_audio})
                                         if hasattr(part, "text") and part.text:
-                                            await websocket.send_json({"type": "text", "data": part.text})
-                                        if part.function_call:
-                                            fc = part.function_call
+                                            await send_json({"type": "text", "data": part.text})
+                                        fc = getattr(part, "function_call", None)
+                                        if fc:
                                             args_dict = {}
                                             try:
                                                 if fc.args:
@@ -66,45 +73,70 @@ async def websocket_endpoint(websocket: WebSocket):
                                                         args_dict = fc.args
                                             except:
                                                 pass
-                                            await websocket.send_json({
+                                            await send_json({
                                                 "type": "function_call", 
                                                 "name": fc.name, 
-                                                "id": fc.id,  
+                                                "id": getattr(fc, "id", None),
                                                 "args": args_dict
                                             })
-                                if getattr(sc, 'output_transcription', None):
-                                    await websocket.send_json({"type": "output_transcription", "data": sc.output_transcription.text})
-                                if getattr(sc, 'input_transcription', None):
-                                    await websocket.send_json({"type": "input_transcription", "data": sc.input_transcription.text})
-                            await websocket.send_json({"type": "turn_complete"})
+                                output_transcription = getattr(sc, 'output_transcription', None) if sc else None
+                                input_transcription = getattr(sc, 'input_transcription', None) if sc else None
+                                if output_transcription and getattr(output_transcription, "text", None):
+                                    await send_json({"type": "output_transcription", "data": output_transcription.text})
+                                if input_transcription and getattr(input_transcription, "text", None):
+                                    await send_json({"type": "input_transcription", "data": input_transcription.text})
+                            await send_json({"type": "turn_complete"})
+                    except WebSocketDisconnect:
+                        raise
                     except Exception as e:
                         print(f"Google disconnect: {e}")
                         try:
-                            await websocket.send_json({"type": "error", "data": f"Gemini stream error: {e}"})
+                            await send_json({"type": "error", "data": f"Gemini stream error: {e}"})
                         except: pass
+                        raise
 
                 async def receive_from_client():
                     try:
                         while True:
                             msg = await websocket.receive_text()
                             data = json.loads(msg)
-                            if data["type"] == "audio":
+                            message_type = data.get("type")
+                            if message_type == "heartbeat":
+                                await send_json({
+                                    "type": "heartbeat_ack",
+                                    "id": data.get("id"),
+                                    "timestamp": data.get("timestamp"),
+                                })
+                            elif message_type == "audio":
                                 raw_audio = base64.b64decode(data["data"])
                                 await session.send_realtime_input(audio=types.Blob(data=raw_audio, mime_type="audio/pcm"))
-                            elif data["type"] == "video":
+                            elif message_type == "video":
                                 raw_video = base64.b64decode(data["data"])
                                 await session.send_realtime_input(video=types.Blob(data=raw_video, mime_type="image/jpeg"))
-                            elif data["type"] == "text":
+                            elif message_type == "text":
                                 await session.send_realtime_input(text=data["data"])
-                            elif data["type"] == "tool_response":
+                            elif message_type == "tool_response":
                                 resp = data["response"]
                                 await session.send_tool_response(function_responses=[
                                     types.FunctionResponse(name=resp["name"], id=resp.get("id"), response=resp.get("response", {}))
                                 ])
+                    except WebSocketDisconnect:
+                        raise
                     except Exception as e:
                         print(f"Client disconnect: {e}")
+                        raise
 
-                await asyncio.gather(receive_from_google(), receive_from_client())
+                google_task = asyncio.create_task(receive_from_google())
+                client_task = asyncio.create_task(receive_from_client())
+                done, pending = await asyncio.wait(
+                    {google_task, client_task},
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done:
+                    task.result()
                 
         except Exception as gemini_err:
             print(f"[Proxy] Connection failed: {gemini_err}")
@@ -112,7 +144,7 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         print(f"[Proxy] Proxy failure: {e}")
 
-@app.function(image=image, max_containers=1, scaledown_window=1800, timeout=3600)
+@app.function(image=image, cpu=2.0, memory=1024, max_containers=1, scaledown_window=1800, timeout=3600)
 @modal.asgi_app()
 def fastapi_app():
     return web_app

@@ -12,6 +12,7 @@ if (-not (Test-Path $configFile)) {
             Modal = 'enabled'
             Memory = 'enabled'
             AlphaCoreInstruction = 'enabled'
+            AutonomousControl = 'disabled'
         }
         'main.py' = @{
             AudioMode = 'half'
@@ -26,6 +27,7 @@ if (-not (Test-Path $configFile)) {
             ChunkSize = '1024'
             TriggerTokens = '104857'
             TargetTokens = '52428'
+            FileSystem = 'enabled'
         }
         'main2.py' = @{
             AudioMode = 'half'
@@ -40,6 +42,8 @@ if (-not (Test-Path $configFile)) {
             ChunkSize = '1024'
             TriggerTokens = '104857'
             TargetTokens = '52428'
+            FileSystem = 'enabled'
+            Proactivity = 'enabled'
         }
         'main3.py' = @{
             AudioMode = 'half'
@@ -53,6 +57,8 @@ if (-not (Test-Path $configFile)) {
             ChunkSize = '1024'
             TriggerTokens = '104857'
             TargetTokens = '52428'
+            FileSystem = 'enabled'
+            Proactivity = 'enabled'
         }
     }
     $defaultConfig | ConvertTo-Json -Depth 10 | Set-Content $configFile
@@ -92,7 +98,7 @@ while (-not $scriptDone) {
     Write-Host 'Press 0, 1, 2, or 3 (Enter = GUI): ' -ForegroundColor Yellow -NoNewline
     
     $key = [console]::ReadKey($true)
-    if ($key.KeyChar -eq '0' -or $key.Key -eq 'Enter') { $selectedScript = 'alphalive_gui.py'; $scriptDone = $true }
+    if ($key.KeyChar -eq '0' -or $key.Key -eq 'Enter') { $selectedScript = 'gui.py'; $scriptDone = $true }
     elseif ($key.KeyChar -eq '1') { $selectedScript = 'main.py'; $scriptDone = $true }
     elseif ($key.KeyChar -eq '2') { $selectedScript = 'main2.py'; $scriptDone = $true }
     elseif ($key.KeyChar -eq '3') { $selectedScript = 'main3.py'; $scriptDone = $true }
@@ -150,9 +156,24 @@ function Show-Menu {
             if ($idx -ge 0 -and $idx -lt $props.Count) {
                 $p = $props[$idx]
                 $currentVal = $obj.$p
-                $newVal = Read-Host "Enter new value for $p (Current: $currentVal)"
-                if (-not [string]::IsNullOrWhiteSpace($newVal)) {
-                    $obj.$p = $newVal
+                $booleanFields = @('Modal','Memory','AlphaCoreInstruction','AutonomousControl','VoiceOutput','Tools','FileSystem','MCP','Proactivity','Playwright','DesktopControl')
+                if ($booleanFields -contains $p) {
+                    Write-Host '[1] enabled' -ForegroundColor Cyan
+                    Write-Host '[2] disabled' -ForegroundColor Cyan
+                    $toggle = Read-Host "Select value for $p (Current: $currentVal)"
+                    if ($toggle -eq '1') { $obj.$p = 'enabled' }
+                    elseif ($toggle -eq '2') { $obj.$p = 'disabled' }
+                } elseif ($p -eq 'Headless') {
+                    Write-Host '[1] false' -ForegroundColor Cyan
+                    Write-Host '[2] true' -ForegroundColor Cyan
+                    $toggle = Read-Host "Select value for $p (Current: $currentVal)"
+                    if ($toggle -eq '1') { $obj.$p = 'false' }
+                    elseif ($toggle -eq '2') { $obj.$p = 'true' }
+                } else {
+                    $newVal = Read-Host "Enter new value for $p (Current: $currentVal)"
+                    if (-not [string]::IsNullOrWhiteSpace($newVal)) {
+                        $obj.$p = $newVal
+                    }
                 }
             }
         }
@@ -177,16 +198,16 @@ if ($configEntered) {
         if ($choice -eq '0' -or $choice -eq '') {
             $mainDone = $true
         } elseif ($choice -eq '1') {
-            $props = @('ApiKey', 'Session', 'Modal', 'Memory', 'AlphaCoreInstruction')
+            $props = @('ApiKey', 'Session', 'Modal', 'Memory', 'AlphaCoreInstruction', 'AutonomousControl')
             Show-Menu 'Global Settings' $props $config.Global
         } elseif ($choice -eq '2') {
-            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'Tools', 'MCP', 'Proactivity', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
+            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'Tools', 'FileSystem', 'MCP', 'Proactivity', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
             Show-Menu 'main.py Settings' $props $config.'main.py'
         } elseif ($choice -eq '3') {
-            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'Playwright', 'Headless', 'ThinkingLevel', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
+            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'Playwright', 'FileSystem', 'Headless', 'Proactivity', 'ThinkingLevel', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
             Show-Menu 'main2.py Settings' $props $config.'main2.py'
         } elseif ($choice -eq '4') {
-            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'DesktopControl', 'ThinkingLevel', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
+            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'DesktopControl', 'FileSystem', 'Proactivity', 'ThinkingLevel', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
             Show-Menu 'main3.py Settings' $props $config.'main3.py'
         }
     }
@@ -228,6 +249,7 @@ if (Test-Path "$ScriptDir\.venv\Scripts\Activate.ps1") {
 $env:ALPHALIVE_CONFIG = $configFile
 $env:ALPHALIVE_ENGINE = $selectedScript
 $env:ALPHALIVE_WS_URL = $wsUrl
+$env:ALPHALIVE_SESSION = [string]$config.Global.Session
 if (-not [string]::IsNullOrWhiteSpace($config.Global.ApiKey)) {
     $env:GEMINI_API_KEY = $config.Global.ApiKey
 }

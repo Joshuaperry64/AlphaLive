@@ -5,6 +5,7 @@ import io
 import traceback
 import json
 import base64
+import re
 
 import websockets
 import cv2
@@ -244,7 +245,7 @@ trigger_val = int(engine_cfg.get("TriggerTokens", 104857))
 target_val = int(engine_cfg.get("TargetTokens", 52428))
 
 CONFIG = types.LiveConnectConfig(
-    response_modalities=["AUDIO"],
+    response_modalities=["TEXT"] if engine_cfg.get("VoiceOutput", "enabled").lower() in ("disabled", "false", "off") or engine_cfg.get("AudioMode", "half").lower() == "muted" else ["AUDIO"],
     input_audio_transcription=types.AudioTranscriptionConfig(),
     output_audio_transcription=types.AudioTranscriptionConfig(),
     media_resolution=res_val,
@@ -473,13 +474,21 @@ class AudioLoop:
         self.video_mode = video_mode
         self.audio_in_queue = None
         self.out_queue = None
+        self.video_queue = None
         self.session = None
         self.audio_stream = None
         self.is_ai_speaking = False
         self.websocket = None
+        self.websocket_send_lock = asyncio.Lock()
+        self.last_heartbeat_ack = 0.0
+        self.heartbeat_counter = 0
         self.last_ai_speech_time = 0.0
         self.autonomous = AUTONOMOUS
-        self.log_file = f"{global_cfg.get('Session', 'deziree')}.txt"
+        self.stop_event = asyncio.Event()
+        self.audio_output_stream = None
+        session_name = os.environ.get("ALPHALIVE_SESSION", global_cfg.get("Session", "deziree"))
+        session_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_name).strip()) or "default"
+        self.log_file = os.path.join("history", f"{session_name}.txt")
         self.mm = memory_manager.MemoryManager()
 
         self.send_text_task = None
@@ -491,7 +500,6 @@ class AudioLoop:
         self.is_ai_speaking = False
         self.last_ai_speech_time = 0.0
 
-        self.log_file = "history/chat_log.txt"
         os.makedirs("history", exist_ok=True)
 
     async def send_text(self):
@@ -501,6 +509,7 @@ class AudioLoop:
                 "message > ",
             )
             if text.lower() == "q":
+                self.stop_event.set()
                 break
             if self.session is not None:
                 await self.session.send_realtime_input(text=text or ".")
@@ -556,6 +565,9 @@ class AudioLoop:
         image_bytes = mss.tools.to_png(i.rgb, i.size)
         img = PIL.Image.open(io.BytesIO(image_bytes))
 
+        # Fix: Compress image so we don't choke the stream
+        img.thumbnail([1024, 1024])
+
         image_io = io.BytesIO()
         img.save(image_io, format="jpeg", quality=40, optimize=True)
         image_io.seek(0)
@@ -600,7 +612,7 @@ class AudioLoop:
             frames_per_buffer=CHUNK_SIZE,
         )
         kwargs = {"exception_on_overflow": False}
-        while True:
+        while not self.stop_event.is_set():
             data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
             
             if self.is_ai_speaking or (time.time() - self.last_ai_speech_time < 0.40):
@@ -631,7 +643,7 @@ class AudioLoop:
                     if sc := getattr(response, "server_content", None):
                         if input_transcript := getattr(sc, "input_transcription", None):
                             user_text = input_transcript.text
-                            print(f"\n\n[You]: {user_text}\n[Gemini]: ", end="", flush=True)
+                            print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
                             
                             with open(self.log_file, "a", encoding="utf-8") as f:
                                 f.write(f"\n[You]: {user_text}\n[Gemini]: ")
@@ -757,33 +769,64 @@ class AudioLoop:
             rate=RECEIVE_SAMPLE_RATE,
             output=True,
         )
-        while True:
-            if self.audio_in_queue is not None:
-                bytestream = await self.audio_in_queue.get()
-                self.is_ai_speaking = True
-                await asyncio.to_thread(stream.write, bytestream)
-                if self.audio_in_queue.empty():
-                    self.is_ai_speaking = False
-                    self.last_ai_speech_time = time.time()
+        self.audio_output_stream = stream
+        try:
+            while not self.stop_event.is_set():
+                if self.audio_in_queue is not None:
+                    try:
+                        bytestream = await asyncio.wait_for(self.audio_in_queue.get(), timeout=0.25)
+                    except asyncio.TimeoutError:
+                        continue
+                    self.is_ai_speaking = True
+                    await asyncio.to_thread(stream.write, bytestream)
+                    if self.audio_in_queue.empty():
+                        self.is_ai_speaking = False
+                        self.last_ai_speech_time = time.time()
+        finally:
+            stream.stop_stream()
+            stream.close()
+            self.audio_output_stream = None
 
     # ── Modal WebSocket helpers ────────────────────────────────────────────
 
     async def send_text_ws(self):
-        while True:
+        while not self.stop_event.is_set():
             text = await asyncio.to_thread(input, "message > ")
             if text.lower() == "q":
+                self.stop_event.set()
                 break
             if self.websocket is not None:
-                await self.websocket.send(json.dumps({"type": "text", "data": text or "."}))
+                await self.send_ws_json({"type": "text", "data": text or "."})
                 with open(self.log_file, "a", encoding="utf-8") as f:
                     f.write(f"\n[You]: {text}\n[Gemini]: ")
 
+    async def send_ws_json(self, payload, websocket=None):
+        target = websocket or self.websocket
+        if target is None:
+            return
+        async with self.websocket_send_lock:
+            await target.send(json.dumps(payload))
+
+    async def heartbeat_ws(self):
+        while not self.stop_event.is_set():
+            await asyncio.sleep(15)
+            if self.websocket is None:
+                continue
+            self.heartbeat_counter += 1
+            await self.send_ws_json({
+                "type": "heartbeat",
+                "id": self.heartbeat_counter,
+                "timestamp": time.time(),
+            })
+            if self.last_heartbeat_ack and time.time() - self.last_heartbeat_ack > 45:
+                raise ConnectionError("Modal heartbeat acknowledgment timed out")
+
     async def send_realtime_ws(self):
-        while True:
+        while not self.stop_event.is_set():
             if self.out_queue is not None:
                 msg = await self.out_queue.get()
                 if self.websocket is not None:
-                    await self.websocket.send(json.dumps(msg))
+                    await self.send_ws_json(msg)
 
     async def listen_audio_ws(self):
         mic_info = pya.get_default_input_device_info()
@@ -797,7 +840,7 @@ class AudioLoop:
             frames_per_buffer=CHUNK_SIZE,
         )
         kwargs = {"exception_on_overflow": False}
-        while True:
+        while not self.stop_event.is_set():
             data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
             if self.is_ai_speaking or (time.time() - self.last_ai_speech_time < 0.40):
                 continue
@@ -822,6 +865,10 @@ class AudioLoop:
             i = sct.grab(monitor)
             image_bytes = mss.tools.to_png(i.rgb, i.size)
             img = PIL.Image.open(io.BytesIO(image_bytes))
+            
+            # Fix: Compress massive payload to stop choking the Modal proxy
+            img.thumbnail([1024, 1024])
+            
             image_io = io.BytesIO()
             img.save(image_io, format="jpeg", quality=40, optimize=True)
             return base64.b64encode(image_io.getvalue()).decode("utf-8")
@@ -838,27 +885,40 @@ class AudioLoop:
         return base64.b64encode(image_io.getvalue()).decode("utf-8")
 
     async def get_screen_ws(self):
-        while True:
+        while not self.stop_event.is_set():
             b64 = await asyncio.to_thread(self._get_screen_b64)
             await asyncio.sleep(1.0)
-            if self.out_queue is not None:
+            if self.video_queue is not None:
                 try:
-                    self.out_queue.put_nowait({"type": "video", "data": b64})
+                    self.video_queue.put_nowait({"type": "video", "data": b64})
                 except asyncio.QueueFull:
-                    pass
+                    try:
+                        self.video_queue.get_nowait()
+                        self.video_queue.put_nowait({"type": "video", "data": b64})
+                    except Exception:
+                        pass
 
     async def get_frames_ws(self):
         cap = await asyncio.to_thread(cv2.VideoCapture, 0)
-        while True:
+        while not self.stop_event.is_set():
             b64 = await asyncio.to_thread(self._get_frame_b64, cap)
             if b64 is None:
                 break
             await asyncio.sleep(2.0)
-            if self.out_queue is not None:
+            if self.video_queue is not None:
                 try:
-                    self.out_queue.put_nowait({"type": "video", "data": b64})
+                    self.video_queue.put_nowait({"type": "video", "data": b64})
                 except asyncio.QueueFull:
                     pass
+
+    async def send_video_ws(self):
+        while not self.stop_event.is_set():
+            if self.video_queue is None:
+                await asyncio.sleep(0.05)
+                continue
+            msg = await self.video_queue.get()
+            if self.websocket is not None:
+                await self.send_ws_json(msg)
         cap.release()
 
     async def handle_tool_call_ws(self, data):
@@ -872,80 +932,87 @@ class AudioLoop:
             if name == "mouse_click":
                 x, y = int(args.get("x", 0)), int(args.get("y", 0))
                 button = args.get("button", "left")
-                pyautogui.click(x=x, y=y, button=button)
+                await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button)
                 result = {"result": f"Clicked ({x}, {y}) with {button}. Inspect visual and continue if incomplete."}
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
-                pyautogui.scroll(clicks)
+                await asyncio.to_thread(pyautogui.scroll, clicks)
                 result = {"result": f"Scrolled {clicks} units."}
             elif name == "mouse_drag":
                 sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
                 ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
                 button = args.get("button", "left")
-                pyautogui.moveTo(sx, sy)
-                pyautogui.dragTo(ex, ey, button=button, duration=0.5)
+                await asyncio.to_thread(pyautogui.moveTo, sx, sy)
+                await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.5)
                 result = {"result": f"Dragged from ({sx}, {sy}) to ({ex}, {ey})."}
             elif name == "type_text":
                 text = args.get("text", "")
-                pyautogui.write(text, interval=0.01)
+                await asyncio.to_thread(pyautogui.write, text, interval=0.01)
                 result = {"result": f"Typed: '{text}'. Continue execution."}
             elif name == "press_key":
                 key = args.get("key", "").lower()
-                pyautogui.press(key)
+                await asyncio.to_thread(pyautogui.press, key)
                 result = {"result": f"Pressed: '{key}'. Continue execution."}
             elif name == "memorize_fact":
-                success = self.mm.memorize_fact(args.get("subject",""), args.get("predicate",""), args.get("object_",""), args.get("source","conversation"))
+                success = await asyncio.to_thread(self.mm.memorize_fact, args.get("subject",""), args.get("predicate",""), args.get("object_",""), args.get("source","conversation"))
                 result = {"result": "Fact memorized." if success else "Failed to memorize."}
             elif name == "recall_knowledge":
-                facts = self.mm.recall_knowledge(args.get("query_subject",""))
+                facts = await asyncio.to_thread(self.mm.recall_knowledge, args.get("query_subject",""))
                 result = {"result": facts if facts else "No facts found."}
             elif name == "write_diary_entry":
-                success = self.mm.write_diary_entry(args.get("content",""), args.get("session_name","AlphaLive"), args.get("sentiment",0.0))
+                success = await asyncio.to_thread(self.mm.write_diary_entry, args.get("content",""), args.get("session_name","AlphaLive"), args.get("sentiment",0.0))
                 result = {"result": "Diary entry written." if success else "Failed."}
             elif name == "update_personality":
-                success = self.mm.update_personality(args.get("trait_name",""), args.get("trait_value",""))
+                success = await asyncio.to_thread(self.mm.update_personality, args.get("trait_name",""), args.get("trait_value",""))
                 result = {"result": "Personality updated." if success else "Failed."}
             elif name == "list_directory":
-                items = os.listdir(args.get("path", "."))
+                items = await asyncio.to_thread(os.listdir, args.get("path", "."))
                 result = {"result": f"Contents: {', '.join(items)}"}
             elif name == "read_file":
-                with open(args.get("path", ""), "r", encoding="utf-8") as f:
-                    content = f.read()
+                def read_tool_file():
+                    with open(args.get("path", ""), "r", encoding="utf-8") as f:
+                        return f.read()
+                content = await asyncio.to_thread(read_tool_file)
                 if len(content) > 15000:
                     content = content[:15000] + "\n...[TRUNCATED]"
                 result = {"result": content}
             elif name == "write_file":
-                with open(args.get("path", ""), "w", encoding="utf-8") as f:
-                    f.write(args.get("content", ""))
+                def write_tool_file():
+                    with open(args.get("path", ""), "w", encoding="utf-8") as f:
+                        f.write(args.get("content", ""))
+                await asyncio.to_thread(write_tool_file)
                 result = {"result": "File written successfully."}
         except Exception as e:
             result = {"error": f"Failed to execute {name}: {str(e)}"}
 
         print(f"[Tool Finished] Sending result back to Modal proxy...\n")
         if self.websocket is not None:
-            await self.websocket.send(json.dumps({
+            await self.send_ws_json({
                 "type": "tool_response",
                 "response": {
                     "name": name, 
                     "id": fc_id,
                     "response": {"result": result}
                 }
-            }))
+            })
 
         if keyboard.is_pressed("ctrl+z"):
             print("\n[System] Abort command (Ctrl+Z) detected! Halting continuous chain.")
             self.autonomous = False
             if self.websocket is not None:
-                await self.websocket.send(json.dumps({"type": "text", "data": "[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this."}))
+                await self.send_ws_json({"type": "text", "data": "[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this."})
 
     async def receive_from_modal(self):
-        while True:
+        while not self.stop_event.is_set():
             if self.websocket is not None:
                 try:
                     msg = await self.websocket.recv()
                     data = json.loads(msg)
 
-                    if data["type"] == "audio":
+                    if data["type"] == "heartbeat_ack":
+                        self.last_heartbeat_ack = time.time()
+
+                    elif data["type"] == "audio":
                         self.is_ai_speaking = True
                         raw_audio = base64.b64decode(data["data"])
                         self.audio_in_queue.put_nowait(raw_audio)
@@ -956,11 +1023,18 @@ class AudioLoop:
                         with open(self.log_file, "a", encoding="utf-8") as f:
                             f.write(text)
 
-                    elif data["type"] == "input_transcript":
+                    elif data["type"] in ("input_transcript", "input_transcription"):
                         user_text = data["data"]
-                        print(f"\n\n[You]: {user_text}\n[Gemini]: ", end="", flush=True)
+                        print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
                         with open(self.log_file, "a", encoding="utf-8") as f:
                             f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+
+                    elif data["type"] == "output_transcription":
+                        text = data.get("data", "")
+                        if text:
+                            print(text, end="", flush=True)
+                            with open(self.log_file, "a", encoding="utf-8") as f:
+                                f.write(text)
 
                     elif data["type"] == "turn_complete":
                         self.is_ai_speaking = False
@@ -971,7 +1045,7 @@ class AudioLoop:
                         if self.autonomous:
                             await asyncio.sleep(0.5)
                             try:
-                                await self.websocket.send(json.dumps({"type": "text", "data": "[System]: Continue your objective. Take action."}))
+                                await self.send_ws_json({"type": "text", "data": "[System]: Continue your objective. Take action."})
                             except Exception as auto_err:
                                 print(f"\n[System] Autonomous continue error: {auto_err}")
 
@@ -983,7 +1057,7 @@ class AudioLoop:
 
                 except Exception as e:
                     print(f"\n[System] Disconnected from Modal proxy: {e}")
-                    break
+                    raise
 
     # ── Main run() — branches on WS_URL ───────────────────────────────────
 
@@ -1002,8 +1076,16 @@ class AudioLoop:
             while True:
                 try:
                     print("\n[System] Waking up Modal cloud proxy. Please wait for container warm up...")
-                    async with websockets.connect(WS_URL, max_size=10**8, open_timeout=60) as ws:
+                    async with websockets.connect(
+                        WS_URL,
+                        max_size=10**8,
+                        open_timeout=60,
+                        ping_interval=20,
+                        ping_timeout=20,
+                        close_timeout=10,
+                    ) as ws:
                         self.websocket = ws
+                        self.last_heartbeat_ack = time.time()
                         init_msg = json.dumps({"api_key": api_key, "config": config_payload})
                         await ws.send(init_msg)
                         print("[System] Modal proxy connected!")
@@ -1032,11 +1114,14 @@ class AudioLoop:
 
                         self.audio_in_queue = asyncio.Queue()
                         self.out_queue = asyncio.Queue(maxsize=5)
+                        self.video_queue = asyncio.Queue(maxsize=2)
 
                         async with asyncio.TaskGroup() as tg:
                             send_text_task = tg.create_task(self.send_text_ws())
                             tg.create_task(self.send_realtime_ws())
+                            tg.create_task(self.send_video_ws())
                             tg.create_task(self.listen_audio_ws())
+                            tg.create_task(self.heartbeat_ws())
 
                             if self.video_mode == "camera":
                                 tg.create_task(self.get_frames_ws())
@@ -1063,8 +1148,15 @@ class AudioLoop:
         except asyncio.CancelledError:
             print("\n[System] Exiting cleanly...")
         finally:
+            self.stop_event.set()
             if self.audio_stream is not None:
+                self.audio_stream.stop_stream()
                 self.audio_stream.close()
+                self.audio_stream = None
+            if self.audio_output_stream is not None:
+                self.audio_output_stream.stop_stream()
+                self.audio_output_stream.close()
+                self.audio_output_stream = None
 
     async def _run_direct(self):
         """Connect directly to the Gemini Live API SDK."""
@@ -1135,8 +1227,17 @@ class AudioLoop:
         except asyncio.CancelledError:
             print("\n[System] Exiting cleanly...")
         finally:
+            self.stop_event.set()
             if self.audio_stream is not None:
+                self.audio_stream.stop_stream()
                 self.audio_stream.close()
+                self.audio_stream = None
+            if self.audio_output_stream is not None:
+                self.audio_output_stream.stop_stream()
+                self.audio_output_stream.close()
+                self.audio_output_stream = None
+            self.session = None
+            self.websocket = None
 
 
 
@@ -1156,4 +1257,9 @@ async def main():
     await loop.run()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        pya.terminate()

@@ -4,6 +4,7 @@ import io
 import traceback
 import json
 import base64
+import re
 
 import websockets
 import cv2
@@ -483,6 +484,11 @@ class AudioLoop:
         self.websocket = None
         self.last_ai_speech_time = 0.0
         self.autonomous = AUTONOMOUS
+        self.stop_event = asyncio.Event()
+        self.audio_output_stream = None
+        session_name = os.environ.get("ALPHALIVE_SESSION", global_cfg.get("Session", "deziree"))
+        session_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_name).strip()) or "default"
+        self.log_file = os.path.join("history", f"{session_name}.txt")
         
         # Playwright instances
         self.playwright = None
@@ -490,7 +496,6 @@ class AudioLoop:
         self.page = None
 
         # Setup persistent history
-        self.log_file = "history/chat_log.txt"
         os.makedirs("history", exist_ok=True)
 
     async def send_text(self):
@@ -500,6 +505,7 @@ class AudioLoop:
                 "message > ",
             )
             if text.lower() == "q":
+                self.stop_event.set()
                 break
             if self.session is not None:
                 await self.session.send_realtime_input(text=text or ".")
@@ -1003,6 +1009,7 @@ class AudioLoop:
         while True:
             text = await asyncio.to_thread(input, "message > ")
             if text.lower() == "q":
+                self.stop_event.set()
                 break
             if self.websocket is not None:
                 await self.websocket.send(json.dumps({"type": "text", "data": text or "."}))
@@ -1162,11 +1169,18 @@ class AudioLoop:
                         with open(self.log_file, "a", encoding="utf-8") as f:
                             f.write(text)
 
-                    elif data["type"] == "input_transcript":
+                    elif data["type"] in ("input_transcript", "input_transcription"):
                         user_text = data["data"]
                         print(f"\n\n[You]: {user_text}\n[Gemini]: ", end="", flush=True)
                         with open(self.log_file, "a", encoding="utf-8") as f:
                             f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+
+                    elif data["type"] == "output_transcription":
+                        text = data.get("data", "")
+                        if text:
+                            print(text, end="", flush=True)
+                            with open(self.log_file, "a", encoding="utf-8") as f:
+                                f.write(text)
 
                     elif data["type"] == "turn_complete":
                         self.is_ai_speaking = False
@@ -1358,7 +1372,12 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main = AudioLoop(video_mode=args.mode)
-    asyncio.run(main.run())
+    try:
+        asyncio.run(main.run())
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        pya.terminate()
 
 
 

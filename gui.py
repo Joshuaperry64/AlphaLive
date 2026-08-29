@@ -1,5 +1,25 @@
 import os
 import sys
+
+
+def _ensure_project_venv():
+    """Relaunch this script with the workspace venv when needed."""
+    if sys.platform != "win32" or os.environ.get("ALPHALIVE_VENV_READY") == "1":
+        return
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    venv_python = os.path.join(script_dir, ".venv", "Scripts", "python.exe")
+    current_python = os.path.normcase(os.path.abspath(sys.executable))
+    expected_python = os.path.normcase(os.path.abspath(venv_python))
+
+    if os.path.isfile(venv_python) and current_python != expected_python:
+        env = os.environ.copy()
+        env["ALPHALIVE_VENV_READY"] = "1"
+        os.execve(venv_python, [venv_python, os.path.abspath(__file__), *sys.argv[1:]], env)
+
+
+_ensure_project_venv()
+
 if sys.platform == 'win32':
     import ctypes
     try:
@@ -963,6 +983,7 @@ class TerminalTab(QWidget):
         if t:
             self._inp.clear()
             self.append(f"[YOU] {t}", C["neon_cyan"])
+            self.append("[Processing...]", C["neon_yellow"])
             self.send_text_requested.emit(t)
 
     def append(self, text: str, color: str = None):
@@ -1427,6 +1448,7 @@ class GlobalPanel(QWidget):
         for k, label, tip in [
             ("AlphaCoreInstruction", "AlphaCore Instruction", "Inject AGENTS.md as system prompt"),
             ("Memory",               "Session Memory",        "Persist and restore conversation context"),
+            ("AutonomousControl",    "Autonomous Control",     "Allow the engine to continue acting without waiting for input"),
         ]:
             sw = CyberToggle(g.get(k, "enabled").lower() in ("enabled","true"))
             self._w[k] = sw

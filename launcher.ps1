@@ -228,6 +228,7 @@ $wsUrl = 'off'
 
 if ($config.Global.Modal -eq 'enabled' -or $config.Global.Modal -eq 'true') {
     Write-Host '[System] Compiling and deploying cloud architecture to Modal...'
+    $env:PYTHONIOENCODING = "utf-8"
     modal deploy modalmode.py *>$null
     if ($config.Global.Memory -eq 'enabled') {
         Write-Host '[System] ChromaDB Vector Memory Online.'

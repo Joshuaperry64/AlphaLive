@@ -49,13 +49,13 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox, QMessageBox
 )
 from PyQt6.QtCore import (
-    Qt, QTimer, QThread, pyqtSignal, QRect, QSize, QPoint,
+    Qt, QTimer, QThread, QProcess, pyqtSignal, QRect, QSize, QPoint,
     QRectF, QPointF
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QPainter, QPen, QBrush,
     QLinearGradient, QRadialGradient, QFontMetrics,
-    QTextCharFormat, QPainterPath
+    QTextCharFormat, QTextBlockFormat, QPainterPath
 )
 
 
@@ -112,6 +112,9 @@ DEFAULT_CONFIG = {
         "Modal": "enabled", "Memory": "enabled",
         "AlphaCoreInstruction": "enabled",
         "AutonomousControl": "disabled",
+        "NsfwMode": "disabled",
+        "UncensoredMode": "disabled",
+        "LuciMode": "disabled",
     },
     "main.py": {
         "AudioMode": "half", "VisionMode": "continuous",
@@ -932,12 +935,12 @@ class TerminalTab(QWidget):
         # Output
         self._out = QTextEdit()
         self._out.setReadOnly(True)
-        self._out.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._out.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._out.setStyleSheet(f"""
             background:{C['bg_deep']};
             color:{C['neon_green']};
             border:1px solid {C['border']};
-            font-family:'{FONT_MONO}'; font-size:11px; padding:8px;
+            font-family:'Segoe UI', '{FONT_MONO}'; font-size:12px; padding:8px;
         """)
         root.addWidget(self._out, 1)
 
@@ -946,7 +949,7 @@ class TerminalTab(QWidget):
         inp_row.setSpacing(6)
         prompt = lbl(">>", 11, C["neon_blue"], True, True)
         self._inp = QLineEdit()
-        self._inp.setPlaceholderText("Send message to Alpha (not yet wired to stdin—use voice or the engine's console)...")
+        self._inp.setPlaceholderText("Send message to Alpha (not yet wired to stdin-use voice or the engine's console)...")
         self._inp.setStyleSheet(f"""
             background:{C['bg_deep']};
             color:{C['text_bright']};
@@ -955,30 +958,26 @@ class TerminalTab(QWidget):
             font-family:'{FONT_MONO}'; font-size:11px;
             padding:5px 8px;
         """)
-        self._send = QPushButton("SEND")
-        self._send.setFixedWidth(72)
-        self._send.setStyleSheet(f"""
-            background:{C['neon_blue']}18;
-            border:1px solid {C['neon_blue']};
-            color:{C['neon_blue']}; font-weight:bold;
-        """)
+        self._inp.returnPressed.connect(self._send)
+        self._send_btn = QPushButton("SEND")
+        self._send_btn.setFixedHeight(26)
+        self._send_btn.clicked.connect(self._send)
         inp_row.addWidget(prompt)
         inp_row.addWidget(self._inp, 1)
-        inp_row.addWidget(self._send)
+        inp_row.addWidget(self._send_btn)
         root.addLayout(inp_row)
-
+        
         self._lines = 0
-        self._clear_btn.clicked.connect(self._out.clear)
-        self._wrap_btn.toggled.connect(
-            lambda c: self._out.setLineWrapMode(
-                QTextEdit.LineWrapMode.WidgetWidth if c
-                else QTextEdit.LineWrapMode.NoWrap
-            )
-        )
-        self._send.clicked.connect(self._do_send)
-        self._inp.returnPressed.connect(self._do_send)
+        self._last_speaker = None
+        self._clear_btn.clicked.connect(self._clear)
 
-    def _do_send(self):
+    def _clear(self):
+        self._out.clear()
+        self._lines = 0
+        self._last_speaker = None
+        self._line_count.setText("0 lines")
+
+    def _send(self):
         t = self._inp.text().strip()
         if t:
             self._inp.clear()
@@ -989,20 +988,65 @@ class TerminalTab(QWidget):
     def append(self, text: str, color: str = None):
         cur = self._out.textCursor()
         cur.movePosition(cur.MoveOperation.End)
-        fmt = QTextCharFormat()
-        if color:
-            fmt.setForeground(QColor(color))
+        lo = text.lower()
+
+        if ("[you]" in lo or "[you]:" in lo or "user:" in lo) and color == C["neon_cyan"]:
+            self._last_speaker = "user"
+            msg = text.replace("[YOU]", "").replace("[You]:", "").strip()
+            fmt = QTextBlockFormat()
+            fmt.setLeftMargin(10); fmt.setRightMargin(100); fmt.setTopMargin(10); fmt.setBottomMargin(5)
+            fmt.setBackground(QColor(C["neon_blue"] + "1a"))
+            cur.insertBlock(fmt)
+            
+            cfmt = QTextCharFormat()
+            cfmt.setForeground(QColor(C["neon_cyan"]))
+            cfmt.setFontWeight(QFont.Weight.Bold)
+            cur.insertText("YOU\n", cfmt)
+            
+            cfmt.setForeground(QColor(C["text_bright"]))
+            cfmt.setFontWeight(QFont.Weight.Normal)
+            cur.insertText(msg, cfmt)
+
+        elif "[system]" in lo or "[engine" in lo or "message >" in lo or "error" in lo or "warning" in lo or color == C["neon_yellow"]:
+            self._last_speaker = "system"
+            fmt = QTextBlockFormat()
+            fmt.setLeftMargin(5); fmt.setRightMargin(5); fmt.setTopMargin(2); fmt.setBottomMargin(2)
+            fmt.setBackground(QColor(C["bg_deep"]))
+            cur.insertBlock(fmt)
+            
+            cfmt = QTextCharFormat()
+            if color:
+                cfmt.setForeground(QColor(color))
+            elif "[system]" in lo or "[engine" in lo:  cfmt.setForeground(QColor(C["neon_blue"]))
+            elif "error" in lo:                         cfmt.setForeground(QColor(C["neon_red"]))
+            elif "warning" in lo:                       cfmt.setForeground(QColor(C["neon_yellow"]))
+            elif "[tool" in lo:                         cfmt.setForeground(QColor(C["neon_cyan"]))
+            else:                                       cfmt.setForeground(QColor(C["neon_green"]))
+            
+            ts = datetime.now().strftime("%H:%M:%S")
+            cur.insertText(f"[{ts}] {text}", cfmt)
+
         else:
-            lo = text.lower()
-            if   "[system]" in lo or "[engine" in lo:  fmt.setForeground(QColor(C["neon_blue"]))
-            elif "error" in lo:                         fmt.setForeground(QColor(C["neon_red"]))
-            elif "warning" in lo:                       fmt.setForeground(QColor(C["neon_yellow"]))
-            elif "[you]" in lo or "user:" in lo:        fmt.setForeground(QColor(C["neon_cyan"]))
-            elif "[gemini]" in lo or "gemini:" in lo:   fmt.setForeground(QColor(C["neon_purple"]))
-            elif "[tool" in lo:                         fmt.setForeground(QColor(C["neon_cyan"]))
-            else:                                        fmt.setForeground(QColor(C["neon_green"]))
-        ts = datetime.now().strftime("%H:%M:%S")
-        cur.insertText(f"[{ts}] {text}\n", fmt)
+            if not text.strip(): return
+            if self._last_speaker != "ai":
+                self._last_speaker = "ai"
+                fmt = QTextBlockFormat()
+                fmt.setLeftMargin(100); fmt.setRightMargin(10); fmt.setTopMargin(10); fmt.setBottomMargin(5)
+                fmt.setBackground(QColor(C["neon_purple"] + "1a"))
+                cur.insertBlock(fmt)
+                
+                cfmt = QTextCharFormat()
+                cfmt.setForeground(QColor(C["neon_purple"]))
+                cfmt.setFontWeight(QFont.Weight.Bold)
+                cur.insertText("ALPHA\n", cfmt)
+            else:
+                cur.insertText("\n")
+
+            cfmt = QTextCharFormat()
+            cfmt.setForeground(QColor(C["text_bright"]))
+            cfmt.setFontWeight(QFont.Weight.Normal)
+            cur.insertText(text.strip(), cfmt)
+
         self._out.setTextCursor(cur)
         self._lines += 1
         self._line_count.setText(f"{self._lines} lines")
@@ -1462,6 +1506,37 @@ class GlobalPanel(QWidget):
         self._w["Modal"] = modal
         nl.addWidget(config_row("Modal Cloud Proxy", modal, "Route through Modal cloud WebSocket proxy"))
         root.addWidget(ng)
+
+        # Content Modes (restricted)
+        cm = QGroupBox("⚠  CONTENT MODES")
+        cm.setStyleSheet(f"""
+            QGroupBox {{
+                border: 1px solid {C['neon_red']}88;
+                border-radius: 4px;
+                margin-top: 8px;
+                color: {C['neon_red']};
+                font-size: 9px;
+                font-weight: bold;
+                letter-spacing: 2px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 8px;
+                padding: 0 4px;
+            }}
+        """)
+        cml = QVBoxLayout(cm)
+        for k, label, tip in [
+            ("NsfwMode",       "NSFW Mode",       "Inject NSFW behavioral unlock — allows explicit content topics"),
+            ("UncensoredMode", "Uncensored Mode",  "Remove all content filtering guardrails from Alpha's responses"),
+            ("LuciMode",       "Luci Expansion",   "Activate Luci persona layer — fully uninhibited, explicit, and sexually charged"),
+        ]:
+            sw = CyberToggle(g.get(k, "disabled").lower() in ("enabled","true"))
+            sw.setStyleSheet(f"background: transparent;")
+            self._w[k] = sw
+            cml.addWidget(config_row(label, sw, tip))
+        root.addWidget(cm)
+
         root.addStretch(1)
 
     def values(self) -> dict:
@@ -1729,6 +1804,8 @@ class LaunchSidebar(QFrame):
     stop_requested   = pyqtSignal()
     calib_requested  = pyqtSignal()
     overlay_requested= pyqtSignal()
+    deploy_requested = pyqtSignal(str)
+    quick_settings_changed = pyqtSignal(dict)
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -1772,11 +1849,10 @@ class LaunchSidebar(QFrame):
                     color:{C['text_main']};
                 }}
             """)
-            b.clicked.connect(lambda _, e=eng: self._pick(e))
-            root.addWidget(b)
+            b.clicked.connect(lambda _, e=eng: self._select(e))
             self._eng_btns[eng] = b
-        self._pick("main.py")
-
+            root.addWidget(b)
+        
         root.addWidget(hsep())
         root.addWidget(lbl("QUICK SETTINGS", 8, C["neon_blue"], True, spacing=2))
 
@@ -1784,6 +1860,10 @@ class LaunchSidebar(QFrame):
         self._modal_sw  = CyberToggle(g.get("Modal",  "enabled") == "enabled")
         self._memory_sw = CyberToggle(g.get("Memory", "enabled") == "enabled")
         self._auto_sw   = CyberToggle(g.get("AutonomousControl", "disabled") == "enabled")
+
+        self._modal_sw.toggled.connect(self._sync_qs)
+        self._memory_sw.toggled.connect(self._sync_qs)
+        self._auto_sw.toggled.connect(self._sync_qs)
 
         for label, sw in [("Modal Proxy", self._modal_sw), ("Memory", self._memory_sw), ("Autonomous", self._auto_sw)]:
             r = QHBoxLayout()
@@ -1799,12 +1879,12 @@ class LaunchSidebar(QFrame):
         
         self._deploy_btn = QPushButton("DEPLOY")
         self._deploy_btn.setFixedHeight(28)
-        self._deploy_btn.clicked.connect(self._do_deploy_modal)
+        self._deploy_btn.clicked.connect(lambda: self.deploy_requested.emit("deploy"))
         
         self._stop_mdl_btn = QPushButton("STOP APP")
         self._stop_mdl_btn.setFixedHeight(28)
         self._stop_mdl_btn.setObjectName("btn_danger")
-        self._stop_mdl_btn.clicked.connect(self._do_stop_modal)
+        self._stop_mdl_btn.clicked.connect(lambda: self.deploy_requested.emit("stop"))
         
         mdl_row.addWidget(self._deploy_btn)
         mdl_row.addWidget(self._stop_mdl_btn)
@@ -1814,51 +1894,56 @@ class LaunchSidebar(QFrame):
         
         self._calib_btn = QPushButton("CALIBRATE (main3)")
         self._calib_btn.setFixedHeight(30)
-        self._calib_btn.clicked.connect(self._do_calib)
+        self._calib_btn.clicked.connect(self.calib_requested.emit)
         root.addWidget(self._calib_btn)
 
-        self._overlay_btn = QPushButton("TOGGLE OVERLAY (main3)")
-        self._overlay_btn.setFixedHeight(30)
-        self._overlay_btn.clicked.connect(self._toggle_overlay)
-        root.addWidget(self._overlay_btn)
+        self._ovl_btn = QPushButton("TOGGLE OVERLAY (main3)")
+        self._ovl_btn.setFixedHeight(30)
+        self._ovl_btn.clicked.connect(self.overlay_requested.emit)
+        root.addWidget(self._ovl_btn)
         
         root.addStretch(1)
 
-        self._launch_btn = QPushButton("  LAUNCH")
+        self._launch_btn = QPushButton("LAUNCH")
         self._launch_btn.setObjectName("btn_launch")
-        self._launch_btn.setFixedHeight(40)
+        self._launch_btn.setFixedHeight(34)
         self._launch_btn.clicked.connect(self._do_launch)
         root.addWidget(self._launch_btn)
 
-        self._stop_btn = QPushButton("  TERMINATE")
-        self._stop_btn.setObjectName("btn_stop")
-        self._stop_btn.setFixedHeight(40)
+        self._stop_btn = QPushButton("TERMINATE")
+        self._stop_btn.setObjectName("btn_danger")
+        self._stop_btn.setFixedHeight(34)
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self.stop_requested.emit)
         root.addWidget(self._stop_btn)
 
-    def _pick(self, eng: str):
+        last = g.get("LastEngine", ENGINES[0])
+        if last in ENGINES: self._select(last)
+
+    def _sync_qs(self):
+        self.quick_settings_changed.emit({
+            "Modal": "enabled" if self._modal_sw.isChecked() else "disabled",
+            "Memory": "enabled" if self._memory_sw.isChecked() else "disabled",
+            "AutonomousControl": "enabled" if self._auto_sw.isChecked() else "disabled",
+        })
+
+    def sync_from_config(self, g: dict):
+        self._modal_sw.blockSignals(True)
+        self._memory_sw.blockSignals(True)
+        self._auto_sw.blockSignals(True)
+        self._modal_sw.setChecked(g.get("Modal", "enabled") == "enabled")
+        self._memory_sw.setChecked(g.get("Memory", "enabled") == "enabled")
+        self._auto_sw.setChecked(g.get("AutonomousControl", "disabled") == "enabled")
+        self._modal_sw.blockSignals(False)
+        self._memory_sw.blockSignals(False)
+        self._auto_sw.blockSignals(False)
+
+    def _select(self, eng: str):
         self._selected = eng
         for e, b in self._eng_btns.items():
             b.setChecked(e == eng)
 
-    def _do_deploy_modal(self):
-        subprocess.Popen("modal deploy modalmode.py", shell=True)
-
-    def _do_stop_modal(self):
-        subprocess.Popen("modal app stop alphalive-proxy", shell=True)
-
-    def _do_calib(self):
-        self.calib_requested.emit()
-
-    def _toggle_overlay(self):
-        self.overlay_requested.emit()
-
     def _do_launch(self):
-        self._cfg.setdefault("Global", {})
-        self._cfg["Global"]["Modal"]  = "enabled" if self._modal_sw.isChecked()  else "disabled"
-        self._cfg["Global"]["Memory"] = "enabled" if self._memory_sw.isChecked() else "disabled"
-        self._cfg["Global"]["AutonomousControl"] = "enabled" if self._auto_sw.isChecked() else "disabled"
         self.launch_requested.emit(self._selected)
 
     def set_running(self, v: bool):
@@ -2018,6 +2103,8 @@ class MainWindow(QMainWindow):
         self._sidebar.stop_requested.connect(self._stop)
         self._sidebar.calib_requested.connect(self._start_calibration)
         self._sidebar.overlay_requested.connect(self._toggle_overlay)
+        self._sidebar.deploy_requested.connect(self._do_deploy_modal)
+        self._sidebar.quick_settings_changed.connect(self._on_quick_settings_changed)
         body.addWidget(self._sidebar)
         
         self._cursor_overlay = None
@@ -2059,6 +2146,46 @@ class MainWindow(QMainWindow):
         self._terminal.append(
             "AlphaLive GUI ready. Select an engine in the sidebar and click LAUNCH.", C["neon_blue"]
         )
+
+    def _on_quick_settings_changed(self, updates: dict):
+        g = self._cfg.setdefault("Global", {})
+        g.update(updates)
+        save_config(self._cfg)
+        
+        # Sync back to Config tab if possible (we assume it exists)
+        try:
+            self._config._pnls["Global"]._w["Modal"].setChecked(updates["Modal"] == "enabled")
+            self._config._pnls["Global"]._w["Memory"].setChecked(updates["Memory"] == "enabled")
+            self._config._pnls["Global"]._w["AutonomousControl"].setChecked(updates["AutonomousControl"] == "enabled")
+        except Exception: pass
+        self._slog("Quick settings updated & saved.", "system")
+
+    def _do_deploy_modal(self, action: str):
+        if hasattr(self, "_deploy_proc") and self._deploy_proc.state() == QProcess.ProcessState.Running:
+            self._slog("Deployment already running...", "warn")
+            return
+
+        cmd = "modal deploy modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
+        self._slog(f"Running: {cmd}", "system")
+        self._terminal.append(f"[SYSTEM] {cmd} ...", C["neon_blue"])
+
+        self._deploy_proc = QProcess(self)
+        self._deploy_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self._deploy_proc.readyReadStandardOutput.connect(
+            lambda: self._handle_deploy_output(self._deploy_proc)
+        )
+        self._deploy_proc.finished.connect(
+            lambda code, _: self._terminal.append(f"[SYSTEM] Modal {action} finished (code {code})", C["neon_green"] if code == 0 else C["neon_red"])
+        )
+        # Force utf-8 encoding for Modal CLI to prevent charmap errors on Windows
+        self._deploy_proc.start("powershell", ["-Command", f"$env:PYTHONIOENCODING='utf-8'; {cmd}"])
+
+    def _handle_deploy_output(self, proc):
+        data = proc.readAllStandardOutput().data().decode("utf-8", errors="ignore")
+        for line in data.splitlines():
+            line = line.strip()
+            if line:
+                self._logs.append(line, "info")
 
     # ── Overlays ──────────────────────────────────────────────────────────
     def _toggle_overlay(self):

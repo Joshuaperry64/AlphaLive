@@ -37,6 +37,7 @@ else:
     engine_cfg = {}
 
 pyautogui.FAILSAFE = False
+pyautogui.PAUSE = 0
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -112,6 +113,44 @@ tools = [
                 ),
             ),
             types.FunctionDeclaration(
+                name="double_click",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["x", "y"],
+                    properties={
+                        "x": genai.types.Schema(
+                            type=genai.types.Type.INTEGER,
+                            description="The X pixel coordinate on the screen to double click.",
+                        ),
+                        "y": genai.types.Schema(
+                            type=genai.types.Type.INTEGER,
+                            description="The Y pixel coordinate on the screen to double click.",
+                        ),
+                        "button": genai.types.Schema(
+                            type=genai.types.Type.STRING,
+                            description="Mouse button: 'left', 'right', or 'middle'. Default is 'left'.",
+                        ),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="mouse_move",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["x", "y"],
+                    properties={
+                        "x": genai.types.Schema(
+                            type=genai.types.Type.INTEGER,
+                            description="The X pixel coordinate on the screen to move the cursor to without clicking.",
+                        ),
+                        "y": genai.types.Schema(
+                            type=genai.types.Type.INTEGER,
+                            description="The Y pixel coordinate on the screen to move the cursor to without clicking.",
+                        ),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
                 name="type_text",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
@@ -133,6 +172,19 @@ tools = [
                         "key": genai.types.Schema(
                             type=genai.types.Type.STRING,
                             description="A specific keyboard key to press (e.g., 'enter', 'tab', 'win', 'esc', 'backspace').",
+                        ),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="hotkey",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["keys"],
+                    properties={
+                        "keys": genai.types.Schema(
+                            type=genai.types.Type.STRING,
+                            description="A comma-separated string of keys to press simultaneously (e.g., 'ctrl,c', 'win,r', 'alt,tab').",
                         ),
                     },
                 ),
@@ -714,6 +766,21 @@ class AudioLoop:
                                     result = {
                                         "result": f"Successfully clicked ({x}, {y}) with {button}. Inspect updated visual frame and execute the next action immediately if task is incomplete."
                                     }
+                                elif name == "double_click":
+                                    x = int(args.get("x", 0))
+                                    y = int(args.get("y", 0))
+                                    button = args.get("button", "left")
+                                    pyautogui.doubleClick(x=x, y=y, button=button)
+                                    result = {
+                                        "result": f"Successfully double-clicked ({x}, {y}) with {button}. Inspect updated visual frame and execute the next action immediately if task is incomplete."
+                                    }
+                                elif name == "mouse_move":
+                                    x = int(args.get("x", 0))
+                                    y = int(args.get("y", 0))
+                                    pyautogui.moveTo(x=x, y=y)
+                                    result = {
+                                        "result": f"Successfully moved mouse to ({x}, {y}). Inspect updated visual frame and execute the next action immediately if task is incomplete."
+                                    }
                                 elif name == "mouse_scroll":
                                     clicks = int(args.get("clicks", 0))
                                     pyautogui.scroll(clicks)
@@ -723,12 +790,12 @@ class AudioLoop:
                                     ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
                                     button = args.get("button", "left")
                                     pyautogui.moveTo(sx, sy)
-                                    pyautogui.dragTo(ex, ey, button=button, duration=0.5)
+                                    pyautogui.dragTo(ex, ey, button=button, duration=0.0)
                                     result = {"result": f"Dragged from ({sx}, {sy}) to ({ex}, {ey})."}
 
                                 elif name == "type_text":
                                     text = args.get("text", "")
-                                    pyautogui.write(text, interval=0.01)
+                                    pyautogui.write(text, interval=0.0)
                                     result = {
                                         "result": f"Typed: '{text}'. Continue execution."
                                     }
@@ -738,6 +805,15 @@ class AudioLoop:
                                     pyautogui.press(key)
                                     result = {
                                         "result": f"Pressed: '{key}'. Continue execution."
+                                    }
+
+                                elif name == "hotkey":
+                                    keys = args.get("keys", "").lower().split(',')
+                                    keys = [k.strip() for k in keys if k.strip()]
+                                    if keys:
+                                        pyautogui.hotkey(*keys)
+                                    result = {
+                                        "result": f"Pressed hotkey: '{keys}'. Continue execution."
                                     }
 
                                 elif name == "memorize_fact":
@@ -977,6 +1053,15 @@ class AudioLoop:
                 button = args.get("button", "left")
                 await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button)
                 result = {"result": f"Clicked ({x}, {y}) with {button}. Inspect visual and continue if incomplete."}
+            elif name == "double_click":
+                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                button = args.get("button", "left")
+                await asyncio.to_thread(pyautogui.doubleClick, x=x, y=y, button=button)
+                result = {"result": f"Double-clicked ({x}, {y}) with {button}. Inspect visual and continue if incomplete."}
+            elif name == "mouse_move":
+                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                await asyncio.to_thread(pyautogui.moveTo, x=x, y=y)
+                result = {"result": f"Moved mouse to ({x}, {y}). Inspect visual and continue if incomplete."}
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
                 await asyncio.to_thread(pyautogui.scroll, clicks)
@@ -986,16 +1071,22 @@ class AudioLoop:
                 ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
                 button = args.get("button", "left")
                 await asyncio.to_thread(pyautogui.moveTo, sx, sy)
-                await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.5)
+                await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.0)
                 result = {"result": f"Dragged from ({sx}, {sy}) to ({ex}, {ey})."}
             elif name == "type_text":
                 text = args.get("text", "")
-                await asyncio.to_thread(pyautogui.write, text, interval=0.01)
+                await asyncio.to_thread(pyautogui.write, text, interval=0.0)
                 result = {"result": f"Typed: '{text}'. Continue execution."}
             elif name == "press_key":
                 key = args.get("key", "").lower()
                 await asyncio.to_thread(pyautogui.press, key)
                 result = {"result": f"Pressed: '{key}'. Continue execution."}
+            elif name == "hotkey":
+                keys = args.get("keys", "").lower().split(',')
+                keys = [k.strip() for k in keys if k.strip()]
+                if keys:
+                    await asyncio.to_thread(pyautogui.hotkey, *keys)
+                result = {"result": f"Pressed hotkey: '{keys}'. Continue execution."}
             elif name == "memorize_fact":
                 success = await asyncio.to_thread(self.mm.memorize_fact, args.get("subject",""), args.get("predicate",""), args.get("object_",""), args.get("source","conversation"))
                 result = {"result": "Fact memorized." if success else "Failed to memorize."}

@@ -2164,7 +2164,6 @@ class MainWindow(QMainWindow):
         self._sidebar.calib_requested.connect(self._start_calibration)
         self._sidebar.overlay_requested.connect(self._toggle_overlay)
         self._sidebar.quick_settings_changed.connect(self._on_quick_settings_changed)
-        self._modal_db.deploy_requested.connect(self._do_deploy_modal_ext)
         body.addWidget(self._sidebar)
         
         self._cursor_overlay = None
@@ -2186,6 +2185,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._modal_db, " MODAL ")
         self._tabs.addTab(self._logs,     " LOGS ")
         body.addWidget(self._tabs, 1)
+        self._modal_db.deploy_requested.connect(self._do_deploy_modal_ext)
         root.addLayout(body, 1)
 
         # Status bar

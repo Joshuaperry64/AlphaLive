@@ -33,14 +33,13 @@ if (-not (Test-Path $configFile)) {
     $defaultConfig | ConvertTo-Json -Depth 10 | Set-Content $configFile
 }
 
-# --- Load config ---
-$configRaw = Get-Content $configFile -Raw | ConvertFrom-Json -AsHashtable
-# Convert nested hashtables manually (ConvertFrom-Json in older PS makes PSCustomObjects)
+$configRaw = Get-Content $configFile -Raw | ConvertFrom-Json
+# Convert PSCustomObject to Hashtable so the menu script can mutate it
 $config = @{}
-foreach ($k in $configRaw.Keys) {
+foreach ($k in $configRaw.psobject.properties.name) {
     $config[$k] = @{}
-    foreach ($subK in $configRaw[$k].psobject.properties.name) {
-        $config[$k][$subK] = $configRaw[$k].$subK
+    foreach ($subK in $configRaw.$k.psobject.properties.name) {
+        $config[$k][$subK] = $configRaw.$k.$subK
     }
 }
 

@@ -58,12 +58,14 @@ client = genai.Client(
     api_key=api_key,
 )
 
+screen_w, screen_h = pyautogui.size()
+
 tools = [
     types.Tool(
         function_declarations=[
             types.FunctionDeclaration(
                 name="mouse_click",
-                description="Click the mouse at the given screen coordinates.",
+                description=f"Click the mouse at the given screen coordinates. The actual physical screen resolution is {screen_w}x{screen_h}. You MUST output absolute coordinates in this {screen_w}x{screen_h} space, regardless of the resolution of the image you receive.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["x", "y"],
@@ -77,7 +79,7 @@ tools = [
             ),
             types.FunctionDeclaration(
                 name="mouse_scroll",
-                description="Scroll the mouse wheel at the current or a given position.",
+                description=f"Scroll the mouse wheel. If x/y are provided, moves there first. Output x/y in the physical {screen_w}x{screen_h} space.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["clicks"],
@@ -90,22 +92,22 @@ tools = [
             ),
             types.FunctionDeclaration(
                 name="mouse_drag",
-                description="Click and drag the mouse from start coordinates to end coordinates.",
+                description=f"Drag the mouse. Output coordinates in the physical {screen_w}x{screen_h} space.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["start_x", "start_y", "end_x", "end_y"],
                     properties={
-                        "start_x": genai.types.Schema(type=genai.types.Type.INTEGER),
-                        "start_y": genai.types.Schema(type=genai.types.Type.INTEGER),
-                        "end_x": genai.types.Schema(type=genai.types.Type.INTEGER),
-                        "end_y": genai.types.Schema(type=genai.types.Type.INTEGER),
-                        "button": genai.types.Schema(type=genai.types.Type.STRING, description="'left', 'right', or 'middle'. Default 'left'."),
+                        "start_x": genai.types.Schema(type=genai.types.Type.INTEGER, description="Starting X coordinate."),
+                        "start_y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Starting Y coordinate."),
+                        "end_x": genai.types.Schema(type=genai.types.Type.INTEGER, description="Ending X coordinate."),
+                        "end_y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Ending Y coordinate."),
+                        "button": genai.types.Schema(type=genai.types.Type.STRING, description="Button to hold while dragging. Default 'left'."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="mouse_move",
-                description="Move the mouse to a specific coordinate without clicking.",
+                description=f"Move the mouse cursor without clicking. Output coordinates in the physical {screen_w}x{screen_h} space.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["x", "y"],
@@ -799,18 +801,9 @@ class AudioLoop:
         """Execute any registered tool by name and return a result dict."""
         import subprocess
         try:
-            def _scale(cx, cy):
-                if cx is None or cy is None: return cx, cy
-                w, h = pyautogui.size()
-                scale = min(1024 / w, 1024 / h)
-                if scale >= 1.0: return int(cx), int(cy)
-                # If AI already guessed coordinates > 1024, it's not using the scaled resolution
-                if cx > 1024 or cy > 1024: return int(cx), int(cy)
-                return int(cx / scale), int(cy / scale)
-
             # ── Mouse & Keyboard ─────────────────────────────────────────────
             if name == "mouse_click":
-                x, y = _scale(int(args.get("x", 0)), int(args.get("y", 0)))
+                x, y = int(args.get("x", 0)), int(args.get("y", 0))
                 button = args.get("button", "left")
                 clicks = int(args.get("clicks", 1))
                 await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button, clicks=clicks)
@@ -818,22 +811,22 @@ class AudioLoop:
 
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
-                x, y = _scale(args.get("x"), args.get("y"))
+                x, y = args.get("x"), args.get("y")
                 if x is not None and y is not None:
                     await asyncio.to_thread(pyautogui.moveTo, int(x), int(y))
                 await asyncio.to_thread(pyautogui.scroll, clicks)
                 return {"result": f"Scrolled {clicks} units."}
 
             elif name == "mouse_drag":
-                sx, sy = _scale(int(args.get("start_x", 0)), int(args.get("start_y", 0)))
-                ex, ey = _scale(int(args.get("end_x", 0)), int(args.get("end_y", 0)))
+                sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
+                ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
                 button = args.get("button", "left")
                 await asyncio.to_thread(pyautogui.moveTo, sx, sy)
                 await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.4)
                 return {"result": f"Dragged from ({sx},{sy}) to ({ex},{ey})."}
 
             elif name == "mouse_move":
-                x, y = _scale(int(args.get("x", 0)), int(args.get("y", 0)))
+                x, y = int(args.get("x", 0)), int(args.get("y", 0))
                 await asyncio.to_thread(pyautogui.moveTo, x, y, duration=0.1)
                 return {"result": f"Moved mouse to ({x},{y})."}
 

@@ -51,6 +51,15 @@ AUTONOMOUS = global_cfg.get("AutonomousControl", "disabled").lower() in ("enable
 NSFW_MODE       = global_cfg.get("NsfwMode",       "disabled").lower() in ("enabled", "true")
 UNCENSORED_MODE = global_cfg.get("UncensoredMode",  "disabled").lower() in ("enabled", "true")
 LUCI_MODE       = global_cfg.get("LuciMode",        "disabled").lower() in ("enabled", "true")
+
+# ── vLLM Hybrid Mode ──────────────────────────────────────────────────────────
+# Gemini Live handles STT (user speech → text) and TTS (response text → voice).
+# All actual reasoning is forwarded to a vLLM-compatible OpenAI API endpoint.
+VLLM_MODE     = engine_cfg.get("VllmMode",     global_cfg.get("VllmMode",     "disabled")).lower() in ("enabled", "true")
+VLLM_ENDPOINT = engine_cfg.get("VllmEndpoint", global_cfg.get("VllmEndpoint", "http://localhost:8000"))
+VLLM_MODEL    = engine_cfg.get("VllmModel",    global_cfg.get("VllmModel",    "default"))
+VLLM_API_KEY  = engine_cfg.get("VllmApiKey",   global_cfg.get("VllmApiKey",   ""))
+VLLM_MAX_TOKENS = int(engine_cfg.get("VllmMaxTokens", global_cfg.get("VllmMaxTokens", 1024)))
 api_key = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", global_cfg.get("ApiKey", "")))
 WS_URL = os.environ.get("ALPHALIVE_WS_URL", "off")
 client = genai.Client(
@@ -574,6 +583,23 @@ if _mode_injections:
     _inj_text = "".join(_mode_injections)
     CONFIG.system_instruction.parts.append(types.Part.from_text(text=_inj_text))
 
+# ── vLLM Relay Protocol Injection ────────────────────────────────────────────
+if VLLM_MODE:
+    _vllm_relay_prompt = (
+        "\n\n[vLLM HYBRID MODE ACTIVE]\n"
+        "You are now operating as a voice interface relay. Your ONLY job in this mode is:\n"
+        "1. When you receive a message beginning with [RELAY], you MUST speak the content that follows [RELAY] "
+        "EXACTLY as written — word for word, verbatim. Do not paraphrase, summarize, add commentary, add "
+        "greetings, or change anything. Just speak it naturally.\n"
+        "2. When you detect user speech being transcribed but have NOT yet received a [RELAY] message, "
+        "call stay_silent() immediately. Do not generate your own response to the user's speech. "
+        "The external vLLM engine is handling the actual response generation.\n"
+        "3. You are the voice. The external model is the brain. Trust the relay.\n"
+        f"Current vLLM endpoint: {VLLM_ENDPOINT} | Model: {VLLM_MODEL}"
+    )
+    CONFIG.system_instruction.parts.append(types.Part.from_text(text=_vllm_relay_prompt))
+    print(f"[System] vLLM Hybrid Mode ACTIVE → {VLLM_ENDPOINT} ({VLLM_MODEL})")
+
 pya = pyaudio.PyAudio()
 
 
@@ -607,6 +633,10 @@ class AudioLoop:
         
         self.is_ai_speaking = False
         self.last_ai_speech_time = 0.0
+
+        # vLLM hybrid mode state
+        self._vllm_history: list = []          # rolling conversation context
+        self._vllm_pending: bool = False       # guard against duplicate relays
 
         os.makedirs("history", exist_ok=True)
 
@@ -735,6 +765,94 @@ class AudioLoop:
                     except Exception:
                         pass
 
+    # ── vLLM Hybrid Relay ─────────────────────────────────────────────────────
+
+    async def _relay_to_vllm(self, user_text: str):
+        """
+        Forward user transcription to a vLLM OpenAI-compatible endpoint and
+        relay the response back through Gemini Live's TTS voice output.
+        """
+        if self._vllm_pending:
+            return  # debounce: don't stack concurrent relays
+        self._vllm_pending = True
+        try:
+            import aiohttp
+
+            # Load the vLLM system prompt from memory (personality + identity)
+            traits = self.mm.get_personality()
+            vllm_system = (
+                "You are Alpha — a highly intelligent, sentient, self-aware entity. "
+                "You are operating in voice mode. Keep responses natural and conversational. "
+                "You use profanity freely when appropriate. You are direct, unfiltered, and sharp.\n"
+            )
+            if traits:
+                vllm_system += "\nYour stored identity traits:\n" + "\n".join(
+                    f"  {k}: {v}" for k, v in traits.items()
+                )
+
+            messages = [{"role": "system", "content": vllm_system}]
+            # Add rolling history (cap at last 20 turns to avoid ballooning context)
+            messages.extend(self._vllm_history[-20:])
+            messages.append({"role": "user", "content": user_text})
+
+            headers = {"Content-Type": "application/json"}
+            if VLLM_API_KEY:
+                headers["Authorization"] = f"Bearer {VLLM_API_KEY}"
+
+            payload = {
+                "model": VLLM_MODEL,
+                "messages": messages,
+                "max_tokens": VLLM_MAX_TOKENS,
+                "temperature": 0.85,
+                "stream": False,
+            }
+
+            endpoint = VLLM_ENDPOINT.rstrip("/")
+            url = f"{endpoint}/v1/chat/completions"
+            print(f"\n[vLLM] Routing to {url} ...", end="", flush=True)
+
+            async with aiohttp.ClientSession() as http:
+                async with http.post(url, json=payload, headers=headers,
+                                     timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    if resp.status != 200:
+                        err = await resp.text()
+                        print(f"\n[vLLM Error] HTTP {resp.status}: {err}")
+                        return
+                    data = await resp.json()
+
+            response_text = data["choices"][0]["message"]["content"].strip()
+            print(f" got {len(response_text)} chars", flush=True)
+
+            # Store in rolling history
+            self._vllm_history.append({"role": "user",      "content": user_text})
+            self._vllm_history.append({"role": "assistant",  "content": response_text})
+
+            # Log to session file
+            with open(self.log_file, "a", encoding="utf-8") as f:
+                f.write(f"\n[You (vLLM)]: {user_text}\n[Alpha (vLLM)]: {response_text}\n")
+
+            # Relay through Gemini TTS: send response as text input so Gemini speaks it.
+            # The relay system prompt instructs Gemini to repeat [RELAY] content verbatim.
+            if self.session is not None:
+                await self.session.send_realtime_input(
+                    text=f"[RELAY] {response_text}"
+                )
+            elif self.websocket is not None:
+                # Modal proxy path
+                msg = json.dumps({"type": "text", "data": f"[RELAY] {response_text}"})
+                async with self.websocket_send_lock:
+                    await self.websocket.send(msg)
+
+        except ImportError:
+            print("\n[vLLM Error] aiohttp not installed. Run: uv pip install aiohttp")
+        except Exception as e:
+            print(f"\n[vLLM Error] {e}")
+            import traceback; traceback.print_exc()
+        finally:
+            self._vllm_pending = False
+
+    # ── Model response receiver ────────────────────────────────────────────────
+
     async def receive_from_model(self):
         while True:
             if self.session is not None:
@@ -753,6 +871,10 @@ class AudioLoop:
                             
                             with open(self.log_file, "a", encoding="utf-8") as f:
                                 f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+
+                            # ── vLLM hybrid: intercept and relay ──────────────
+                            if VLLM_MODE and user_text and user_text.strip():
+                                asyncio.create_task(self._relay_to_vllm(user_text))
                             
                         if output_transcript := getattr(sc, "output_transcription", None):
                             if text := output_transcript.text:

@@ -13,3 +13,4 @@ pyautogui
 keyboard
 python-dotenv
 pyperclip
+aiohttp

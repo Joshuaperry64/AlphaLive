@@ -1813,17 +1813,56 @@ class LaunchSidebar(QFrame):
         self._modal_sw  = CyberToggle(g.get("Modal",  "enabled") == "enabled")
         self._memory_sw = CyberToggle(g.get("Memory", "enabled") == "enabled")
         self._auto_sw   = CyberToggle(g.get("AutonomousControl", "disabled") == "enabled")
+        self._vllm_sw   = CyberToggle(g.get("VllmMode", "disabled") == "enabled")
 
         self._modal_sw.toggled.connect(self._sync_qs)
         self._memory_sw.toggled.connect(self._sync_qs)
         self._auto_sw.toggled.connect(self._sync_qs)
+        self._vllm_sw.toggled.connect(self._sync_qs)
 
-        for label, sw in [("Modal Proxy", self._modal_sw), ("Memory", self._memory_sw), ("Autonomous", self._auto_sw)]:
+        for label, sw in [("Modal Proxy", self._modal_sw), ("Memory", self._memory_sw),
+                           ("Autonomous", self._auto_sw), ("vLLM Hybrid", self._vllm_sw)]:
             r = QHBoxLayout()
             r.addWidget(lbl(label, 9))
             r.addStretch()
             r.addWidget(sw)
             root.addLayout(r)
+
+        root.addWidget(hsep())
+
+        # vLLM Endpoint fields
+        root.addWidget(lbl("vLLM ENDPOINT", 8, C["neon_blue"], True, spacing=2))
+        from PyQt6.QtWidgets import QLineEdit
+        self._vllm_ep_input = QLineEdit(g.get("VllmEndpoint", "http://localhost:8000"))
+        self._vllm_ep_input.setPlaceholderText("http://host:port")
+        self._vllm_ep_input.setStyleSheet(
+            f"background:{C['bg_panel']}; color:{C['text_main']}; border:1px solid {C['border']}; "
+            f"padding:3px 6px; font-family:'{FONT_MONO}'; font-size:10px;"
+        )
+        self._vllm_ep_input.setFixedHeight(26)
+        self._vllm_ep_input.editingFinished.connect(self._sync_qs)
+        root.addWidget(self._vllm_ep_input)
+
+        self._vllm_mdl_input = QLineEdit(g.get("VllmModel", "default"))
+        self._vllm_mdl_input.setPlaceholderText("model name/id")
+        self._vllm_mdl_input.setStyleSheet(
+            f"background:{C['bg_panel']}; color:{C['text_main']}; border:1px solid {C['border']}; "
+            f"padding:3px 6px; font-family:'{FONT_MONO}'; font-size:10px;"
+        )
+        self._vllm_mdl_input.setFixedHeight(26)
+        self._vllm_mdl_input.editingFinished.connect(self._sync_qs)
+        root.addWidget(self._vllm_mdl_input)
+
+        self._vllm_key_input = QLineEdit(g.get("VllmApiKey", ""))
+        self._vllm_key_input.setPlaceholderText("API key (optional)")
+        self._vllm_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._vllm_key_input.setStyleSheet(
+            f"background:{C['bg_panel']}; color:{C['text_main']}; border:1px solid {C['border']}; "
+            f"padding:3px 6px; font-family:'{FONT_MONO}'; font-size:10px;"
+        )
+        self._vllm_key_input.setFixedHeight(26)
+        self._vllm_key_input.editingFinished.connect(self._sync_qs)
+        root.addWidget(self._vllm_key_input)
 
         root.addWidget(hsep())
         
@@ -1878,18 +1917,28 @@ class LaunchSidebar(QFrame):
             "Modal": "enabled" if self._modal_sw.isChecked() else "disabled",
             "Memory": "enabled" if self._memory_sw.isChecked() else "disabled",
             "AutonomousControl": "enabled" if self._auto_sw.isChecked() else "disabled",
+            "VllmMode": "enabled" if self._vllm_sw.isChecked() else "disabled",
+            "VllmEndpoint": self._vllm_ep_input.text().strip() or "http://localhost:8000",
+            "VllmModel": self._vllm_mdl_input.text().strip() or "default",
+            "VllmApiKey": self._vllm_key_input.text().strip(),
         })
 
     def sync_from_config(self, g: dict):
         self._modal_sw.blockSignals(True)
         self._memory_sw.blockSignals(True)
         self._auto_sw.blockSignals(True)
+        self._vllm_sw.blockSignals(True)
         self._modal_sw.setChecked(g.get("Modal", "enabled") == "enabled")
         self._memory_sw.setChecked(g.get("Memory", "enabled") == "enabled")
         self._auto_sw.setChecked(g.get("AutonomousControl", "disabled") == "enabled")
+        self._vllm_sw.setChecked(g.get("VllmMode", "disabled") == "enabled")
+        self._vllm_ep_input.setText(g.get("VllmEndpoint", "http://localhost:8000"))
+        self._vllm_mdl_input.setText(g.get("VllmModel", "default"))
+        self._vllm_key_input.setText(g.get("VllmApiKey", ""))
         self._modal_sw.blockSignals(False)
         self._memory_sw.blockSignals(False)
         self._auto_sw.blockSignals(False)
+        self._vllm_sw.blockSignals(False)
 
     def _select(self, eng: str):
         self._selected = eng

@@ -68,9 +68,9 @@ CONFIG_PATH  = SCRIPT_DIR / "config.json"
 HISTORY_DIR  = SCRIPT_DIR / "history"
 
 VOICES  = ["Leda", "Aoede", "Charon", "Fenrir", "Kore", "Puck", "Schedar", "Umbriel", "Zephyr"]
-ENGINES = ["main.py"]
+ENGINES = ["alpha_core.py"]
 ENGINE_LABELS = {
-    "main.py":  "ALPHA CORE",
+    "alpha_core.py":  "ALPHA CORE",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ DEFAULT_CONFIG = {
         "UncensoredMode": "disabled",
         "LuciMode": "disabled",
     },
-    "main.py": {
+    "alpha_core.py": {
         "AudioMode": "half", "VisionMode": "screen",
         "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
         "DesktopControl": "enabled", "FileSystem": "enabled", "ThinkingLevel": "high",
@@ -1533,7 +1533,7 @@ class GlobalPanel(QWidget):
 
 
 ENGINE_FIELDS = {
-    "main.py": [
+    "alpha_core.py": [
         ("AudioMode",     "combo",  ["half","full","muted"],            "Duplex mode"),
         ("VisionMode",    "combo",  ["screen","camera","none"],         "Vision source"),
         ("InputMode",     "combo",  ["both","voice","text"],            "Input channels"),
@@ -1749,6 +1749,77 @@ class LogsTab(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
+# MODAL DEPLOYMENTS TAB
+# =============================================================================
+
+class ModalTab(QWidget):
+    deploy_requested = pyqtSignal(str, str)
+
+    def __init__(self):
+        super().__init__()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(15, 15, 15, 15)
+        root.setSpacing(10)
+        
+        root.addWidget(lbl("MODAL CLOUD DEPLOYMENTS", 12, C["neon_blue"], bold=True, spacing=2))
+        root.addWidget(lbl("Manage serverless deployments on Modal infrastructure.", 9, C["text_dim"]))
+        root.addWidget(hsep())
+
+        ctrl_layout = QHBoxLayout()
+        
+        proxy_group = QFrame()
+        proxy_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
+        pl = QVBoxLayout(proxy_group)
+        pl.addWidget(lbl("Gemini Live Proxy", 10, C["text_main"], bold=True))
+        pl.addWidget(lbl("Routes audio/video through a websocket proxy to Gemini.", 8, C["text_dim"]))
+        pb_row = QHBoxLayout()
+        b_dep_prox = QPushButton("Deploy Proxy")
+        b_dep_prox.clicked.connect(lambda: self.deploy_requested.emit("proxy", "deploy"))
+        b_stp_prox = QPushButton("Stop Proxy")
+        b_stp_prox.setObjectName("btn_danger")
+        b_stp_prox.clicked.connect(lambda: self.deploy_requested.emit("proxy", "stop"))
+        pb_row.addWidget(b_dep_prox)
+        pb_row.addWidget(b_stp_prox)
+        pl.addLayout(pb_row)
+        
+        vllm_group = QFrame()
+        vllm_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
+        vl = QVBoxLayout(vllm_group)
+        vl.addWidget(lbl("vLLM Engine", 10, C["neon_cyan"], bold=True))
+        vl.addWidget(lbl("Hosts your custom open-weight model for Hybrid Mode.", 8, C["text_dim"]))
+        vb_row = QHBoxLayout()
+        b_dep_vllm = QPushButton("Deploy vLLM")
+        b_dep_vllm.clicked.connect(lambda: self.deploy_requested.emit("vllm", "deploy"))
+        b_stp_vllm = QPushButton("Stop vLLM")
+        b_stp_vllm.setObjectName("btn_danger")
+        b_stp_vllm.clicked.connect(lambda: self.deploy_requested.emit("vllm", "stop"))
+        vb_row.addWidget(b_dep_vllm)
+        vb_row.addWidget(b_stp_vllm)
+        vl.addLayout(vb_row)
+
+        ctrl_layout.addWidget(proxy_group)
+        ctrl_layout.addWidget(vllm_group)
+        root.addLayout(ctrl_layout)
+
+        root.addWidget(hsep())
+        root.addWidget(lbl("DEPLOYMENT LOGS", 9, C["text_dim"], bold=True))
+
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._log.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_main']}; border:1px solid {C['border']}; font-family:'{FONT_MONO}'; font-size:10px; padding:8px;")
+        root.addWidget(self._log, 1)
+
+    def append(self, text: str, color: str = None):
+        cur = self._log.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(color or C["text_main"]))
+        cur.insertText(text + "\\n", fmt)
+        self._log.setTextCursor(cur)
+        self._log.ensureCursorVisible()
+
 # SIDEBAR LAUNCH PANEL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1763,7 +1834,7 @@ class LaunchSidebar(QFrame):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self._cfg      = cfg
-        self._selected = "main.py"
+        self._selected = "alpha_core.py"
         self.setFixedWidth(210)
         self.setStyleSheet(f"""
             background:{C['bg_panel']};
@@ -1866,21 +1937,9 @@ class LaunchSidebar(QFrame):
 
         root.addWidget(hsep())
         
-        root.addWidget(lbl("MODAL ENDPOINT", 8, C["neon_blue"], True, spacing=2))
-        mdl_row = QHBoxLayout()
         
-        self._deploy_btn = QPushButton("DEPLOY")
-        self._deploy_btn.setFixedHeight(28)
-        self._deploy_btn.clicked.connect(lambda: self.deploy_requested.emit("deploy"))
         
-        self._stop_mdl_btn = QPushButton("STOP APP")
-        self._stop_mdl_btn.setFixedHeight(28)
-        self._stop_mdl_btn.setObjectName("btn_danger")
-        self._stop_mdl_btn.clicked.connect(lambda: self.deploy_requested.emit("stop"))
         
-        mdl_row.addWidget(self._deploy_btn)
-        mdl_row.addWidget(self._stop_mdl_btn)
-        root.addLayout(mdl_row)
 
         root.addWidget(hsep())
         
@@ -2118,12 +2177,14 @@ class MainWindow(QMainWindow):
         self._monitor  = MonitorTab()
         self._history  = HistoryTab()
         self._config   = ConfigTab(self._cfg)
+        self._modal_db = ModalTab()
         self._logs     = LogsTab()
 
         self._tabs.addTab(self._terminal, " TERMINAL ")
         self._tabs.addTab(self._monitor,  " MONITOR ")
         self._tabs.addTab(self._history,  " HISTORY ")
         self._tabs.addTab(self._config,   " CONFIG ")
+        self._tabs.addTab(self._modal_db, " MODAL ")
         self._tabs.addTab(self._logs,     " LOGS ")
         body.addWidget(self._tabs, 1)
         root.addLayout(body, 1)
@@ -2162,25 +2223,40 @@ class MainWindow(QMainWindow):
         except Exception: pass
         self._slog("Quick settings updated & saved.", "system")
 
-    def _do_deploy_modal(self, action: str):
-        if hasattr(self, "_deploy_proc") and self._deploy_proc.state() == QProcess.ProcessState.Running:
-            self._slog("Deployment already running...", "warn")
+    def _do_deploy_modal_ext(self, target: str, action: str):
+        proc_attr = f"_{target}_deploy_proc"
+        if hasattr(self, proc_attr):
+            proc = getattr(self, proc_attr)
+            if proc.state() == QProcess.ProcessState.Running:
+                self._modal_db.append(f"[{target}] Deployment already running...", C["neon_yellow"])
+                return
+
+        if target == "proxy":
+            cmd = "modal deploy modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
+        elif target == "vllm":
+            cmd = "modal deploy modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm"
+        else:
             return
 
-        cmd = "modal deploy modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
-        self._slog(f"Running: {cmd}", "system")
-        self._terminal.append(f"[SYSTEM] {cmd} ...", C["neon_blue"])
+        self._modal_db.append(f"\n[{target.upper()}] Running: {cmd}", C["neon_blue"])
 
-        self._deploy_proc = QProcess(self)
-        self._deploy_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
-        self._deploy_proc.readyReadStandardOutput.connect(
-            lambda: self._handle_deploy_output(self._deploy_proc)
+        proc = QProcess(self)
+        setattr(self, proc_attr, proc)
+        proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        proc.readyReadStandardOutput.connect(
+            lambda: self._handle_deploy_output_ext(proc, target)
         )
-        self._deploy_proc.finished.connect(
-            lambda code, _: self._terminal.append(f"[SYSTEM] Modal {action} finished (code {code})", C["neon_green"] if code == 0 else C["neon_red"])
+        proc.finished.connect(
+            lambda code, _: self._modal_db.append(f"[{target.upper()}] {action.capitalize()} finished (code {code})", C["neon_green"] if code == 0 else C["neon_red"])
         )
-        # Force utf-8 encoding for Modal CLI to prevent charmap errors on Windows
-        self._deploy_proc.start("powershell", ["-Command", f"$env:PYTHONIOENCODING='utf-8'; {cmd}"])
+        proc.start("powershell", ["-Command", f"$env:PYTHONIOENCODING='utf-8'; {cmd}"])
+
+    def _handle_deploy_output_ext(self, proc, target):
+        data = proc.readAllStandardOutput().data().decode("utf-8", errors="ignore")
+        for line in data.splitlines():
+            line = line.strip()
+            if line:
+                self._modal_db.append(line)
 
     def _handle_deploy_output(self, proc):
         data = proc.readAllStandardOutput().data().decode("utf-8", errors="ignore")

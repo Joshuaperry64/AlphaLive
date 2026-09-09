@@ -434,7 +434,8 @@ class MatrixRain(QWidget):
         w, h = self.width(), self.height()
         # Fade
         painter.fillRect(0, 0, w, h, QColor(4, 8, 16, 38))
-        font = QFont(FONT_MONO, self._font_size - 3)
+        font = QFont(FONT_MONO)
+        font.setPixelSize(max(1, self._font_size - 3))
         painter.setFont(font)
         cols = max(1, w // self._font_size)
         if len(self._drops) != cols:

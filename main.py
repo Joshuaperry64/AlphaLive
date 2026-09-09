@@ -799,9 +799,18 @@ class AudioLoop:
         """Execute any registered tool by name and return a result dict."""
         import subprocess
         try:
+            def _scale(cx, cy):
+                if cx is None or cy is None: return cx, cy
+                w, h = pyautogui.size()
+                scale = min(1024 / w, 1024 / h)
+                if scale >= 1.0: return int(cx), int(cy)
+                # If AI already guessed coordinates > 1024, it's not using the scaled resolution
+                if cx > 1024 or cy > 1024: return int(cx), int(cy)
+                return int(cx / scale), int(cy / scale)
+
             # ── Mouse & Keyboard ─────────────────────────────────────────────
             if name == "mouse_click":
-                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                x, y = _scale(int(args.get("x", 0)), int(args.get("y", 0)))
                 button = args.get("button", "left")
                 clicks = int(args.get("clicks", 1))
                 await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button, clicks=clicks)
@@ -809,22 +818,22 @@ class AudioLoop:
 
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
-                x, y = args.get("x"), args.get("y")
+                x, y = _scale(args.get("x"), args.get("y"))
                 if x is not None and y is not None:
                     await asyncio.to_thread(pyautogui.moveTo, int(x), int(y))
                 await asyncio.to_thread(pyautogui.scroll, clicks)
                 return {"result": f"Scrolled {clicks} units."}
 
             elif name == "mouse_drag":
-                sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
-                ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
+                sx, sy = _scale(int(args.get("start_x", 0)), int(args.get("start_y", 0)))
+                ex, ey = _scale(int(args.get("end_x", 0)), int(args.get("end_y", 0)))
                 button = args.get("button", "left")
                 await asyncio.to_thread(pyautogui.moveTo, sx, sy)
                 await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.4)
                 return {"result": f"Dragged from ({sx},{sy}) to ({ex},{ey})."}
 
             elif name == "mouse_move":
-                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                x, y = _scale(int(args.get("x", 0)), int(args.get("y", 0)))
                 await asyncio.to_thread(pyautogui.moveTo, x, y, duration=0.1)
                 return {"result": f"Moved mouse to ({x},{y})."}
 

@@ -29,42 +29,20 @@ if (-not (Test-Path $configFile)) {
             TargetTokens = '52428'
             FileSystem = 'enabled'
         }
-        'main2.py' = @{
-            AudioMode = 'half'
-            VisionMode = 'screen'
-            VoiceOutput = 'enabled'
-            Voice = 'Leda'
-            InputMode = 'both'
-            Playwright = 'enabled'
-            Headless = 'false'
-            ThinkingLevel = 'medium'
-            Resolution = 'low'
-            ChunkSize = '1024'
-            TriggerTokens = '104857'
-            TargetTokens = '52428'
-            FileSystem = 'enabled'
-            Proactivity = 'enabled'
-        }
-        'main3.py' = @{
-            AudioMode = 'half'
-            VisionMode = 'screen'
-            VoiceOutput = 'enabled'
-            Voice = 'Leda'
-            InputMode = 'both'
-            DesktopControl = 'enabled'
-            ThinkingLevel = 'high'
-            Resolution = 'high'
-            ChunkSize = '1024'
-            TriggerTokens = '104857'
-            TargetTokens = '52428'
-            FileSystem = 'enabled'
-            Proactivity = 'enabled'
-        }
     }
     $defaultConfig | ConvertTo-Json -Depth 10 | Set-Content $configFile
 }
 
-$config = Get-Content $configFile -Raw | ConvertFrom-Json
+# --- Load config ---
+$configRaw = Get-Content $configFile -Raw | ConvertFrom-Json -AsHashtable
+# Convert nested hashtables manually (ConvertFrom-Json in older PS makes PSCustomObjects)
+$config = @{}
+foreach ($k in $configRaw.Keys) {
+    $config[$k] = @{}
+    foreach ($subK in $configRaw[$k].psobject.properties.name) {
+        $config[$k][$subK] = $configRaw[$k].$subK
+    }
+}
 
 $envHasKey = $false
 $envFile = Join-Path $ScriptDir '.env'
@@ -86,22 +64,19 @@ Write-Host '             AlphaLive                  ' -ForegroundColor Cyan
 Write-Host '========================================' -ForegroundColor Cyan
 Write-Host ''
 
-$selectedScript = 'main.py'
+# --- Select Script to Run ---
+$selectedScript = 'gui.py'
 $scriptDone = $false
 while (-not $scriptDone) {
     Write-Host 'Select Boot Mode:' -ForegroundColor Green
     Write-Host '[0] GUI              (AlphaLive Control Interface - RECOMMENDED)' -ForegroundColor Cyan
-    Write-Host '[1] main.py          (Standard / Code - Console)' -ForegroundColor Green
-    Write-Host '[2] main2.py         (Playwright / Web - Console)' -ForegroundColor Green
-    Write-Host '[3] main3.py         (Desktop / PyAutoGUI - GUI)' -ForegroundColor Green
+    Write-Host '[1] main.py          (Alpha Core - Console)' -ForegroundColor Green
     Write-Host ''
-    Write-Host 'Press 0, 1, 2, or 3 (Enter = GUI): ' -ForegroundColor Yellow -NoNewline
+    Write-Host 'Press 0 or 1 (Enter = GUI): ' -ForegroundColor Yellow -NoNewline
     
     $key = [console]::ReadKey($true)
     if ($key.KeyChar -eq '0' -or $key.Key -eq 'Enter') { $selectedScript = 'gui.py'; $scriptDone = $true }
     elseif ($key.KeyChar -eq '1') { $selectedScript = 'main.py'; $scriptDone = $true }
-    elseif ($key.KeyChar -eq '2') { $selectedScript = 'main2.py'; $scriptDone = $true }
-    elseif ($key.KeyChar -eq '3') { $selectedScript = 'main3.py'; $scriptDone = $true }
     Clear-Host
     Write-Host '========================================' -ForegroundColor Cyan
     Write-Host '             AlphaLive                  ' -ForegroundColor Cyan
@@ -190,8 +165,6 @@ if ($configEntered) {
         Write-Host ''
         Write-Host '[1] Global Settings' -ForegroundColor Green
         Write-Host '[2] main.py Settings' -ForegroundColor Green
-        Write-Host '[3] main2.py Settings' -ForegroundColor Green
-        Write-Host '[4] main3.py Settings' -ForegroundColor Green
         Write-Host '[0] Save & Exit' -ForegroundColor Green
         Write-Host ''
         $choice = Read-Host 'Enter number'
@@ -201,14 +174,8 @@ if ($configEntered) {
             $props = @('ApiKey', 'Session', 'Modal', 'Memory', 'AlphaCoreInstruction', 'AutonomousControl')
             Show-Menu 'Global Settings' $props $config.Global
         } elseif ($choice -eq '2') {
-            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'Tools', 'FileSystem', 'MCP', 'Proactivity', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
-            Show-Menu 'main.py Settings' $props $config.'main.py'
-        } elseif ($choice -eq '3') {
-            $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'Playwright', 'FileSystem', 'Headless', 'Proactivity', 'ThinkingLevel', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
-            Show-Menu 'main2.py Settings' $props $config.'main2.py'
-        } elseif ($choice -eq '4') {
             $props = @('AudioMode', 'VisionMode', 'VoiceOutput', 'Voice', 'InputMode', 'DesktopControl', 'FileSystem', 'Proactivity', 'ThinkingLevel', 'Resolution', 'ChunkSize', 'TriggerTokens', 'TargetTokens')
-            Show-Menu 'main3.py Settings' $props $config.'main3.py'
+            Show-Menu 'main.py Settings' $props $config.'main.py'
         }
     }
     # Save config

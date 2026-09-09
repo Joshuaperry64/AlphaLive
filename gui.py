@@ -68,11 +68,9 @@ CONFIG_PATH  = SCRIPT_DIR / "config.json"
 HISTORY_DIR  = SCRIPT_DIR / "history"
 
 VOICES  = ["Leda", "Aoede", "Charon", "Fenrir", "Kore", "Puck", "Schedar", "Umbriel", "Zephyr"]
-ENGINES = ["main.py", "main2.py", "main3.py"]
+ENGINES = ["main.py"]
 ENGINE_LABELS = {
-    "main.py":  "ALPHA-1  /  Standard + MCP",
-    "main2.py": "ALPHA-2  /  Playwright · Web",
-    "main3.py": "ALPHA-3  /  Desktop Control",
+    "main.py":  "ALPHA CORE",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,21 +115,6 @@ DEFAULT_CONFIG = {
         "LuciMode": "disabled",
     },
     "main.py": {
-        "AudioMode": "half", "VisionMode": "continuous",
-        "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
-        "Tools": "enabled", "FileSystem": "enabled", "MCP": "disabled", "Proactivity": "enabled",
-        "Resolution": "medium", "ChunkSize": "1024",
-        "TriggerTokens": "104857", "TargetTokens": "52428",
-    },
-    "main2.py": {
-        "AudioMode": "half", "VisionMode": "screen",
-        "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
-        "Playwright": "enabled", "FileSystem": "enabled", "Headless": "false",
-        "Proactivity": "enabled",
-        "ThinkingLevel": "medium", "Resolution": "low",
-        "ChunkSize": "1024", "TriggerTokens": "104857", "TargetTokens": "52428",
-    },
-    "main3.py": {
         "AudioMode": "half", "VisionMode": "screen",
         "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
         "DesktopControl": "enabled", "FileSystem": "enabled", "ThinkingLevel": "high",
@@ -1550,37 +1533,6 @@ class GlobalPanel(QWidget):
 
 ENGINE_FIELDS = {
     "main.py": [
-        ("AudioMode",     "combo",  ["half","full","muted"],             "half=push-to-talk feel; full=always on; muted=no mic"),
-        ("VisionMode",    "combo",  ["on-demand","continuous","screen"], "Vision input source"),
-        ("InputMode",     "combo",  ["both","voice","text"],             "Accepted input channels"),
-        ("VoiceOutput",   "toggle", None,                               "Enable TTS audio response"),
-        ("Voice",         "combo",  VOICES,                             "Gemini TTS voice"),
-        ("Tools",         "toggle", None,                               "Enable code execution tool"),
-        ("FileSystem",    "toggle", None,                               "Enable local file system tools"),
-        ("MCP",           "toggle", None,                               "Enable MCP tools (Playwright etc.)"),
-        ("Proactivity",   "toggle", None,                               "Allow Alpha to speak unprompted"),
-        ("Resolution",    "combo",  ["low","medium","high"],            "Media resolution sent to the model"),
-        ("ChunkSize",     "spin",   (256, 8192, 256),                   "PyAudio read chunk size in bytes"),
-        ("TriggerTokens", "spin",   (10000, 200000, 1000),              "Tokens before context compression fires"),
-        ("TargetTokens",  "spin",   (5000, 100000, 1000),               "Sliding window target after compression"),
-    ],
-    "main2.py": [
-        ("AudioMode",     "combo",  ["half","full","muted"],            "Duplex mode"),
-        ("VisionMode",    "combo",  ["screen","on-demand","camera"],    "Vision source"),
-        ("InputMode",     "combo",  ["both","voice","text"],            "Input channels"),
-        ("VoiceOutput",   "toggle", None,                              "Enable TTS"),
-        ("Voice",         "combo",  VOICES,                            "TTS voice"),
-        ("Playwright",    "toggle", None,                              "Enable Playwright browser tools"),
-        ("FileSystem",    "toggle", None,                               "Enable local file system tools"),
-        ("Headless",      "combo",  ["false","true"],                  "Run browser headlessly"),
-        ("Proactivity",   "toggle", None,                               "Allow Alpha to speak unprompted"),
-        ("ThinkingLevel", "combo",  ["low","medium","high"],           "Model reasoning depth"),
-        ("Resolution",    "combo",  ["low","medium","high"],           "Screen capture quality"),
-        ("ChunkSize",     "spin",   (256, 8192, 256),                  "Audio chunk size"),
-        ("TriggerTokens", "spin",   (10000, 200000, 1000),             "Compression trigger"),
-        ("TargetTokens",  "spin",   (5000, 100000, 1000),              "Compression target"),
-    ],
-    "main3.py": [
         ("AudioMode",     "combo",  ["half","full","muted"],            "Duplex mode"),
         ("VisionMode",    "combo",  ["screen","camera","none"],         "Vision source"),
         ("InputMode",     "combo",  ["both","voice","text"],            "Input channels"),
@@ -1600,7 +1552,7 @@ ENGINE_FIELDS = {
 SECTIONS = {
     "Audio & Vision":     ["AudioMode","VisionMode","InputMode","VoiceOutput","Voice","ChunkSize"],
     "Model Parameters":   ["ThinkingLevel","Resolution","TriggerTokens","TargetTokens"],
-    "Tools & Automation": ["Tools","FileSystem","MCP","Playwright","DesktopControl","Headless","Proactivity"],
+    "Tools & Automation": ["FileSystem","DesktopControl","Proactivity"],
 }
 
 

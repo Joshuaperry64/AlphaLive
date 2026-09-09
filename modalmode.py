@@ -51,40 +51,71 @@ async def websocket_endpoint(websocket: WebSocket):
                         while True:
                             turn = session.receive()
                             async for response in turn:
+                                # ── Audio (primary path: response.data) ──────
+                                if response.data:
+                                    b64_audio = base64.b64encode(response.data).decode("utf-8")
+                                    await send_json({"type": "audio", "data": b64_audio})
+                                    continue
+
                                 sc = getattr(response, "server_content", None)
-                                if sc and getattr(sc, "model_turn", None):
-                                    for part in sc.model_turn.parts:
-                                        inline_data = getattr(part, "inline_data", None)
-                                        if inline_data and hasattr(inline_data, 'data'):
-                                            b64_audio = base64.b64encode(inline_data.data).decode('utf-8')
-                                            await send_json({"type": "audio", "data": b64_audio})
-                                        if hasattr(part, "text") and part.text:
-                                            await send_json({"type": "text", "data": part.text})
-                                        fc = getattr(part, "function_call", None)
-                                        if fc:
+                                if sc:
+                                    # ── model_turn parts (text + function_call + inline audio) ──
+                                    if getattr(sc, "model_turn", None):
+                                        for part in sc.model_turn.parts:
+                                            # Inline audio blob (fallback)
+                                            inline_data = getattr(part, "inline_data", None)
+                                            if inline_data and hasattr(inline_data, "data"):
+                                                b64_audio = base64.b64encode(inline_data.data).decode("utf-8")
+                                                await send_json({"type": "audio", "data": b64_audio})
+                                            # Text
+                                            if getattr(part, "text", None):
+                                                await send_json({"type": "text", "data": part.text})
+                                            # Function call
+                                            fc = getattr(part, "function_call", None)
+                                            if fc:
+                                                args_dict = {}
+                                                try:
+                                                    if fc.args:
+                                                        if isinstance(fc.args, dict):
+                                                            args_dict = dict(fc.args)
+                                                        elif hasattr(fc.args, "items"):
+                                                            args_dict = dict(fc.args.items())
+                                                        else:
+                                                            args_dict = fc.args
+                                                except Exception:
+                                                    pass
+                                                await send_json({
+                                                    "type": "function_call",
+                                                    "name": fc.name,
+                                                    "id": getattr(fc, "id", None),
+                                                    "args": args_dict,
+                                                })
+
+                                    # ── tool_call attribute (alternative SDK path) ──
+                                    tool_call = getattr(response, "tool_call", None)
+                                    if tool_call:
+                                        for fc in tool_call.function_calls:
                                             args_dict = {}
                                             try:
                                                 if fc.args:
-                                                    if isinstance(fc.args, dict):
-                                                        args_dict = dict(fc.args)
-                                                    elif hasattr(fc.args, 'items'):
-                                                        args_dict = dict(fc.args.items())
-                                                    else:
-                                                        args_dict = fc.args
-                                            except:
+                                                    args_dict = dict(fc.args) if isinstance(fc.args, dict) else dict(fc.args.items())
+                                            except Exception:
                                                 pass
                                             await send_json({
-                                                "type": "function_call", 
-                                                "name": fc.name, 
+                                                "type": "function_call",
+                                                "name": fc.name,
                                                 "id": getattr(fc, "id", None),
-                                                "args": args_dict
+                                                "args": args_dict,
                                             })
-                                output_transcription = getattr(sc, 'output_transcription', None) if sc else None
-                                input_transcription = getattr(sc, 'input_transcription', None) if sc else None
-                                if output_transcription and getattr(output_transcription, "text", None):
-                                    await send_json({"type": "output_transcription", "data": output_transcription.text})
-                                if input_transcription and getattr(input_transcription, "text", None):
-                                    await send_json({"type": "input_transcription", "data": input_transcription.text})
+
+                                    # ── Transcriptions ────────────────────────
+                                    out_tr = getattr(sc, "output_transcription", None)
+                                    in_tr  = getattr(sc, "input_transcription", None)
+                                    if out_tr and getattr(out_tr, "text", None):
+                                        await send_json({"type": "output_transcription", "data": out_tr.text})
+                                    if in_tr and getattr(in_tr, "text", None):
+                                        await send_json({"type": "input_transcription", "data": in_tr.text})
+
                             await send_json({"type": "turn_complete"})
                     except WebSocketDisconnect:
                         raise
@@ -92,7 +123,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         print(f"Google disconnect: {e}")
                         try:
                             await send_json({"type": "error", "data": f"Gemini stream error: {e}"})
-                        except: pass
+                        except Exception:
+                            pass
                         raise
 
                 async def receive_from_client():

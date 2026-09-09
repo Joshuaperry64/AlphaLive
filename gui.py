@@ -1828,7 +1828,6 @@ class LaunchSidebar(QFrame):
     stop_requested   = pyqtSignal()
     calib_requested  = pyqtSignal()
     overlay_requested= pyqtSignal()
-    deploy_requested = pyqtSignal(str)
     quick_settings_changed = pyqtSignal(dict)
 
     def __init__(self, cfg: dict, parent=None):
@@ -2164,8 +2163,8 @@ class MainWindow(QMainWindow):
         self._sidebar.stop_requested.connect(self._stop)
         self._sidebar.calib_requested.connect(self._start_calibration)
         self._sidebar.overlay_requested.connect(self._toggle_overlay)
-        self._sidebar.deploy_requested.connect(self._do_deploy_modal)
         self._sidebar.quick_settings_changed.connect(self._on_quick_settings_changed)
+        self._modal_db.deploy_requested.connect(self._do_deploy_modal_ext)
         body.addWidget(self._sidebar)
         
         self._cursor_overlay = None

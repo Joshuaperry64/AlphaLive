@@ -111,6 +111,18 @@ class MemoryManager:
             ''', (query_subject.lower(),)).fetchall()
             return [dict(row) for row in rows]
 
+    def search_knowledge(self, query: str) -> list:
+        """Full-text search across subjects, predicates, and objects."""
+        with self._get_conn() as conn:
+            q = f"%{query.lower()}%"
+            rows = conn.execute('''
+                SELECT subject, predicate, object, source, created_at
+                FROM knowledge_graph
+                WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ?
+                ORDER BY created_at DESC LIMIT 50
+            ''', (q, q, q)).fetchall()
+            return [dict(row) for row in rows]
+
     # --- Episodic Memory Operations ---
 
     def write_diary_entry(self, content: str, session_name: str = "unknown", sentiment: float = 0.0) -> bool:

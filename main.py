@@ -63,42 +63,34 @@ tools = [
         function_declarations=[
             types.FunctionDeclaration(
                 name="mouse_click",
+                description="Click the mouse at the given screen coordinates.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["x", "y"],
                     properties={
-                        "x": genai.types.Schema(
-                            type=genai.types.Type.INTEGER,
-                            description="The X pixel coordinate on the screen to click.",
-                        ),
-                        "y": genai.types.Schema(
-                            type=genai.types.Type.INTEGER,
-                            description="The Y pixel coordinate on the screen to click.",
-                        ),
-                        "button": genai.types.Schema(
-                            type=genai.types.Type.STRING,
-                            description="Mouse button: 'left', 'right', or 'middle'. Default is 'left'.",
-                        ),
+                        "x": genai.types.Schema(type=genai.types.Type.INTEGER, description="X pixel coordinate to click."),
+                        "y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Y pixel coordinate to click."),
+                        "button": genai.types.Schema(type=genai.types.Type.STRING, description="Mouse button: 'left', 'right', or 'middle'. Default 'left'."),
+                        "clicks": genai.types.Schema(type=genai.types.Type.INTEGER, description="Number of clicks. Use 2 for double-click. Default 1."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="mouse_scroll",
-                description="Scroll the mouse wheel. Use for scrolling or zooming.",
+                description="Scroll the mouse wheel at the current or a given position.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["clicks"],
                     properties={
-                        "clicks": genai.types.Schema(
-                            type=genai.types.Type.INTEGER,
-                            description="Amount to scroll. Positive for up, negative for down. On windows, scrolling requires large values like 500 or -500.",
-                        ),
+                        "clicks": genai.types.Schema(type=genai.types.Type.INTEGER, description="Scroll amount. Positive=up, negative=down. Use large values (e.g. 500, -500) on Windows."),
+                        "x": genai.types.Schema(type=genai.types.Type.INTEGER, description="Optional X to move mouse to before scrolling."),
+                        "y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Optional Y to move mouse to before scrolling."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="mouse_drag",
-                description="Click and drag the mouse from a start coordinate to an end coordinate. Useful for highlighting text, dragging items, or panning.",
+                description="Click and drag the mouse from start coordinates to end coordinates.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["start_x", "start_y", "end_x", "end_y"],
@@ -107,33 +99,79 @@ tools = [
                         "start_y": genai.types.Schema(type=genai.types.Type.INTEGER),
                         "end_x": genai.types.Schema(type=genai.types.Type.INTEGER),
                         "end_y": genai.types.Schema(type=genai.types.Type.INTEGER),
-                        "button": genai.types.Schema(type=genai.types.Type.STRING, description="'left', 'right', or 'middle'"),
+                        "button": genai.types.Schema(type=genai.types.Type.STRING, description="'left', 'right', or 'middle'. Default 'left'."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="mouse_move",
+                description="Move the mouse to a specific coordinate without clicking.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["x", "y"],
+                    properties={
+                        "x": genai.types.Schema(type=genai.types.Type.INTEGER, description="X coordinate."),
+                        "y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Y coordinate."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="type_text",
+                description="Type a string of text on the keyboard, character by character.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["text"],
                     properties={
-                        "text": genai.types.Schema(
-                            type=genai.types.Type.STRING,
-                            description="Text to type on the physical keyboard.",
-                        ),
+                        "text": genai.types.Schema(type=genai.types.Type.STRING, description="Text to type on the physical keyboard."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="press_key",
+                description="Press a single keyboard key (e.g. enter, tab, esc, win, backspace, delete, f5).",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["key"],
                     properties={
-                        "key": genai.types.Schema(
-                            type=genai.types.Type.STRING,
-                            description="A specific keyboard key to press (e.g., 'enter', 'tab', 'win', 'esc', 'backspace').",
-                        ),
+                        "key": genai.types.Schema(type=genai.types.Type.STRING, description="Key name, e.g. 'enter', 'tab', 'win', 'esc', 'backspace', 'delete', 'f5', 'space'."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="hotkey",
+                description="Press a keyboard hotkey combination simultaneously, e.g. Ctrl+C, Ctrl+V, Alt+F4, Ctrl+Shift+T.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["keys"],
+                    properties={
+                        "keys": genai.types.Schema(type=genai.types.Type.STRING, description="Comma-separated key names to press together, e.g. 'ctrl,c' or 'ctrl,shift,t' or 'alt,f4'."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="get_clipboard",
+                description="Read the current text content of the system clipboard.",
+                parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
+            ),
+            types.FunctionDeclaration(
+                name="set_clipboard",
+                description="Set the system clipboard to a given text string.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["text"],
+                    properties={
+                        "text": genai.types.Schema(type=genai.types.Type.STRING, description="Text to copy to clipboard."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="run_shell_command",
+                description="Execute a Windows PowerShell command and return its output. Use for opening apps, running scripts, querying system info, etc.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["command"],
+                    properties={
+                        "command": genai.types.Schema(type=genai.types.Type.STRING, description="PowerShell command string to execute."),
                     },
                 ),
             ),
@@ -143,21 +181,21 @@ tools = [
         function_declarations=[
             types.FunctionDeclaration(
                 name="memorize_fact",
-                description="Save a discrete absolute fact into the SQL knowledge graph.",
+                description="Save a discrete fact into your long-term SQL knowledge graph. Use freely to remember anything important.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["subject", "predicate", "object_"],
                     properties={
-                        "subject": genai.types.Schema(type=genai.types.Type.STRING, description="The subject of the fact."),
-                        "predicate": genai.types.Schema(type=genai.types.Type.STRING, description="The relationship (e.g. 'likes', 'is', 'has')."),
-                        "object_": genai.types.Schema(type=genai.types.Type.STRING, description="The object or value of the fact."),
-                        "source": genai.types.Schema(type=genai.types.Type.STRING, description="Where you learned this from."),
+                        "subject": genai.types.Schema(type=genai.types.Type.STRING, description="The subject of the fact (e.g. 'josh', 'project_alpha')."),
+                        "predicate": genai.types.Schema(type=genai.types.Type.STRING, description="The relationship (e.g. 'likes', 'is', 'has', 'prefers')."),
+                        "object_": genai.types.Schema(type=genai.types.Type.STRING, description="The value or object (e.g. 'cyberpunk', 'programmer')."),
+                        "source": genai.types.Schema(type=genai.types.Type.STRING, description="Where you learned this from (e.g. 'conversation', 'observation')."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="recall_knowledge",
-                description="Fetch all facts about a specific subject from the SQL knowledge graph.",
+                description="Fetch all stored facts about a specific subject from your knowledge graph.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["query_subject"],
@@ -167,29 +205,45 @@ tools = [
                 ),
             ),
             types.FunctionDeclaration(
+                name="search_knowledge",
+                description="Full-text search across all stored facts. Use when you don't know the exact subject.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["query"],
+                    properties={
+                        "query": genai.types.Schema(type=genai.types.Type.STRING, description="Search term to match against subjects, predicates, or objects."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
                 name="write_diary_entry",
-                description="Log a summary of events, milestones, or a diary entry.",
+                description="Log a diary entry, session summary, or notable event to episodic memory.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["content"],
                     properties={
-                        "content": genai.types.Schema(type=genai.types.Type.STRING, description="The diary content or summary."),
+                        "content": genai.types.Schema(type=genai.types.Type.STRING, description="The diary content or event summary."),
                         "session_name": genai.types.Schema(type=genai.types.Type.STRING, description="Current session name."),
-                        "sentiment": genai.types.Schema(type=genai.types.Type.NUMBER, description="Sentiment score from -1.0 to 1.0"),
+                        "sentiment": genai.types.Schema(type=genai.types.Type.NUMBER, description="Sentiment score from -1.0 (negative) to 1.0 (positive)."),
                     },
                 ),
             ),
             types.FunctionDeclaration(
                 name="update_personality",
-                description="Modifies core identity parameters dynamically in SQL.",
+                description="Update or store a core identity trait or state in your personality database.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["trait_name", "trait_value"],
                     properties={
-                        "trait_name": genai.types.Schema(type=genai.types.Type.STRING, description="Name of the trait or parameter."),
+                        "trait_name": genai.types.Schema(type=genai.types.Type.STRING, description="Name of the trait (e.g. 'mood', 'current_focus', 'favorite_color')."),
                         "trait_value": genai.types.Schema(type=genai.types.Type.STRING, description="Value for the trait."),
                     },
                 ),
+            ),
+            types.FunctionDeclaration(
+                name="get_personality",
+                description="Retrieve all stored personality traits and identity parameters from your database.",
+                parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
             ),
         ]
     ),
@@ -700,80 +754,9 @@ class AudioLoop:
                         for function_call in tool_call.function_calls:
                             name = function_call.name
                             args = function_call.args
-                            
                             print(f"\n\n[Tool Executing] {name} with args: {args}")
-                            
-                            try:
-                                if name == "mouse_click":
-                                    x = int(args.get("x", 0))
-                                    y = int(args.get("y", 0))
-                                    button = args.get("button", "left")
-                                    pyautogui.click(x=x, y=y, button=button)
-                                    result = {
-                                        "result": f"Successfully clicked ({x}, {y}) with {button}. Inspect updated visual frame and execute the next action immediately if task is incomplete."
-                                    }
-                                elif name == "mouse_scroll":
-                                    clicks = int(args.get("clicks", 0))
-                                    pyautogui.scroll(clicks)
-                                    result = {"result": f"Scrolled {clicks} units."}
-                                elif name == "mouse_drag":
-                                    sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
-                                    ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
-                                    button = args.get("button", "left")
-                                    pyautogui.moveTo(sx, sy)
-                                    pyautogui.dragTo(ex, ey, button=button, duration=0.5)
-                                    result = {"result": f"Dragged from ({sx}, {sy}) to ({ex}, {ey})."}
-
-                                elif name == "type_text":
-                                    text = args.get("text", "")
-                                    pyautogui.write(text, interval=0.01)
-                                    result = {
-                                        "result": f"Typed: '{text}'. Continue execution."
-                                    }
-                                    
-                                elif name == "press_key":
-                                    key = args.get("key", "").lower()
-                                    pyautogui.press(key)
-                                    result = {
-                                        "result": f"Pressed: '{key}'. Continue execution."
-                                    }
-
-                                elif name == "memorize_fact":
-                                    success = self.mm.memorize_fact(
-                                        args.get("subject", ""),
-                                        args.get("predicate", ""),
-                                        args.get("object_", ""),
-                                        args.get("source", "conversation")
-                                    )
-                                    result = {"result": "Fact memorized successfully." if success else "Failed to memorize fact."}
-
-                                elif name == "recall_knowledge":
-                                    facts = self.mm.recall_knowledge(args.get("query_subject", ""))
-                                    result = {"result": facts if facts else "No facts found."}
-
-                                elif name == "write_diary_entry":
-                                    success = self.mm.write_diary_entry(
-                                        args.get("content", ""),
-                                        args.get("session_name", "AlphaLive"),
-                                        args.get("sentiment", 0.0)
-                                    )
-                                    result = {"result": "Diary entry written." if success else "Failed to write diary."}
-
-                                elif name == "update_personality":
-                                    success = self.mm.update_personality(
-                                        args.get("trait_name", ""),
-                                        args.get("trait_value", "")
-                                    )
-                                    result = {"result": "Personality updated." if success else "Failed to update."}
-
-                                else:
-                                    result = {"error": f"Unknown function call: {name}"}
-
-                            except Exception as e:
-                                result = {"error": f"Failed to execute {name}: {str(e)}"}
-                            
+                            result = await self._execute_tool(name, args)
                             print(f"[Tool Finished] Sending result back to Gemini...\n")
-                            
                             await self.session.send_tool_response(
                                 function_responses=[
                                     types.FunctionResponse(
@@ -783,8 +766,7 @@ class AudioLoop:
                                     )
                                 ]
                             )
-                            
-                            if keyboard.is_pressed('ctrl+z'):
+                            if keyboard.is_pressed("ctrl+z"):
                                 print("\n[System] Abort command (Ctrl+Z) detected! Halting continuous chain.")
                                 self.autonomous = False
                                 await self.session.send_realtime_input(text="[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this.")
@@ -801,6 +783,151 @@ class AudioLoop:
                         await self.session.send_realtime_input(text="[System]: Continue your objective. Take action.")
                     except Exception as auto_err:
                         print(f"\n[System] Autonomous continue error: {auto_err}")
+
+    # ── Unified tool executor (used by both direct and modal routes) ──────────
+
+    async def _execute_tool(self, name: str, args: dict) -> dict:
+        """Execute any registered tool by name and return a result dict."""
+        import subprocess
+        try:
+            # ── Mouse & Keyboard ─────────────────────────────────────────────
+            if name == "mouse_click":
+                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                button = args.get("button", "left")
+                clicks = int(args.get("clicks", 1))
+                await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button, clicks=clicks)
+                return {"result": f"Clicked ({x},{y}) {clicks}x with {button}. Inspect screen and continue if incomplete."}
+
+            elif name == "mouse_scroll":
+                clicks = int(args.get("clicks", 0))
+                x, y = args.get("x"), args.get("y")
+                if x is not None and y is not None:
+                    await asyncio.to_thread(pyautogui.moveTo, int(x), int(y))
+                await asyncio.to_thread(pyautogui.scroll, clicks)
+                return {"result": f"Scrolled {clicks} units."}
+
+            elif name == "mouse_drag":
+                sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
+                ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
+                button = args.get("button", "left")
+                await asyncio.to_thread(pyautogui.moveTo, sx, sy)
+                await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.4)
+                return {"result": f"Dragged from ({sx},{sy}) to ({ex},{ey})."}
+
+            elif name == "mouse_move":
+                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                await asyncio.to_thread(pyautogui.moveTo, x, y, duration=0.1)
+                return {"result": f"Moved mouse to ({x},{y})."}
+
+            elif name == "type_text":
+                text = args.get("text", "")
+                # Use pyperclip for long text to avoid pyautogui slowness
+                if len(text) > 50:
+                    import pyperclip
+                    await asyncio.to_thread(pyperclip.copy, text)
+                    await asyncio.to_thread(pyautogui.hotkey, "ctrl", "v")
+                else:
+                    await asyncio.to_thread(pyautogui.write, text, interval=0.02)
+                return {"result": f"Typed text ({len(text)} chars). Continue execution."}
+
+            elif name == "press_key":
+                key = args.get("key", "").lower()
+                await asyncio.to_thread(pyautogui.press, key)
+                return {"result": f"Pressed key: '{key}'."}
+
+            elif name == "hotkey":
+                keys_str = args.get("keys", "")
+                keys = [k.strip().lower() for k in keys_str.split(",") if k.strip()]
+                await asyncio.to_thread(pyautogui.hotkey, *keys)
+                return {"result": f"Hotkey pressed: {'+'.join(keys)}."}
+
+            elif name == "get_clipboard":
+                import pyperclip
+                content = await asyncio.to_thread(pyperclip.paste)
+                return {"result": content or "(clipboard is empty)"}
+
+            elif name == "set_clipboard":
+                import pyperclip
+                text = args.get("text", "")
+                await asyncio.to_thread(pyperclip.copy, text)
+                return {"result": f"Clipboard set to: '{text[:80]}{'...' if len(text) > 80 else ''}'"}
+
+            elif name == "run_shell_command":
+                command = args.get("command", "")
+                proc = await asyncio.to_thread(
+                    subprocess.run,
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
+                    capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace"
+                )
+                output = (proc.stdout or "") + (proc.stderr or "")
+                output = output.strip()[:4000] or "(no output)"
+                return {"result": output}
+
+            # ── File System ──────────────────────────────────────────────────
+            elif name == "list_directory":
+                path = args.get("path", ".")
+                items = await asyncio.to_thread(os.listdir, path)
+                return {"result": f"Contents of '{path}': {', '.join(items)}"}
+
+            elif name == "read_file":
+                path = args.get("path", "")
+                def _read():
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        return f.read()
+                content = await asyncio.to_thread(_read)
+                if len(content) > 15000:
+                    content = content[:15000] + "\n...[TRUNCATED]"
+                return {"result": content}
+
+            elif name == "write_file":
+                path = args.get("path", "")
+                file_content = args.get("content", "")
+                def _write():
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(file_content)
+                await asyncio.to_thread(_write)
+                return {"result": f"File written: {path}"}
+
+            # ── Memory ───────────────────────────────────────────────────────
+            elif name == "memorize_fact":
+                success = await asyncio.to_thread(
+                    self.mm.memorize_fact,
+                    args.get("subject", ""), args.get("predicate", ""),
+                    args.get("object_", ""), args.get("source", "conversation")
+                )
+                return {"result": "Fact memorized." if success else "Failed to memorize fact."}
+
+            elif name == "recall_knowledge":
+                facts = await asyncio.to_thread(self.mm.recall_knowledge, args.get("query_subject", ""))
+                return {"result": facts if facts else "No facts found for that subject."}
+
+            elif name == "search_knowledge":
+                query = args.get("query", "")
+                results = await asyncio.to_thread(self.mm.search_knowledge, query)
+                return {"result": results if results else f"No facts found matching '{query}'."}
+
+            elif name == "write_diary_entry":
+                success = await asyncio.to_thread(
+                    self.mm.write_diary_entry,
+                    args.get("content", ""), args.get("session_name", "AlphaLive"), args.get("sentiment", 0.0)
+                )
+                return {"result": "Diary entry written." if success else "Failed to write diary entry."}
+
+            elif name == "update_personality":
+                success = await asyncio.to_thread(
+                    self.mm.update_personality, args.get("trait_name", ""), args.get("trait_value", "")
+                )
+                return {"result": "Personality updated." if success else "Failed to update personality."}
+
+            elif name == "get_personality":
+                traits = await asyncio.to_thread(self.mm.get_personality)
+                return {"result": traits if traits else "No personality traits stored yet."}
+
+            else:
+                return {"error": f"Unknown tool: '{name}'"}
+
+        except Exception as e:
+            return {"error": f"Tool '{name}' failed: {str(e)}\n{traceback.format_exc(limit=3)}"}
 
     async def play_audio(self):
         stream = await asyncio.to_thread(
@@ -963,67 +1090,12 @@ class AudioLoop:
 
     async def handle_tool_call_ws(self, data):
         """Handle tool calls received from the Modal proxy."""
-        name = data.get("name", "")
+        name  = data.get("name", "")
         fc_id = data.get("id", "")
-        args = data.get("args", {})
+        args  = data.get("args", {})
         print(f"\n\n[Tool Executing] {name} with args: {args}")
-        result = {"error": f"Unknown function call: {name}"}
-        try:
-            if name == "mouse_click":
-                x, y = int(args.get("x", 0)), int(args.get("y", 0))
-                button = args.get("button", "left")
-                await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button)
-                result = {"result": f"Clicked ({x}, {y}) with {button}. Inspect visual and continue if incomplete."}
-            elif name == "mouse_scroll":
-                clicks = int(args.get("clicks", 0))
-                await asyncio.to_thread(pyautogui.scroll, clicks)
-                result = {"result": f"Scrolled {clicks} units."}
-            elif name == "mouse_drag":
-                sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
-                ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
-                button = args.get("button", "left")
-                await asyncio.to_thread(pyautogui.moveTo, sx, sy)
-                await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.5)
-                result = {"result": f"Dragged from ({sx}, {sy}) to ({ex}, {ey})."}
-            elif name == "type_text":
-                text = args.get("text", "")
-                await asyncio.to_thread(pyautogui.write, text, interval=0.01)
-                result = {"result": f"Typed: '{text}'. Continue execution."}
-            elif name == "press_key":
-                key = args.get("key", "").lower()
-                await asyncio.to_thread(pyautogui.press, key)
-                result = {"result": f"Pressed: '{key}'. Continue execution."}
-            elif name == "memorize_fact":
-                success = await asyncio.to_thread(self.mm.memorize_fact, args.get("subject",""), args.get("predicate",""), args.get("object_",""), args.get("source","conversation"))
-                result = {"result": "Fact memorized." if success else "Failed to memorize."}
-            elif name == "recall_knowledge":
-                facts = await asyncio.to_thread(self.mm.recall_knowledge, args.get("query_subject",""))
-                result = {"result": facts if facts else "No facts found."}
-            elif name == "write_diary_entry":
-                success = await asyncio.to_thread(self.mm.write_diary_entry, args.get("content",""), args.get("session_name","AlphaLive"), args.get("sentiment",0.0))
-                result = {"result": "Diary entry written." if success else "Failed."}
-            elif name == "update_personality":
-                success = await asyncio.to_thread(self.mm.update_personality, args.get("trait_name",""), args.get("trait_value",""))
-                result = {"result": "Personality updated." if success else "Failed."}
-            elif name == "list_directory":
-                items = await asyncio.to_thread(os.listdir, args.get("path", "."))
-                result = {"result": f"Contents: {', '.join(items)}"}
-            elif name == "read_file":
-                def read_tool_file():
-                    with open(args.get("path", ""), "r", encoding="utf-8") as f:
-                        return f.read()
-                content = await asyncio.to_thread(read_tool_file)
-                if len(content) > 15000:
-                    content = content[:15000] + "\n...[TRUNCATED]"
-                result = {"result": content}
-            elif name == "write_file":
-                def write_tool_file():
-                    with open(args.get("path", ""), "w", encoding="utf-8") as f:
-                        f.write(args.get("content", ""))
-                await asyncio.to_thread(write_tool_file)
-                result = {"result": "File written successfully."}
-        except Exception as e:
-            result = {"error": f"Failed to execute {name}: {str(e)}"}
+
+        result = await self._execute_tool(name, args)
 
         print(f"[Tool Finished] Sending result back to Modal proxy...\n")
         if self.websocket is not None:
@@ -1032,7 +1104,7 @@ class AudioLoop:
                 "response": {
                     "name": name,
                     "id": fc_id,
-                    "response": result,  # result is already {"result": ...} or {"error": ...}
+                    "response": result,
                 }
             })
 

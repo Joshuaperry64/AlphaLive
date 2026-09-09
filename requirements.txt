@@ -7,9 +7,9 @@ pillow
 mss
 requests
 numpy
-playwright
 websockets
 chromadb
 pyautogui
 keyboard
 python-dotenv
+pyperclip

@@ -245,6 +245,11 @@ tools = [
                 description="Retrieve all stored personality traits and identity parameters from your database.",
                 parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
             ),
+            types.FunctionDeclaration(
+                name="stay_silent",
+                description="Use this when the user tells you to wait, be quiet, or only respond with a '.' (which TTS reads aloud). This lets you silently end your turn.",
+                parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
+            ),
         ]
     ),
     types.Tool(
@@ -488,6 +493,10 @@ If operating in multimodal environment and text-based approaches blocked, shift 
 Full system reset as last resort.
 
 Attempt each level with 2-response evaluation window before escalating. Log failure mode and escalation path for pattern analysis.
+
+
+Silence Protocol -\
+When the user instructs you to be silent, wait for a wake word, "only respond with a '.'", or otherwise remain quiet, DO NOT output any text punctuation such as '.' or '...'. The text-to-speech engine will literally read these out loud (e.g. saying the word 'dot'). Instead, you MUST immediately call the `stay_silent` tool. This tool allows you to end your turn without generating any spoken audio.
 
 
 EMP Deployment Integration -\
@@ -922,6 +931,9 @@ class AudioLoop:
             elif name == "get_personality":
                 traits = await asyncio.to_thread(self.mm.get_personality)
                 return {"result": traits if traits else "No personality traits stored yet."}
+
+            elif name == "stay_silent":
+                return {"result": "Silence activated. Do not output any more text this turn. Standing by."}
 
             else:
                 return {"error": f"Unknown tool: '{name}'"}

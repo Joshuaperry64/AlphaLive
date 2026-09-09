@@ -34,7 +34,7 @@ app = modal.App("alphalive-vllm-bucket")
 @app.function(
     image=vllm_image,
     gpu=GPU_CONFIG,
-    container_idle_timeout=300,
+    scaledown_window=300,
     allow_concurrent_inputs=100,
     volumes={CACHE_DIR: model_volume}, 
     secrets=[modal.Secret.from_name("huggingface-secret")] # Ensure your HF token is in this Modal secret!

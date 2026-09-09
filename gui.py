@@ -1254,6 +1254,8 @@ class ChatBubble(QFrame):
 
 
 class HistoryTab(QWidget):
+    session_selected = pyqtSignal(str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         root = QHBoxLayout(self)
@@ -1324,6 +1326,9 @@ class HistoryTab(QWidget):
         path = item.data(Qt.ItemDataRole.UserRole)
         self._title.setText(f"Session: {item.text()}")
         self._load_file(path)
+        
+        session_name = str(item.text()).replace(".txt", "")
+        self.session_selected.emit(session_name)
 
     def _load_file(self, path: str):
         while self._box_l.count():
@@ -2174,6 +2179,7 @@ class MainWindow(QMainWindow):
         self._terminal = TerminalTab()
         self._monitor  = MonitorTab()
         self._history  = HistoryTab()
+        self._history.session_selected.connect(self._on_history_session_selected)
         self._config   = ConfigTab(self._cfg)
         self._modal_db = ModalTab()
         self._logs     = LogsTab()
@@ -2214,13 +2220,21 @@ class MainWindow(QMainWindow):
         g.update(updates)
         save_config(self._cfg)
         
-        # Sync back to Config tab if possible (we assume it exists)
         try:
-            self._config._pnls["Global"]._w["Modal"].setChecked(updates["Modal"] == "enabled")
-            self._config._pnls["Global"]._w["Memory"].setChecked(updates["Memory"] == "enabled")
-            self._config._pnls["Global"]._w["AutonomousControl"].setChecked(updates["AutonomousControl"] == "enabled")
+            self._config._pnls["Global"]._w["Modal"].setChecked(g.get("Modal") == "enabled")
+            self._config._pnls["Global"]._w["Memory"].setChecked(g.get("Memory") == "enabled")
+            self._config._pnls["Global"]._w["AutonomousControl"].setChecked(g.get("AutonomousControl") == "enabled")
         except Exception: pass
         self._slog("Quick settings updated & saved.", "system")
+
+    def _on_history_session_selected(self, session_name: str):
+        try:
+            self._config._pnls["Global"]._w["Session"].setText(session_name)
+            self._config._save()
+            self._slog(f"Active session changed to: {session_name}", "system")
+            self._terminal.append(f"[SYSTEM] Session context switched to '{session_name}'.", C["neon_blue"])
+        except Exception as e:
+            self._slog(f"Failed to switch session: {e}", "error")
 
     def _do_deploy_modal_ext(self, target: str, action: str):
         proc_attr = f"_{target}_deploy_proc"

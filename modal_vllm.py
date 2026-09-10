@@ -22,6 +22,7 @@ vllm_image = (
         "uvicorn"
     )
     # Install the new Hugging Face CLI (required for hf buckets sync)
+    .apt_install("curl")
     .run_commands("curl -LsSf https://hf.co/cli/install.sh | bash -s")
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",

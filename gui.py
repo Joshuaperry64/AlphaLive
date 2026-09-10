@@ -2561,26 +2561,20 @@ class CalibrationOverlay(QWidget):
         self.page = 1
         self.last_click_time = 0.0
         self.targets = {}
+        self.click_history = []
         
         self.setMouseTracking(True)
         self._setup_page()
 
     def _setup_page(self):
         self.targets.clear()
+        self.click_history.clear()
         w = self.width()
         h = self.height()
         
         if self.page == 1:
             size = 120
-            include_center = True
-        elif self.page == 2:
-            size = 70
-            include_center = True
-        else:
-            size = 70
-            include_center = False
-            
-        if include_center:
+            # Fixed corners and center for page 1
             coords = [
                 (50, 50),
                 (w - size - 50, 50),
@@ -2589,12 +2583,14 @@ class CalibrationOverlay(QWidget):
                 (w - size - 50, h - size - 50)
             ]
         else:
-            coords = [
-                (50, 50),
-                (w - size - 50, 50),
-                (50, h - size - 50),
-                (w - size - 50, h - size - 50)
-            ]
+            # Randomize positions for pages 2 and 3
+            size = 70
+            coords = []
+            num_targets = 5 if self.page == 2 else 4
+            for _ in range(num_targets):
+                rx = random.randint(50, w - size - 50)
+                ry = random.randint(100, h - size - 50)
+                coords.append((rx, ry))
             
         for x, y in coords:
             rect = QRect(x, y, size, size)
@@ -2603,13 +2599,15 @@ class CalibrationOverlay(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
+        pos = event.pos()
+        self.click_history.append(pos)
+        
         current_time = time.time()
         if current_time - self.last_click_time < 1.0:
             QMessageBox.warning(self, "TOO FAST!", "You pressed the boxes too quickly.\nA 1-second delay is required between each box.\nRestarting this calibration step...")
             self._setup_page()
             return
             
-        pos = event.pos()
         hit = False
         for rect, state in self.targets.items():
             if not state and rect.contains(pos):
@@ -2617,10 +2615,11 @@ class CalibrationOverlay(QWidget):
                 hit = True
                 break
                 
+        # Always update to draw the blue dot
+        self.update()
+
         if hit:
             self.last_click_time = time.time()
-            self.update()
-            
             if all(self.targets.values()):
                 QTimer.singleShot(500, self._advance)
 
@@ -2635,13 +2634,28 @@ class CalibrationOverlay(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         
-        painter.setFont(QFont("Arial", 14))
+        painter.setFont(QFont("Arial", 12))
         painter.setPen(Qt.GlobalColor.white)
-        painter.drawText(QRect(0, 30, self.width(), 30), Qt.AlignmentFlag.AlignCenter, f"Calibration Page {self.page}/3\nPress on the red boxes one at a time (wait 1 sec between clicks).")
+        instruction = f"Calibration Page {self.page}/3\nPress on the red boxes one at a time (wait 1 sec between clicks).\nEverywhere that gets clicked will show as a blue dot to help verify accuracy."
+        painter.drawText(QRect(0, 30, self.width(), 60), Qt.AlignmentFlag.AlignCenter, instruction)
         
+        # Draw target squares
         for rect, state in self.targets.items():
             color = Qt.GlobalColor.green if state else Qt.GlobalColor.red
             painter.fillRect(rect, color)
+            
+            # Show coordinates on Page 1 only
+            if self.page == 1:
+                painter.setPen(Qt.GlobalColor.white)
+                painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+                coord_text = f"{rect.center().x()}, {rect.center().y()}"
+                painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, coord_text)
+                
+        # Draw blue dots for click history
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(QColor(0, 150, 255)))
+        for pt in self.click_history:
+            painter.drawEllipse(pt, 6, 6)
 
 
 

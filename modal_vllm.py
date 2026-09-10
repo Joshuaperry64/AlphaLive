@@ -44,7 +44,7 @@ app = modal.App("alphalive-vllm-bucket")
 def serve():
     import vllm
     from vllm.entrypoints.openai.api_server import build_app
-    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.entrypoints.openai.cli_args import make_arg_parser
     
     # 2. Sync the HF Bucket to the Modal Volume before starting vLLM.
     #    (This only downloads files that are missing or changed, so it's instant after the first run)
@@ -54,13 +54,14 @@ def serve():
     print("Sync complete!")
     
     # 3. Initialize vLLM pointing directly to the downloaded files in the Volume
-    engine_args = AsyncEngineArgs(
-        model=LOCAL_MODEL_PATH,
-        tensor_parallel_size=1,
-        max_model_len=4096,
-        gpu_memory_utilization=0.90,
-        enforce_eager=False,
-    )
+    parser = make_arg_parser()
+    args = parser.parse_args([])
     
-    app = build_app(engine_args)
+    args.model = LOCAL_MODEL_PATH
+    args.tensor_parallel_size = 1
+    args.max_model_len = 4096
+    args.gpu_memory_utilization = 0.90
+    args.enforce_eager = False
+    
+    app = build_app(args)
     return app

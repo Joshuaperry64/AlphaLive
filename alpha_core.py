@@ -654,6 +654,13 @@ class AudioLoop:
         self._vllm_history: list = []          # rolling conversation context
         self._vllm_pending: bool = False       # guard against duplicate relays
 
+        # Autonomous mode decision state
+        # Tracks whether the last turn had any tool activity so we only
+        # auto-continue when there's evidence of an active task, not on idle turns.
+        self._auto_last_had_tools: bool = False   # did the last model turn call tools?
+        self._auto_idle_turns: int = 0             # consecutive idle turns (no tools called)
+        self._auto_max_idle: int = 3               # stop nudging after N idle turns in a row
+
         os.makedirs("history", exist_ok=True)
 
     async def send_text(self):
@@ -975,6 +982,8 @@ class AudioLoop:
                                     f.write(text)
                         
                     if tool_call := response.tool_call:
+                        self._auto_last_had_tools = True   # mark that this turn was active
+                        self._auto_idle_turns = 0
                         for function_call in tool_call.function_calls:
                             name = function_call.name
                             args = function_call.args
@@ -1001,12 +1010,37 @@ class AudioLoop:
                 while not self.audio_in_queue.empty():
                     self.audio_in_queue.get_nowait()
                 
+                # ── Autonomous decision framework ──────────────────────────────
+                # Only nudge if:
+                #   1. Autonomous mode is enabled
+                #   2. The PREVIOUS turn had tool calls (active task in flight), OR
+                #      this is the very first turn (initializing objective)
+                #   3. We haven't exceeded the idle-turn threshold (model stopped acting)
                 if self.autonomous:
-                    await asyncio.sleep(0.5)
-                    try:
-                        await self.session.send_realtime_input(text="[System]: Continue your objective. Take action.")
-                    except Exception as auto_err:
-                        print(f"\n[System] Autonomous continue error: {auto_err}")
+                    if self._auto_last_had_tools:
+                        # Active task — give the model a short beat then continue
+                        await asyncio.sleep(0.4)
+                        try:
+                            await self.session.send_realtime_input(text="[System]: Continue.")
+                        except Exception as auto_err:
+                            print(f"\n[System] Autonomous continue error: {auto_err}")
+                        self._auto_last_had_tools = False  # reset; next turn will set it again if needed
+                    else:
+                        # Idle turn (no tools called) — count up, back off
+                        self._auto_idle_turns += 1
+                        if self._auto_idle_turns <= self._auto_max_idle:
+                            # Model responded but didn't act — give it one more chance
+                            await asyncio.sleep(1.0)
+                            try:
+                                await self.session.send_realtime_input(
+                                    text=f"[System]: You have tools available. If there is an objective, take action now. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                )
+                            except Exception as auto_err:
+                                print(f"\n[System] Autonomous nudge error: {auto_err}")
+                        else:
+                            # Model has gone idle repeatedly — stand down and wait for human input
+                            print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.")
+                            self._auto_idle_turns = 0
 
     # ── Unified tool executor (used by both direct and modal routes) ──────────
 
@@ -1384,17 +1418,37 @@ class AudioLoop:
                         while not self.audio_in_queue.empty():
                             self.audio_in_queue.get_nowait()
                         print("\nmessage > ", end="", flush=True)
+                        # ── Autonomous decision framework (WS path) ────────────
                         if self.autonomous:
-                            await asyncio.sleep(0.5)
-                            try:
-                                await self.send_ws_json({"type": "text", "data": "[System]: Continue your objective. Take action."})
-                            except Exception as auto_err:
-                                print(f"\n[System] Autonomous continue error: {auto_err}")
+                            if self._auto_last_had_tools:
+                                await asyncio.sleep(0.4)
+                                try:
+                                    await self.send_ws_json({"type": "text", "data": "[System]: Continue."})
+                                except Exception as auto_err:
+                                    print(f"\n[System] Autonomous continue error: {auto_err}")
+                                self._auto_last_had_tools = False
+                            else:
+                                self._auto_idle_turns += 1
+                                if self._auto_idle_turns <= self._auto_max_idle:
+                                    await asyncio.sleep(1.0)
+                                    try:
+                                        await self.send_ws_json({
+                                            "type": "text",
+                                            "data": f"[System]: You have tools available. If there is an objective, take action now. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                        })
+                                    except Exception as auto_err:
+                                        print(f"\n[System] Autonomous nudge error: {auto_err}")
+                                else:
+                                    print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.")
+                                    self._auto_idle_turns = 0
 
                     elif data["type"] == "error":
                         print(f"\n[Proxy Error]: {data.get('data', 'Unknown error')}")
 
                     elif data["type"] == "function_call":
+                        # Mark that this turn is active before dispatching
+                        self._auto_last_had_tools = True
+                        self._auto_idle_turns = 0
                         asyncio.create_task(self.handle_tool_call_ws(data))
 
                 except Exception as e:

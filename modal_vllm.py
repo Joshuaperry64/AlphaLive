@@ -15,9 +15,9 @@ model_volume = modal.Volume.from_name("alphalive-gemma-volume", create_if_missin
 vllm_image = (
     modal.Image.debian_slim(python_version="3.10")
     .pip_install(
-        "vllm==0.5.5",
+        "vllm",
         "huggingface_hub",
-        "hf-transfer",
+        "hf-xet",
         "fastapi",
         "uvicorn"
     )
@@ -25,7 +25,7 @@ vllm_image = (
     .apt_install("curl")
     .run_commands("curl -LsSf https://hf.co/cli/install.sh | bash -s")
     .env({
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        "HF_XET_HIGH_PERFORMANCE": "1",
         "HF_HOME": CACHE_DIR
     })
 )

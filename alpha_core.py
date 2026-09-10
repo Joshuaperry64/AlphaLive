@@ -145,7 +145,7 @@ tools = [
             ),
             types.FunctionDeclaration(
                 name="press_key",
-                description="Press a single keyboard key (e.g. enter, tab, esc, win, backspace, delete, f5).",
+                description="Press a single keyboard key (e.g. enter, tab, esc, win, backspace, delete, f5, volumeup, volumedown, volumemute, playpause, nexttrack, prevtrack).",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["key"],
@@ -229,6 +229,55 @@ tools = [
                     required=["query"],
                     properties={
                         "query": genai.types.Schema(type=genai.types.Type.STRING, description="Search term to match against subjects, predicates, or objects."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="browser_open_url",
+                description="Open a specified URL in the system's default web browser.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["url"],
+                    properties={
+                        "url": genai.types.Schema(type=genai.types.Type.STRING, description="The full URL to open (e.g., https://example.com)"),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="browser_search",
+                description="Search Google for a query in the default web browser.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["query"],
+                    properties={
+                        "query": genai.types.Schema(type=genai.types.Type.STRING, description="The search query"),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="system_notification",
+                description="Display a popup message box on the screen. Use this to explicitly notify or alert the user when you've finished a background task or need their attention.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["message"],
+                    properties={
+                        "message": genai.types.Schema(type=genai.types.Type.STRING, description="The notification text to display"),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="get_active_window",
+                description="Get the title of the currently focused/active window on the desktop. Useful for context.",
+                parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
+            ),
+            types.FunctionDeclaration(
+                name="window_action",
+                description="Perform an action on the currently active window (minimize, maximize, restore, close).",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["action"],
+                    properties={
+                        "action": genai.types.Schema(type=genai.types.Type.STRING, description="Action to perform: 'minimize', 'maximize', 'restore', or 'close'"),
                     },
                 ),
             ),
@@ -1164,7 +1213,53 @@ class AudioLoop:
                 await asyncio.to_thread(_write)
                 return {"result": f"File written: {path}"}
 
-            # ── Memory ───────────────────────────────────────────────────────
+            # ✨ Added Tools ✨
+            elif name == "browser_open_url":
+                import webbrowser
+                url = args.get("url", "")
+                await asyncio.to_thread(webbrowser.open, url)
+                return {"result": f"Opened {url} in default browser."}
+
+            elif name == "browser_search":
+                import webbrowser
+                import urllib.parse
+                query = args.get("query", "")
+                url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
+                await asyncio.to_thread(webbrowser.open, url)
+                return {"result": f"Searched Google for: {query}"}
+
+            elif name == "system_notification":
+                message = args.get("message", "")
+                # Fire and forget a PowerShell msgbox so it doesn't block
+                ps_cmd = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('{message.replace('''', '''''')}', 'Alpha Notification')"
+                subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+                return {"result": f"Displayed notification: {message}"}
+
+            elif name == "get_active_window":
+                import ctypes
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                buff = ctypes.create_unicode_buffer(length + 1)
+                ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+                return {"result": f"Active window title: '{buff.value}'"}
+
+            elif name == "window_action":
+                import ctypes
+                hwnd = ctypes.windll.user32.GetForegroundWindow()
+                action = args.get("action", "").lower()
+                if action == "maximize":
+                    ctypes.windll.user32.ShowWindow(hwnd, 3)
+                elif action == "minimize":
+                    ctypes.windll.user32.ShowWindow(hwnd, 6)
+                elif action == "restore":
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)
+                elif action == "close":
+                    ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)
+                else:
+                    return {"result": f"Unknown action: {action}"}
+                return {"result": f"Action '{action}' performed on active window."}
+
+            # ── Memory & Persona ───────────────────────────────────────────────────────
             elif name == "memorize_fact":
                 success = await asyncio.to_thread(
                     self.mm.memorize_fact,

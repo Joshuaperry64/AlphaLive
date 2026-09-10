@@ -844,6 +844,7 @@ class EngineWorker(QThread):
 
             self._proc = subprocess.Popen(
                 [sys.executable, str(SCRIPT_DIR / self._engine)],
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True, env=env,
@@ -933,7 +934,7 @@ class TerminalTab(QWidget):
         inp_row.setSpacing(6)
         prompt = lbl(">>", 11, C["neon_blue"], True, True)
         self._inp = QLineEdit()
-        self._inp.setPlaceholderText("Send message to Alpha (not yet wired to stdin-use voice or the engine's console)...")
+        self._inp.setPlaceholderText("Send a text message to Alpha...")
         self._inp.setStyleSheet(f"""
             background:{C['bg_deep']};
             color:{C['text_bright']};
@@ -2181,6 +2182,7 @@ class MainWindow(QMainWindow):
         # Main tabs
         self._tabs = QTabWidget()
         self._terminal = TerminalTab()
+        self._terminal.send_text_requested.connect(self._send_text_to_engine)
         self._monitor  = MonitorTab()
         self._history  = HistoryTab()
         self._history.session_selected.connect(self._on_history_session_selected)
@@ -2218,6 +2220,10 @@ class MainWindow(QMainWindow):
         self._terminal.append(
             "AlphaLive GUI ready. Select an engine in the sidebar and click LAUNCH.", C["neon_blue"]
         )
+
+    def _send_text_to_engine(self, text: str):
+        if self._worker:
+            self._worker.write_stdin(text)
 
     def _on_quick_settings_changed(self, updates: dict):
         g = self._cfg.setdefault("Global", {})

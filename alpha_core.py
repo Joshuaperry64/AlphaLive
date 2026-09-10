@@ -679,9 +679,7 @@ class AudioLoop:
                 break
             if self.session is not None:
                 await self.session.send_realtime_input(text=text or ".")
-                
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n[You]: {text}\n[Gemini]: ")
+                await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
 
     def _get_frame(self, cap):
         ret, frame = cap.read()
@@ -972,8 +970,7 @@ class AudioLoop:
                             user_text = input_transcript.text
                             print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
                             
-                            with open(self.log_file, "a", encoding="utf-8") as f:
-                                f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+                            await self._async_log(f"\n[You]: {user_text}\n[Gemini]: ")
 
                             # ✨ vLLM hybrid: intercept and relay ✨
                             if VLLM_MODE and user_text and user_text.strip():
@@ -986,8 +983,7 @@ class AudioLoop:
                                     ai_started = True
                                 print(text, end="", flush=True)
                                 
-                                with open(self.log_file, "a", encoding="utf-8") as f:
-                                    f.write(text)
+                                await self._async_log(text)
 
                         if getattr(sc, "model_turn", None):
                             for part in sc.model_turn.parts:
@@ -996,8 +992,7 @@ class AudioLoop:
                                         print("\n[Gemini]: ", end="")
                                         ai_started = True
                                     print(part.text, end="", flush=True)
-                                    with open(self.log_file, "a", encoding="utf-8") as f:
-                                        f.write(part.text)
+                                    await self._async_log(part.text)
                         
                     if tool_call := response.tool_call:
                         self._auto_last_had_tools = True   # mark that this turn was active
@@ -1249,8 +1244,7 @@ class AudioLoop:
                 break
             if self.websocket is not None:
                 await self.send_ws_json({"type": "text", "data": text or "."})
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n[You]: {text}\n[Gemini]: ")
+                await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
 
     async def send_ws_json(self, payload, websocket=None):
         target = websocket or self.websocket

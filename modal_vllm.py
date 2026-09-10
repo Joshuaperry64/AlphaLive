@@ -40,11 +40,9 @@ app = modal.App("alphalive-vllm-bucket")
     secrets=[modal.Secret.from_name("huggingface-secret")] # Ensure your HF token is in this Modal secret!
 )
 @modal.concurrent(max_inputs=100)
-@modal.asgi_app()
+@modal.web_server(8000, startup_timeout=300)
 def serve():
-    import vllm
-    from vllm.entrypoints.openai.api_server import build_app
-    from vllm.entrypoints.openai.cli_args import make_arg_parser
+    import subprocess
     
     # 2. Sync the HF Bucket to the Modal Volume before starting vLLM.
     #    (This only downloads files that are missing or changed, so it's instant after the first run)
@@ -53,15 +51,15 @@ def serve():
     model_volume.commit()
     print("Sync complete!")
     
-    # 3. Initialize vLLM pointing directly to the downloaded files in the Volume
-    parser = make_arg_parser()
-    args = parser.parse_args([])
+    # 3. Start the vLLM OpenAI-compatible server using the official CLI
+    cmd = [
+        "vllm", "serve", LOCAL_MODEL_PATH,
+        "--host", "0.0.0.0",
+        "--port", "8000",
+        "--tensor-parallel-size", "1",
+        "--max-model-len", "4096",
+        "--gpu-memory-utilization", "0.90"
+    ]
     
-    args.model = LOCAL_MODEL_PATH
-    args.tensor_parallel_size = 1
-    args.max_model_len = 4096
-    args.gpu_memory_utilization = 0.90
-    args.enforce_eager = False
-    
-    app = build_app(args)
-    return app
+    print("Starting vLLM server...")
+    subprocess.Popen(cmd)

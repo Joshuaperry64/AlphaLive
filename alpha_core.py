@@ -69,20 +69,10 @@ client = genai.Client(
 )
 
 # ── Screen resolution ──────────────────────────────────────────────────────────
-# CRITICAL: pyautogui.size() returns PHYSICAL pixels (DPI-aware) but
-# SetCursorPos (used internally by pyautogui.click/moveTo) takes LOGICAL pixels.
-# On a 125%-scaled display this means physical=1920x1080 but logical=1536x864.
-# We must use LOGICAL resolution as the coordinate space the AI operates in,
-# otherwise clicks land at 80% of the intended position.
 _user32 = ctypes.windll.user32
-screen_w = _user32.GetSystemMetrics(0)  # logical width  (DPI-unaware process space)
-screen_h = _user32.GetSystemMetrics(1)  # logical height
-# Also compute DPI scale factor so we can scale screenshots to match logical space
 _user32.SetProcessDPIAware()
-_phys_w = _user32.GetSystemMetrics(0)
-_phys_h = _user32.GetSystemMetrics(1)
-DPI_SCALE_X = _phys_w / screen_w   # e.g. 1.25 on a 125% display
-DPI_SCALE_Y = _phys_h / screen_h
+screen_w = _user32.GetSystemMetrics(0)
+screen_h = _user32.GetSystemMetrics(1)
 
 
 tools = [
@@ -734,12 +724,9 @@ class AudioLoop:
             image_bytes = mss.tools.to_png(i.rgb, i.size)
             img = PIL.Image.open(io.BytesIO(image_bytes))
 
-            # mss grabs PHYSICAL pixels (e.g. 1920x1080 on a 125% display).
-            # SetCursorPos/pyautogui.click operate in LOGICAL pixels (e.g. 1536x864).
-            # Scale the screenshot DOWN to logical resolution so AI coordinate
-            # intuition maps 1:1 to where clicks actually land.
-            if DPI_SCALE_X != 1.0 or DPI_SCALE_Y != 1.0:
-                img = img.resize((screen_w, screen_h), PIL.Image.LANCZOS)
+            # mss grabs PHYSICAL pixels (e.g. 1920x1080).
+            # PyAutoGUI clicks in PHYSICAL space because the process is DPI-aware.
+            # We send the physical screenshot directly to the AI, so its coordinates match 1:1.
 
             img.thumbnail([1024, 1024])
 
@@ -1309,10 +1296,7 @@ class AudioLoop:
             image_bytes = mss.tools.to_png(i.rgb, i.size)
             img = PIL.Image.open(io.BytesIO(image_bytes))
             
-            # Scale to logical resolution to match SetCursorPos coordinate space
-            if DPI_SCALE_X != 1.0 or DPI_SCALE_Y != 1.0:
-                img = img.resize((screen_w, screen_h), PIL.Image.LANCZOS)
-            
+            # Send physical pixels directly to AI
             img.thumbnail([1024, 1024])
             
             image_io = io.BytesIO()

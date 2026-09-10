@@ -2526,7 +2526,8 @@ class CoordinateOverlay(QWidget):
         self._timer.start(20)
 
     def paintEvent(self, event):
-        x, y = pyautogui.position()
+        pos = QCursor.pos()
+        x, y = pos.x(), pos.y()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         

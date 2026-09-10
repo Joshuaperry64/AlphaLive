@@ -957,10 +957,13 @@ class AudioLoop:
         while True:
             if self.session is not None:
                 turn = self.session.receive()
+                ai_started = False
                 async for response in turn:
                     
                     if data := response.data:
+                        # audio out
                         self.is_ai_speaking = True
+                        self.last_ai_speech_time = time.time()
                         self.audio_in_queue.put_nowait(data)
                         continue
 
@@ -972,16 +975,29 @@ class AudioLoop:
                             with open(self.log_file, "a", encoding="utf-8") as f:
                                 f.write(f"\n[You]: {user_text}\n[Gemini]: ")
 
-                            # ── vLLM hybrid: intercept and relay ──────────────
+                            # ✨ vLLM hybrid: intercept and relay ✨
                             if VLLM_MODE and user_text and user_text.strip():
                                 asyncio.create_task(self._relay_to_vllm(user_text))
                             
                         if output_transcript := getattr(sc, "output_transcription", None):
                             if text := output_transcript.text:
+                                if not ai_started:
+                                    print("\n[Gemini]: ", end="")
+                                    ai_started = True
                                 print(text, end="", flush=True)
                                 
                                 with open(self.log_file, "a", encoding="utf-8") as f:
                                     f.write(text)
+
+                        if getattr(sc, "model_turn", None):
+                            for part in sc.model_turn.parts:
+                                if getattr(part, "text", None):
+                                    if not ai_started:
+                                        print("\n[Gemini]: ", end="")
+                                        ai_started = True
+                                    print(part.text, end="", flush=True)
+                                    with open(self.log_file, "a", encoding="utf-8") as f:
+                                        f.write(part.text)
                         
                     if tool_call := response.tool_call:
                         self._auto_last_had_tools = True   # mark that this turn was active

@@ -2138,6 +2138,10 @@ class MainWindow(QMainWindow):
         self._boot.resize(self.size())
         self._boot.done.connect(self._post_boot)
         self._boot.raise_()
+        # Status overlay
+        self._status_overlay = StatusOverlay()
+        self._status_overlay.show()
+
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
@@ -2342,6 +2346,30 @@ class MainWindow(QMainWindow):
         elif "warning"  in lo:   self._slog(line, "warn")
         else:                    self._slog(line, "info")
 
+        if hasattr(self, '_status_overlay'):
+            if "Modal proxy connected" in line or "Connected successfully" in line:
+                self._status_overlay.update_status("conn", "CONNECTED", C["neon_green"])
+            elif "Waking up" in line or "Connecting directly" in line:
+                self._status_overlay.update_status("conn", "CONNECTING", C["neon_yellow"])
+            elif "connection dropped" in lo or "disconnected from" in lo:
+                self._status_overlay.update_status("conn", "DROPPED", C["neon_red"])
+                self._status_overlay.update_status("err", "DROPPED", C["neon_red"])
+            
+            if "[Processing...]" in line:
+                self._status_overlay.update_status("load", "PROCESSING", C["neon_blue"])
+                self._status_overlay.update_status("listen", "MUTED", C["text_dim"])
+            elif "message >" in line:
+                self._status_overlay.update_status("load", "IDLE", C["text_dim"])
+                self._status_overlay.update_status("listen", "LISTENING", C["neon_green"])
+
+            if "[Tool Executing]" in line:
+                self._status_overlay.update_status("exec", "EXECUTING", C["neon_purple"])
+            elif "[Tool Finished]" in line:
+                self._status_overlay.update_status("exec", "NONE", C["text_dim"])
+                
+            if "error" in lo and not "engine error" in lo:
+                self._status_overlay.update_status("err", "ERROR", C["neon_red"])
+
     def _on_status(self, status: str):
         if status == "running":
             self._set_status("Engine running")
@@ -2350,6 +2378,14 @@ class MainWindow(QMainWindow):
             self._sidebar.set_running(False)
             self._header.set_ind("conn", False)
             self._monitor.session_stop()
+            if hasattr(self, '_status_overlay'):
+                self._status_overlay.update_status("conn", "DISCONNECTED", C["text_dim"])
+                self._status_overlay.update_status("load", "IDLE", C["text_dim"])
+                self._status_overlay.update_status("exec", "NONE", C["text_dim"])
+                self._status_overlay.update_status("listen", "MUTED", C["text_dim"])
+                if status == "error":
+                    self._status_overlay.update_status("err", "CRITICAL", C["neon_red"])
+
             self._set_status("Engine stopped" if status == "stopped" else "Engine error — check logs")
             self._slog("Engine process ended.", "system")
             self._terminal.append("[SYSTEM] Engine stopped.", C["neon_yellow"])
@@ -2358,6 +2394,9 @@ class MainWindow(QMainWindow):
         if text.strip():
             self._history.add_live(role, text)
             self._monitor.inc_messages()
+            if role == "user" and hasattr(self, '_status_overlay'):
+                self._status_overlay.update_status("listen", "HEARD", C["neon_cyan"])
+
 
     def _on_cfg_saved(self, cfg: dict):
         self._cfg = cfg
@@ -2375,6 +2414,8 @@ class MainWindow(QMainWindow):
             self._logs.append(text, level)
 
     def closeEvent(self, e):
+        if hasattr(self, '_status_overlay'):
+            self._status_overlay.close()
         if self._worker and self._running:
             self._worker.stop()
             self._worker.wait(2000)
@@ -2383,6 +2424,90 @@ class MainWindow(QMainWindow):
 # ─────────────────────────────────────────────────────────────────────────────
 # DESKTOP OVERLAYS
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+class StatusOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowTransparentForInput
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedSize(160, 115)
+        
+        # Position in top-right corner
+        screen_geo = QApplication.primaryScreen().availableGeometry()
+        self.move(screen_geo.width() - self.width() - 20, 20)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(4)
+        
+        self.bg = QFrame(self)
+        self.bg.setStyleSheet(f"""
+            QFrame {{
+                background-color: rgba(4, 8, 16, 210);
+                border: 1px solid {C['border']};
+                border-radius: 6px;
+            }}
+        """)
+        bg_layout = QVBoxLayout(self.bg)
+        bg_layout.setContentsMargins(8, 8, 8, 8)
+        bg_layout.setSpacing(2)
+        
+        layout.addWidget(self.bg)
+
+        # Title
+        title = QLabel("ALPHA STATUS")
+        title.setStyleSheet(f"color: {C['text_dim']}; font-weight: bold; font-family: {FONT_MONO}; font-size: 10px;")
+        bg_layout.addWidget(title)
+        
+        bg_layout.addSpacing(4)
+
+        self.lbl_conn   = self._make_lbl("CONN :", "DISCONNECTED", C['text_dim'])
+        self.lbl_load   = self._make_lbl("LOAD :", "IDLE", C['text_dim'])
+        self.lbl_exec   = self._make_lbl("EXEC :", "NONE", C['text_dim'])
+        self.lbl_listen = self._make_lbl("MIC  :", "MUTED", C['text_dim'])
+        self.lbl_err    = self._make_lbl("ERR  :", "NONE", C['text_dim'])
+
+        bg_layout.addWidget(self.lbl_conn)
+        bg_layout.addWidget(self.lbl_load)
+        bg_layout.addWidget(self.lbl_exec)
+        bg_layout.addWidget(self.lbl_listen)
+        bg_layout.addWidget(self.lbl_err)
+        
+        bg_layout.addStretch()
+
+        self._err_timer = QTimer(self)
+        self._err_timer.setSingleShot(True)
+        self._err_timer.timeout.connect(self._clear_err)
+
+    def _make_lbl(self, prefix, val, color):
+        lbl = QLabel()
+        lbl.setText(f"<span style='color:{C['text_dim']}'>{prefix}</span> <span style='color:{color}'>{val}</span>")
+        lbl.setStyleSheet(f"font-family: {FONT_MONO}; font-size: 9px; background: transparent; border: none;")
+        return lbl
+
+    def update_status(self, key, val, color):
+        prefix = {
+            "conn": "CONN :",
+            "load": "LOAD :",
+            "exec": "EXEC :",
+            "listen": "MIC  :",
+            "err": "ERR  :"
+        }.get(key, key)
+        
+        lbl = getattr(self, f"lbl_{key}")
+        lbl.setText(f"<span style='color:{C['text_dim']}'>{prefix}</span> <span style='color:{color}'>{val}</span>")
+
+        if key == "err" and val != "NONE":
+            self._err_timer.start(5000)
+
+    def _clear_err(self):
+        self.update_status("err", "NONE", C["text_dim"])
 
 class CoordinateOverlay(QWidget):
     def __init__(self, parent=None):

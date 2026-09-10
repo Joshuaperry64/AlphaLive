@@ -1812,7 +1812,7 @@ class ModalTab(QWidget):
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
-        self._log.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._log.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_main']}; border:1px solid {C['border']}; font-family:'{FONT_MONO}'; font-size:10px; padding:8px;")
         root.addWidget(self._log, 1)
 
@@ -1821,7 +1821,7 @@ class ModalTab(QWidget):
         cur.movePosition(cur.MoveOperation.End)
         fmt = QTextCharFormat()
         fmt.setForeground(QColor(color or C["text_main"]))
-        cur.insertText(text + "\\n", fmt)
+        cur.insertText(text + "\n", fmt)
         self._log.setTextCursor(cur)
         self._log.ensureCursorVisible()
 

@@ -3,7 +3,7 @@ import os
 import subprocess
 
 # We will sync your HuggingFace Bucket into a Modal Volume so vLLM can load it instantly
-BUCKET_ID = "Joshuaperry64/Gemma"
+BUCKET_ID = "hf://buckets/Joshuaperry64/Gemma"
 CACHE_DIR = "/models"
 LOCAL_MODEL_PATH = f"{CACHE_DIR}/Gemma"
 
@@ -50,6 +50,7 @@ def serve():
     #    (This only downloads files that are missing or changed, so it's instant after the first run)
     print(f"Syncing HF Bucket {BUCKET_ID} to {LOCAL_MODEL_PATH}...")
     subprocess.run(["hf", "buckets", "sync", BUCKET_ID, LOCAL_MODEL_PATH], check=True)
+    model_volume.commit()
     print("Sync complete!")
     
     # 3. Initialize vLLM pointing directly to the downloaded files in the Volume

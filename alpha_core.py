@@ -811,22 +811,33 @@ class AudioLoop:
             if VLLM_API_KEY:
                 headers["Authorization"] = f"Bearer {VLLM_API_KEY}"
 
+            # ── Build OpenAI-compatible tool schemas from Gemini declarations ──
+            TYPE_MAP = {
+                genai.types.Type.INTEGER: "integer",
+                genai.types.Type.NUMBER:  "number",
+                genai.types.Type.BOOLEAN: "boolean",
+                genai.types.Type.ARRAY:   "array",
+                genai.types.Type.OBJECT:  "object",
+            }
             vllm_tools = []
             for t in tools:
                 for func in t.function_declarations:
                     props = {}
                     for k, v in getattr(func.parameters, "properties", {}).items():
-                        vtype = "integer" if v.type == genai.types.Type.INTEGER else "string"
+                        vtype = TYPE_MAP.get(v.type, "string")
                         props[k] = {"type": vtype, "description": getattr(v, "description", "")}
+                    # Force-convert required to a plain Python list (Protobuf repeated field isn't JSON-serializable)
+                    raw_required = getattr(func.parameters, "required", None)
+                    required_list = list(raw_required) if raw_required else []
                     vllm_tools.append({
                         "type": "function",
                         "function": {
                             "name": func.name,
-                            "description": func.description,
+                            "description": func.description or "",
                             "parameters": {
                                 "type": "object",
                                 "properties": props,
-                                "required": getattr(func.parameters, "required", [])
+                                "required": required_list
                             }
                         }
                     })
@@ -837,7 +848,8 @@ class AudioLoop:
                 "max_tokens": VLLM_MAX_TOKENS,
                 "temperature": 0.85,
                 "stream": False,
-                "tools": vllm_tools
+                "tools": vllm_tools,
+                "tool_choice": "auto"
             }
 
             endpoint = VLLM_ENDPOINT.rstrip("/")
@@ -857,11 +869,11 @@ class AudioLoop:
             response_text = choice.get("content", "") or ""
             response_text = response_text.strip()
             
-            tool_calls = choice.get("tool_calls", [])
+            tool_calls = choice.get("tool_calls") or []
             
             if response_text:
                 print(f" got {len(response_text)} chars", flush=True)
-                # Store in rolling history
+                # Store in rolling history — always use plain strings, not multipart content
                 self._vllm_history.append({"role": "user",      "content": user_text})
                 self._vllm_history.append({"role": "assistant",  "content": response_text})
 
@@ -880,15 +892,24 @@ class AudioLoop:
             
             if tool_calls:
                 print(f"\n[vLLM Tool Calls]: {len(tool_calls)} requested.")
+                tool_results = []
                 for tc in tool_calls:
-                    fn = tc["function"]
-                    t_name = fn["name"]
-                    t_args = json.loads(fn.get("arguments", "{}"))
+                    fn = tc.get("function", {})
+                    t_name = fn.get("name", "")
+                    raw_args = fn.get("arguments", "{}")
+                    try:
+                        t_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                    except json.JSONDecodeError:
+                        t_args = {}
                     print(f"\n[Tool Executing (vLLM)] {t_name} with args: {t_args}")
                     t_res = await self._execute_tool(t_name, t_args)
                     print(f"[Tool Finished] Result: {t_res}\n")
-                    # Note: We don't chain tool responses back to vLLM immediately in this simple relay.
-                    # It will see the screen update on the next turn.
+                    tool_results.append(f"{t_name}: {t_res.get('result', '')}")
+                
+                # Feed results back into history so next turn has context
+                tool_summary = "; ".join(tool_results)
+                self._vllm_history.append({"role": "user",      "content": user_text})
+                self._vllm_history.append({"role": "assistant",  "content": f"[Executed tools: {tool_summary}]"})
 
         except ImportError:
             print("\n[vLLM Error] aiohttp not installed. Run: uv pip install aiohttp")

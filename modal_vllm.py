@@ -38,7 +38,7 @@ app = modal.App("alphalive-vllm-bucket")
     volumes={CACHE_DIR: model_volume}, 
     secrets=[modal.Secret.from_name("huggingface-secret")] # Ensure your HF token is in this Modal secret!
 )
-@modal.concurrent(100)
+@modal.concurrent(max_inputs=100)
 @modal.asgi_app()
 def serve():
     import vllm

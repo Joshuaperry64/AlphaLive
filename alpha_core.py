@@ -20,6 +20,11 @@ import argparse
 from google import genai
 from google.genai import types
 
+def _write_log(filepath: str, text: str):
+    with open(filepath, 'a', encoding='utf-8') as f:
+        f.write(text)
+
+
 import memory_manager
 
 
@@ -74,15 +79,22 @@ client = genai.Client(
 # On a 125%-scaled display this means physical=1920x1080 but logical=1536x864.
 # We must use LOGICAL resolution as the coordinate space the AI operates in,
 # otherwise clicks land at 80% of the intended position.
-_user32 = ctypes.windll.user32
-screen_w = _user32.GetSystemMetrics(0)  # logical width  (DPI-unaware process space)
-screen_h = _user32.GetSystemMetrics(1)  # logical height
-# Also compute DPI scale factor so we can scale screenshots to match logical space
-_user32.SetProcessDPIAware()
-_phys_w = _user32.GetSystemMetrics(0)
-_phys_h = _user32.GetSystemMetrics(1)
-DPI_SCALE_X = _phys_w / screen_w   # e.g. 1.25 on a 125% display
-DPI_SCALE_Y = _phys_h / screen_h
+try:
+    _user32 = ctypes.windll.user32
+    screen_w = _user32.GetSystemMetrics(0)  # logical width  (DPI-unaware process space)
+    screen_h = _user32.GetSystemMetrics(1)  # logical height
+    # Also compute DPI scale factor so we can scale screenshots to match logical space
+    _user32.SetProcessDPIAware()
+    _phys_w = _user32.GetSystemMetrics(0)
+    _phys_h = _user32.GetSystemMetrics(1)
+    DPI_SCALE_X = _phys_w / screen_w   # e.g. 1.25 on a 125% display
+    DPI_SCALE_Y = _phys_h / screen_h
+except AttributeError:
+    _user32 = None
+    screen_w = 1920
+    screen_h = 1080
+    DPI_SCALE_X = 1.0
+    DPI_SCALE_Y = 1.0
 
 
 tools = [
@@ -976,8 +988,7 @@ class AudioLoop:
                             user_text = input_transcript.text
                             print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
                             
-                            with open(self.log_file, "a", encoding="utf-8") as f:
-                                f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+                            await asyncio.to_thread(_write_log, self.log_file, f"\n[You]: {user_text}\n[Gemini]: ")
 
                             # ── vLLM hybrid: intercept and relay ──────────────
                             if VLLM_MODE and user_text and user_text.strip():
@@ -987,8 +998,7 @@ class AudioLoop:
                             if text := output_transcript.text:
                                 print(text, end="", flush=True)
                                 
-                                with open(self.log_file, "a", encoding="utf-8") as f:
-                                    f.write(text)
+                                await asyncio.to_thread(_write_log, self.log_file, text)
                         
                     if tool_call := response.tool_call:
                         self._auto_last_had_tools = True   # mark that this turn was active
@@ -1410,21 +1420,18 @@ class AudioLoop:
                     elif data["type"] == "text":
                         text = data["data"]
                         print(text, end="", flush=True)
-                        with open(self.log_file, "a", encoding="utf-8") as f:
-                            f.write(text)
+                        await asyncio.to_thread(_write_log, self.log_file, text)
 
                     elif data["type"] in ("input_transcript", "input_transcription"):
                         user_text = data["data"]
                         print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
-                        with open(self.log_file, "a", encoding="utf-8") as f:
-                            f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+                        await asyncio.to_thread(_write_log, self.log_file, f"\n[You]: {user_text}\n[Gemini]: ")
 
                     elif data["type"] == "output_transcription":
                         text = data.get("data", "")
                         if text:
                             print(text, end="", flush=True)
-                            with open(self.log_file, "a", encoding="utf-8") as f:
-                                f.write(text)
+                            await asyncio.to_thread(_write_log, self.log_file, text)
 
                     elif data["type"] == "turn_complete":
                         self.is_ai_speaking = False

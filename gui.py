@@ -2530,18 +2530,21 @@ class CoordinateOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        pen = QPen(QColor(255, 0, 0, 200))
+        # Draw Crosshair
+        pen = QPen(QColor(255, 0, 0, 255))
         pen.setWidth(2)
-        pen.setStyle(Qt.PenStyle.DashLine)
         painter.setPen(pen)
         
-        w = self.width()
-        h = self.height()
+        painter.drawLine(x - 20, y, x + 20, y)
+        painter.drawLine(x, y - 20, x, y + 20)
         
-        painter.drawLine(0, y, w, y)
-        painter.drawLine(x, 0, x, h)
+        # Center dot
+        painter.setBrush(QBrush(QColor(255, 0, 0)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawEllipse(QPoint(x, y), 3, 3)
         
-        painter.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        # Coordinate Text
+        painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
         painter.setPen(QColor(255, 0, 0))
         painter.drawText(x + 15, y + 25, f"X: {x}, Y: {y}")
 

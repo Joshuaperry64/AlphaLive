@@ -993,26 +993,31 @@ class AudioLoop:
                     if tool_call := response.tool_call:
                         self._auto_last_had_tools = True   # mark that this turn was active
                         self._auto_idle_turns = 0
+                        
+                        function_responses = []
                         for function_call in tool_call.function_calls:
                             name = function_call.name
                             args = function_call.args
                             print(f"\n\n[Tool Executing] {name} with args: {args}")
                             result = await self._execute_tool(name, args)
-                            print(f"[Tool Finished] Sending result back to Gemini...\n")
-                            await self.session.send_tool_response(
-                                function_responses=[
-                                    types.FunctionResponse(
-                                        name=name,
-                                        id=function_call.id,
-                                        response=result
-                                    )
-                                ]
+                            function_responses.append(
+                                types.FunctionResponse(
+                                    name=name,
+                                    id=function_call.id,
+                                    response=result
+                                )
                             )
                             if keyboard.is_pressed("ctrl+z"):
                                 print("\n[System] Abort command (Ctrl+Z) detected! Halting continuous chain.")
                                 self.autonomous = False
                                 await self.session.send_realtime_input(text="[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this.")
                                 break
+                                
+                        if function_responses:
+                            print(f"[Tool Finished] Sending {len(function_responses)} result(s) back to Gemini...\n")
+                            await self.session.send_tool_response(
+                                function_responses=function_responses
+                            )
 
                 print("\nmessage > ", end="", flush=True)
 

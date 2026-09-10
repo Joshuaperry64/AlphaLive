@@ -672,6 +672,12 @@ class AudioLoop:
 
         os.makedirs("history", exist_ok=True)
 
+
+    async def _async_log(self, text, mode="a"):
+        def _write():
+            with open(self.log_file, mode, encoding="utf-8") as f:
+                f.write(text)
+        await asyncio.to_thread(_write)
     async def send_text(self):
         while True:
             text = await asyncio.to_thread(
@@ -1410,21 +1416,18 @@ class AudioLoop:
                     elif data["type"] == "text":
                         text = data["data"]
                         print(text, end="", flush=True)
-                        with open(self.log_file, "a", encoding="utf-8") as f:
-                            f.write(text)
+                        await self._async_log(text)
 
                     elif data["type"] in ("input_transcript", "input_transcription"):
                         user_text = data["data"]
                         print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
-                        with open(self.log_file, "a", encoding="utf-8") as f:
-                            f.write(f"\n[You]: {user_text}\n[Gemini]: ")
+                        await self._async_log(f"\n[You]: {user_text}\n[Gemini]: ")
 
                     elif data["type"] == "output_transcription":
                         text = data.get("data", "")
                         if text:
                             print(text, end="", flush=True)
-                            with open(self.log_file, "a", encoding="utf-8") as f:
-                                f.write(text)
+                            await self._async_log(text)
 
                     elif data["type"] == "turn_complete":
                         self.is_ai_speaking = False

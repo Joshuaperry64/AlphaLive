@@ -1563,7 +1563,30 @@ class AudioLoop:
 
     # ── Main run() — branches on WS_URL ───────────────────────────────────
 
+
+    async def _wait_for_vllm_health(self):
+        import aiohttp
+        import asyncio
+        endpoint = VLLM_ENDPOINT.rstrip("/")
+        health_url = f"{endpoint}/health"
+        print(f"[System] Waiting for vLLM container to be healthy at {health_url}...")
+
+        async with aiohttp.ClientSession() as session:
+            while True:
+                try:
+                    async with session.get(health_url, timeout=5) as response:
+                        if response.status == 200:
+                            print("[System] vLLM container is healthy!")
+                            break
+                        else:
+                            print(f"[System] vLLM returned status {response.status}, waiting...")
+                except Exception as e:
+                    print(f"[System] vLLM not reachable yet ({e}), waiting...")
+                await asyncio.sleep(5)
+
     async def run(self):
+        if VLLM_MODE:
+            await self._wait_for_vllm_health()
         if WS_URL and WS_URL != "off":
             await self._run_modal()
         else:

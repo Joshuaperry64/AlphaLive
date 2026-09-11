@@ -54,7 +54,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QPainter, QPen, QBrush,
-    QLinearGradient, QRadialGradient, QFontMetrics,
+    QLinearGradient, QRadialGradient, QFontMetrics, QCursor,
     QTextCharFormat, QTextBlockFormat, QPainterPath
 )
 
@@ -2050,12 +2050,12 @@ class LaunchSidebar(QFrame):
 
         root.addWidget(hsep())
         
-        self._calib_btn = QPushButton("CALIBRATE (main3)")
+        self._calib_btn = QPushButton("CALIBRATE")
         self._calib_btn.setFixedHeight(30)
         self._calib_btn.clicked.connect(self.calib_requested.emit)
         root.addWidget(self._calib_btn)
 
-        self._ovl_btn = QPushButton("TOGGLE OVERLAY (main3)")
+        self._ovl_btn = QPushButton("TOGGLE OVERLAY")
         self._ovl_btn.setFixedHeight(30)
         self._ovl_btn.clicked.connect(self.overlay_requested.emit)
         root.addWidget(self._ovl_btn)

@@ -2558,6 +2558,8 @@ class MainWindow(QMainWindow):
                 headers["Authorization"] = f"Bearer {key}"
             
             base_url = ep.rstrip("/")
+            if base_url.endswith("/v1"):
+                base_url = base_url[:-3]
             health_ok = False
             models_ok = False
             model_names = []

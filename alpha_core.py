@@ -1593,22 +1593,37 @@ class AudioLoop:
     async def _wait_for_vllm_health(self):
         import aiohttp
         import asyncio
-        endpoint = VLLM_ENDPOINT.rstrip("/")
-        health_url = f"{endpoint}/health"
-        print(f"[System] Waiting for vLLM container to be healthy at {health_url}...")
+        raw_ep = VLLM_ENDPOINT.rstrip("/")
+        # If endpoint ends with /v1, strip it to get the server root for /health
+        base_endpoint = raw_ep[:-3] if raw_ep.endswith("/v1") else raw_ep
+        health_url = f"{base_endpoint}/health"
+        print(f"[System] Checking vLLM container health at {health_url}...")
 
+        max_attempts = 10
+        attempt = 0
         async with aiohttp.ClientSession() as session:
-            while True:
+            while attempt < max_attempts:
+                attempt += 1
                 try:
-                    async with session.get(health_url, timeout=5) as response:
+                    # Give container up to 20s to respond rather than cutting off at 5s and re-queuing
+                    async with session.get(health_url, timeout=20) as response:
                         if response.status == 200:
                             print("[System] vLLM container is healthy!")
-                            break
+                            return True
+                        elif response.status == 500:
+                            print(f"[System] vLLM returned 500 (container starting or error). Retrying...")
                         else:
                             print(f"[System] vLLM returned status {response.status}, waiting...")
+                except asyncio.TimeoutError:
+                    print(f"[System] vLLM warming up, waiting...")
                 except Exception as e:
                     print(f"[System] vLLM not reachable yet ({e}), waiting...")
-                await asyncio.sleep(5)
+                
+                # Wait 10 seconds between attempts to avoid spamming the Modal queue
+                await asyncio.sleep(10)
+        
+        print("[System] Warning: vLLM health check timed out. Proceeding anyway...")
+        return False
 
     async def run(self):
         if VLLM_MODE:

@@ -62,4 +62,4 @@ def serve():
     ]
     
     print("Starting vLLM server...")
-    subprocess.Popen(cmd)
+    subprocess.run(cmd, check=True)

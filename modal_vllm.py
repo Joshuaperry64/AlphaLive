@@ -6,7 +6,7 @@ MODEL_ID = "DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED"
 CACHE_DIR = "/models"
 LOCAL_MODEL_PATH = f"{CACHE_DIR}/Qwen3.5-9B"
 
-GPU_CONFIG = "A10G"
+GPU_CONFIG = "L40S"
 
 # 1. Create a persistent Volume to store the downloaded model files
 model_volume = modal.Volume.from_name("alphalive-qwen-volume", create_if_missing=True)

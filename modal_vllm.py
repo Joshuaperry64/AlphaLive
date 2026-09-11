@@ -19,8 +19,14 @@ vllm_image = (
         "fastapi",
         "uvicorn"
     )
+    .run_commands(
+        "ln -s /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc /usr/local/bin/nvcc || true",
+        "mkdir -p /usr/local/cuda/bin && ln -s /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc /usr/local/cuda/bin/nvcc || true"
+    )
     .env({
-        "HF_HOME": CACHE_DIR
+        "HF_HOME": CACHE_DIR,
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        "CUDA_HOME": "/usr/local/cuda"
     })
 )
 

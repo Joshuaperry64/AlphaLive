@@ -2,6 +2,13 @@ import os
 import sys
 import subprocess
 
+def _excepthook(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.exit(0)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = _excepthook
+
 def main():
     print("[AlphaLive] Booting through main.py entrypoint...")
     venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
@@ -17,12 +24,23 @@ def main():
         print(f"[AlphaLive] Routing through venv: {python_exe}")
         # Relaunch gui.py using the venv
         gui_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui.py")
-        sys.exit(subprocess.call([python_exe, gui_script]))
+        try:
+            ret = subprocess.call([python_exe, gui_script])
+            sys.exit(ret)
+        except KeyboardInterrupt:
+            sys.exit(0)
     else:
         # We are already in the venv (or venv doesn't exist, which will probably crash anyway without deps)
         print("[AlphaLive] Starting GUI...")
-        import gui
-        gui.main()
+        try:
+            import gui
+            gui.main()
+        except KeyboardInterrupt:
+            sys.exit(0)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+

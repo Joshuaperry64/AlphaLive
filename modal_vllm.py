@@ -51,9 +51,17 @@ def serve():
     model_volume.commit()
     print("Sync complete!")
     
-    # 3. Start the vLLM OpenAI-compatible server using the official CLI
+    # 3. Detect the main GGUF file in the synced directory
+    import glob
+    gguf_files = glob.glob(f"{LOCAL_MODEL_PATH}/*.gguf")
+    model_files = [f for f in gguf_files if "mmproj" not in f and "mtp" not in f]
+    target_model = model_files[0] if model_files else f"{LOCAL_MODEL_PATH}/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf"
+    print(f"Target model file: {target_model}")
+
+    # Start the vLLM OpenAI-compatible server using the official CLI
     cmd = [
-        "vllm", "serve", LOCAL_MODEL_PATH,
+        "vllm", "serve", target_model,
+        "--tokenizer", "google/gemma-4-12B-it",
         "--host", "0.0.0.0",
         "--port", "8000",
         "--tensor-parallel-size", "1",

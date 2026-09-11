@@ -2881,8 +2881,17 @@ class CalibrationOverlay(QWidget):
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _excepthook(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.exit(0)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+
+sys.excepthook = _excepthook
+
+
 def main():
     import os
+    import signal
     # Suppress the SetProcessDpiAwarenessContext access denied warning
     os.environ["QT_QPA_PLATFORM"] = "windows:dpiawareness=1"
 
@@ -2900,10 +2909,31 @@ def main():
     app.setApplicationName("AlphaLive")
     app.setApplicationVersion("4.0")
 
+    def _sigint_handler(sig, frame):
+        QApplication.quit()
+        sys.exit(0)
+
+    try:
+        signal.signal(signal.SIGINT, _sigint_handler)
+    except Exception:
+        pass
+
+    # Periodic timer allows the Python interpreter to process signals on Windows
+    sig_timer = QTimer()
+    sig_timer.timeout.connect(lambda: None)
+    sig_timer.start(250)
+
     w = MainWindow()
     w.showFullScreen()
-    sys.exit(app.exec())
+    try:
+        sys.exit(app.exec())
+    except KeyboardInterrupt:
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)
+

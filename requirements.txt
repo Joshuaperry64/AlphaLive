@@ -14,3 +14,4 @@ keyboard
 python-dotenv
 pyperclip
 aiohttp
+psutil

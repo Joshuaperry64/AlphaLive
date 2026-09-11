@@ -78,27 +78,27 @@ ENGINE_LABELS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 C = {
-    "bg_deep":     "#040810",
-    "bg_dark":     "#070e1a",
-    "bg_mid":      "#0b1828",
-    "bg_panel":    "#0e1f36",
-    "bg_card":     "#122440",
-    "border":      "#18385c",
-    "neon_blue":   "#00d4ff",
-    "neon_cyan":   "#00ffee",
-    "neon_purple": "#b400ff",
-    "neon_pink":   "#ff006e",
-    "neon_green":  "#00ff88",
-    "neon_yellow": "#ffee00",
-    "neon_red":    "#ff2244",
-    "neon_orange": "#ff6600",
-    "text_bright": "#e8f4ff",
-    "text_main":   "#8ab0cc",
-    "text_dim":    "#3f607e",
-    "text_dark":   "#1e3a52",
-    "success":     "#00ff88",
-    "warning":     "#ffee00",
-    "error":       "#ff2244",
+    "bg_deep":     "#02050A",
+    "bg_dark":     "#040A14",
+    "bg_mid":      "#081324",
+    "bg_panel":    "#0C1B33",
+    "bg_card":     "#102342",
+    "border":      "#1A3D66",
+    "neon_blue":   "#00E5FF",
+    "neon_cyan":   "#00FFEA",
+    "neon_purple": "#B829FF",
+    "neon_pink":   "#FF1493",
+    "neon_green":  "#00FF66",
+    "neon_yellow": "#FFEA00",
+    "neon_red":    "#FF3366",
+    "neon_orange": "#FF7700",
+    "text_bright": "#F0F8FF",
+    "text_main":   "#A0C4E0",
+    "text_dim":    "#507A9E",
+    "text_dark":   "#22425E",
+    "success":     "#00FF66",
+    "warning":     "#FFEA00",
+    "error":       "#FF3366",
 }
 
 FONT_MONO = "Consolas"
@@ -170,7 +170,7 @@ QTabBar::tab {{
     background: {C['bg_mid']};
     color: {C['text_dim']};
     border: 1px solid {C['border']};
-    padding: 7px 18px;
+    padding: 8px 20px;
     margin-right: 2px;
     border-top-left-radius: 3px;
     border-top-right-radius: 3px;
@@ -180,7 +180,7 @@ QTabBar::tab {{
 }}
 QTabBar::tab:selected {{
     background: {C['bg_panel']};
-    color: {C['neon_blue']};
+    color: {C['neon_cyan']};
     border-bottom-color: {C['bg_panel']};
     border-top: 2px solid {C['neon_blue']};
 }}
@@ -193,16 +193,16 @@ QPushButton {{
     background: {C['bg_card']};
     color: {C['text_main']};
     border: 1px solid {C['border']};
-    border-radius: 2px;
-    padding: 5px 14px;
+    border-radius: 4px;
+    padding: 8px 16px;
     font-size: 9px;
     font-weight: bold;
     letter-spacing: 1px;
 }}
 QPushButton:hover {{
     background: {C['bg_panel']};
-    border-color: {C['neon_blue']};
-    color: {C['neon_blue']};
+    border-color: {C['neon_cyan']};
+    color: {C['neon_cyan']};
 }}
 QPushButton:pressed {{ background: {C['border']}; }}
 QPushButton:disabled {{ color: {C['text_dark']}; border-color: {C['border']}; }}
@@ -210,7 +210,7 @@ QPushButton#btn_launch {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:1,
         stop:0 {C['neon_blue']}1a, stop:1 {C['neon_purple']}1a);
     border: 1px solid {C['neon_blue']};
-    color: {C['neon_blue']};
+    color: {C['neon_cyan']};
     font-size: 11px; padding: 9px 20px; letter-spacing: 3px;
 }}
 QPushButton#btn_launch:hover {{
@@ -233,47 +233,47 @@ QLineEdit, QTextEdit {{
     background: {C['bg_card']};
     color: {C['text_bright']};
     border: 1px solid {C['border']};
-    border-radius: 2px;
+    border-radius: 4px;
     padding: 4px 8px;
     font-family: '{FONT_MONO}';
     font-size: 11px;
-    selection-background-color: {C['neon_blue']}44;
+    selection-background-color: {C['neon_cyan']}44;
 }}
-QLineEdit:focus, QTextEdit:focus {{ border-color: {C['neon_blue']}; }}
+QLineEdit:focus, QTextEdit:focus {{ border-color: {C['neon_cyan']}; }}
 
 QComboBox {{
     background: {C['bg_card']};
     color: {C['text_main']};
     border: 1px solid {C['border']};
-    border-radius: 2px;
+    border-radius: 4px;
     padding: 4px 8px;
     font-size: 10px;
 }}
-QComboBox:hover {{ border-color: {C['neon_blue']}; }}
+QComboBox:hover {{ border-color: {C['neon_cyan']}; }}
 QComboBox::drop-down {{ border: none; width: 20px; }}
 QComboBox QAbstractItemView {{
     background: {C['bg_panel']};
     color: {C['text_main']};
     border: 1px solid {C['neon_blue']};
-    selection-background-color: {C['neon_blue']}33;
-    selection-color: {C['neon_blue']};
+    selection-background-color: {C['neon_cyan']}33;
+    selection-color: {C['neon_cyan']};
 }}
 
 QCheckBox {{ color: {C['text_main']}; spacing: 8px; font-size: 10px; }}
 QCheckBox::indicator {{
     width: 14px; height: 14px;
     border: 1px solid {C['border']};
-    border-radius: 2px;
+    border-radius: 4px;
     background: {C['bg_card']};
 }}
 QCheckBox::indicator:checked {{
     background: {C['neon_blue']};
-    border-color: {C['neon_blue']};
+    border-color: {C['neon_cyan']};
 }}
 
 QGroupBox {{
     border: 1px solid {C['border']};
-    border-radius: 3px;
+    border-radius: 6px;
     margin-top: 12px; padding-top: 8px;
     color: {C['text_dim']};
     font-size: 8px; font-weight: bold; letter-spacing: 2px;
@@ -287,7 +287,7 @@ QScrollBar:vertical {{
     background: {C['bg_deep']}; width: 7px; border: none;
 }}
 QScrollBar::handle:vertical {{
-    background: {C['border']}; border-radius: 3px; min-height: 16px;
+    background: {C['border']}; border-radius: 6px; min-height: 16px;
 }}
 QScrollBar::handle:vertical:hover {{ background: {C['neon_blue']}; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
@@ -297,7 +297,7 @@ QScrollBar:horizontal {{
     background: {C['bg_deep']}; height: 7px; border: none;
 }}
 QScrollBar::handle:horizontal {{
-    background: {C['border']}; border-radius: 3px; min-width: 16px;
+    background: {C['border']}; border-radius: 6px; min-width: 16px;
 }}
 QScrollBar::handle:horizontal:hover {{ background: {C['neon_blue']}; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
@@ -308,7 +308,7 @@ QListWidget {{
     background: {C['bg_dark']};
     color: {C['text_main']};
     border: 1px solid {C['border']};
-    border-radius: 2px;
+    border-radius: 4px;
     font-size: 10px;
 }}
 QListWidget::item {{
@@ -317,7 +317,7 @@ QListWidget::item {{
 }}
 QListWidget::item:selected {{
     background: {C['neon_blue']}1a;
-    color: {C['neon_blue']};
+    color: {C['neon_cyan']};
 }}
 QListWidget::item:hover {{ background: {C['bg_card']}; }}
 
@@ -325,11 +325,11 @@ QSpinBox {{
     background: {C['bg_card']};
     color: {C['text_main']};
     border: 1px solid {C['border']};
-    border-radius: 2px;
+    border-radius: 4px;
     padding: 3px 6px;
     font-size: 10px;
 }}
-QSpinBox:hover {{ border-color: {C['neon_blue']}; }}
+QSpinBox:hover {{ border-color: {C['neon_cyan']}; }}
 QSpinBox::up-button, QSpinBox::down-button {{
     background: {C['bg_mid']};
     border: 1px solid {C['border']};
@@ -339,13 +339,13 @@ QSpinBox::up-button, QSpinBox::down-button {{
 QProgressBar {{
     background: {C['bg_card']};
     border: 1px solid {C['border']};
-    border-radius: 2px;
+    border-radius: 4px;
     height: 6px; text-align: center;
 }}
 QProgressBar::chunk {{
     background: qlineargradient(x1:0,y1:0,x2:1,y2:0,
         stop:0 {C['neon_blue']}, stop:1 {C['neon_cyan']});
-    border-radius: 2px;
+    border-radius: 4px;
 }}
 
 QSplitter::handle {{ background: {C['border']}; width: 1px; height: 1px; }}
@@ -1618,6 +1618,102 @@ class EnginePanel(QWidget):
         return out
 
 
+
+class DashboardTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(20)
+
+        # Title
+        title = QLabel("ALPHA CORE OVERVIEW")
+        title.setStyleSheet(f"color: {C['neon_cyan']}; font-size: 24px; font-weight: bold; letter-spacing: 2px;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        root.addWidget(title)
+
+        # Stats Grid
+        stats_layout = QGridLayout()
+        stats_layout.setSpacing(15)
+
+        self.lbl_cpu = self._make_stat_card("CPU LOAD", "0%", C["neon_green"])
+        self.lbl_ram = self._make_stat_card("MEMORY USAGE", "0GB", C["neon_cyan"])
+        self.lbl_net = self._make_stat_card("NETWORK TX/RX", "0 KB/s", C["neon_purple"])
+        self.lbl_tkn = self._make_stat_card("TOKENS / SEC", "0", C["neon_yellow"])
+
+        stats_layout.addWidget(self.lbl_cpu, 0, 0)
+        stats_layout.addWidget(self.lbl_ram, 0, 1)
+        stats_layout.addWidget(self.lbl_net, 1, 0)
+        stats_layout.addWidget(self.lbl_tkn, 1, 1)
+
+        root.addLayout(stats_layout)
+
+        # Ambient visual element
+        self.ambient = PulseDot(color=C['neon_blue'], r=40)
+        amb_layout = QHBoxLayout()
+        amb_layout.addStretch()
+        amb_layout.addWidget(self.ambient)
+        amb_layout.addStretch()
+        root.addLayout(amb_layout)
+
+        root.addStretch()
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._sim_stats)
+        self._timer.start(1000)
+
+    def _make_stat_card(self, title, val, color):
+        card = QFrame()
+        card.setStyleSheet(f"""
+            QFrame {{
+                background: {C['bg_card']};
+                border: 1px solid {C['border']};
+                border-radius: 8px;
+            }}
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(15, 15, 15, 15)
+
+        t = QLabel(title)
+        t.setStyleSheet(f"color: {C['text_dim']}; font-weight: bold; font-size: 10px; border:none; background:transparent;")
+        layout.addWidget(t)
+
+        v = QLabel(val)
+        v.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 20px; font-family: {FONT_MONO}; border:none; background:transparent;")
+        v.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(v)
+
+        # We attach the value label to the card so we can update it
+        card.val_lbl = v
+        return card
+
+    def _sim_stats(self):
+        try:
+            import psutil
+            cpu = int(psutil.cpu_percent())
+            self.lbl_cpu.val_lbl.setText(f"{cpu}%")
+            if cpu > 70:
+                self.lbl_cpu.val_lbl.setStyleSheet(f"color: {C['neon_red']}; font-weight: bold; font-size: 20px; font-family: {FONT_MONO}; border:none; background:transparent;")
+            else:
+                self.lbl_cpu.val_lbl.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold; font-size: 20px; font-family: {FONT_MONO}; border:none; background:transparent;")
+
+            mem = psutil.virtual_memory()
+            ram = round(mem.used / (1024**3), 1)
+            self.lbl_ram.val_lbl.setText(f"{ram} GB")
+
+            net = psutil.net_io_counters()
+            if not hasattr(self, '_last_net'):
+                self._last_net = net
+                self.lbl_net.val_lbl.setText("0 KB/s")
+            else:
+                tx = (net.bytes_sent - self._last_net.bytes_sent) / 1024
+                rx = (net.bytes_recv - self._last_net.bytes_recv) / 1024
+                self.lbl_net.val_lbl.setText(f"{int(tx)}↑ {int(rx)}↓")
+                self._last_net = net
+
+        except Exception:
+            pass
+
 class ConfigTab(QWidget):
     saved = pyqtSignal(dict)
 
@@ -1640,20 +1736,27 @@ class ConfigTab(QWidget):
         sbar.addWidget(self._save_btn)
         root.addLayout(sbar)
 
-        # Sub-tabs (vertical)
-        self._sub = QTabWidget()
-        self._sub.setTabPosition(QTabWidget.TabPosition.West)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setStyleSheet("background:transparent;")
 
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+
+        # Merge Global and Engine panels visually
         gp = GlobalPanel(cfg)
         self._pnls["Global"] = gp
-        self._sub.addTab(gp, "GLOBAL")
+        inner_layout.addWidget(gp)
 
         for eng in ENGINES:
             ep = EnginePanel(eng, cfg)
             self._pnls[eng] = ep
-            self._sub.addTab(ep, eng.replace(".py", "").upper())
+            inner_layout.addWidget(ep)
 
-        root.addWidget(self._sub, 1)
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        root.addWidget(scroll, 1)
 
     def _save(self):
         self._cfg["Global"].update(self._pnls["Global"].values())
@@ -1666,7 +1769,6 @@ class ConfigTab(QWidget):
         else:
             self._save_lbl.setStyleSheet(f"color:{C['neon_red']}; font-size:9px;")
             self._save_lbl.setText("SAVE FAILED!")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB 5: LOGS
@@ -2054,7 +2156,7 @@ class Header(QWidget):
         self.btn_min.setFixedSize(32, 24)
         self.btn_min.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_min.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C['text_dim']}; font-weight: bold; font-family: monospace; border: 1px solid {C['border']}; border-radius: 2px; }}
+            QPushButton {{ background: transparent; color: {C['text_dim']}; font-weight: bold; font-family: monospace; border: 1px solid {C['border']}; border-radius: 4px; }}
             QPushButton:hover {{ background: {C['border']}; color: #ffffff; }}
         """)
         self.btn_min.clicked.connect(lambda: self.window().showMinimized())
@@ -2063,7 +2165,7 @@ class Header(QWidget):
         self.btn_close.setFixedSize(32, 24)
         self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_close.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {C['neon_red']}; font-weight: bold; border: 1px solid {C['neon_red']}; border-radius: 2px; }}
+            QPushButton {{ background: transparent; color: {C['neon_red']}; font-weight: bold; border: 1px solid {C['neon_red']}; border-radius: 4px; }}
             QPushButton:hover {{ background: {C['neon_red']}; color: #000000; }}
         """)
         self.btn_close.clicked.connect(lambda: self.window().close())
@@ -2180,6 +2282,7 @@ class MainWindow(QMainWindow):
 
         # Main tabs
         self._tabs = QTabWidget()
+        self._dashboard = DashboardTab()
         self._terminal = TerminalTab()
         self._monitor  = MonitorTab()
         self._history  = HistoryTab()
@@ -2188,6 +2291,7 @@ class MainWindow(QMainWindow):
         self._modal_db = ModalTab()
         self._logs     = LogsTab()
 
+        self._tabs.addTab(self._dashboard, " OVERVIEW ")
         self._tabs.addTab(self._terminal, " TERMINAL ")
         self._tabs.addTab(self._monitor,  " MONITOR ")
         self._tabs.addTab(self._history,  " HISTORY ")
@@ -2436,7 +2540,7 @@ class StatusOverlay(QWidget):
             Qt.WindowType.WindowTransparentForInput
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setFixedSize(160, 115)
+        self.setFixedSize(180, 140)
         
         # Position in top-right corner
         screen_geo = QApplication.primaryScreen().availableGeometry()
@@ -2461,7 +2565,7 @@ class StatusOverlay(QWidget):
         layout.addWidget(self.bg)
 
         # Title
-        title = QLabel("ALPHA STATUS")
+        title = QLabel("ALPHA HUD")
         title.setStyleSheet(f"color: {C['text_dim']}; font-weight: bold; font-family: {FONT_MONO}; font-size: 10px;")
         bg_layout.addWidget(title)
         
@@ -2469,13 +2573,13 @@ class StatusOverlay(QWidget):
 
         self.lbl_conn   = self._make_lbl("CONN :", "DISCONNECTED", C['text_dim'])
         self.lbl_load   = self._make_lbl("LOAD :", "IDLE", C['text_dim'])
-        self.lbl_exec   = self._make_lbl("EXEC :", "NONE", C['text_dim'])
+        self.lbl_sys    = self._make_lbl("SYS  :", "0% / 0GB", C['text_dim'])
         self.lbl_listen = self._make_lbl("MIC  :", "MUTED", C['text_dim'])
         self.lbl_err    = self._make_lbl("ERR  :", "NONE", C['text_dim'])
 
         bg_layout.addWidget(self.lbl_conn)
         bg_layout.addWidget(self.lbl_load)
-        bg_layout.addWidget(self.lbl_exec)
+        bg_layout.addWidget(self.lbl_sys)
         bg_layout.addWidget(self.lbl_listen)
         bg_layout.addWidget(self.lbl_err)
         
@@ -2484,6 +2588,20 @@ class StatusOverlay(QWidget):
         self._err_timer = QTimer(self)
         self._err_timer.setSingleShot(True)
         self._err_timer.timeout.connect(self._clear_err)
+
+        self._sys_timer = QTimer(self)
+        self._sys_timer.timeout.connect(self._update_sys)
+        self._sys_timer.start(2000)
+
+    def _update_sys(self):
+        try:
+            import psutil
+            cpu = int(psutil.cpu_percent())
+            mem = psutil.virtual_memory()
+            ram = round(mem.used / (1024**3), 1)
+            self.lbl_sys.setText(f"<span style='color:{C['text_dim']}'>SYS  :</span> <span style='color:{C['neon_cyan']}'>{cpu}% / {ram}GB</span>")
+        except:
+            pass
 
     def _make_lbl(self, prefix, val, color):
         lbl = QLabel()
@@ -2495,19 +2613,21 @@ class StatusOverlay(QWidget):
         prefix = {
             "conn": "CONN :",
             "load": "LOAD :",
-            "exec": "EXEC :",
+            "sys": "SYS  :",
             "listen": "MIC  :",
             "err": "ERR  :"
         }.get(key, key)
         
-        lbl = getattr(self, f"lbl_{key}")
-        lbl.setText(f"<span style='color:{C['text_dim']}'>{prefix}</span> <span style='color:{color}'>{val}</span>")
+        lbl = getattr(self, f"lbl_{key}", None)
+        if lbl:
+            lbl.setText(f"<span style='color:{C['text_dim']}'>{prefix}</span> <span style='color:{color}'>{val}</span>")
 
         if key == "err" and val != "NONE":
             self._err_timer.start(5000)
 
     def _clear_err(self):
         self.update_status("err", "NONE", C["text_dim"])
+
 
 class CoordinateOverlay(QWidget):
     def __init__(self, parent=None):

@@ -2405,7 +2405,6 @@ class MainWindow(QMainWindow):
             if self._screenshot_overlay:
                 self._screenshot_overlay.close()
                 self._screenshot_overlay = None
-        self.update_status("err", "NONE", C["text_dim"])
 
     def _start_calibration(self):
         if self._calib_overlay is not None:

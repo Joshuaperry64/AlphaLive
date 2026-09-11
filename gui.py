@@ -654,6 +654,15 @@ class StatusRow(QWidget):
     def set_color(self, c: str):
         self._dot.set_color(c)
 
+    def set_text(self, text: str):
+        self._lbl.setText(text)
+
+    def set_status(self, text: str, active: bool = True, color: str = None):
+        self._lbl.setText(text)
+        if color:
+            self._dot.set_color(color)
+        self.set_active(active)
+
 
 class GlowCard(QFrame):
     """Dark card with an optional animated neon border glow."""
@@ -1936,6 +1945,7 @@ class LaunchSidebar(QFrame):
     stop_requested   = pyqtSignal()
     calib_requested  = pyqtSignal()
     overlay_requested= pyqtSignal()
+    vllm_health_requested = pyqtSignal()
     quick_settings_changed = pyqtSignal(dict)
 
     def __init__(self, cfg: dict, parent=None):
@@ -2042,11 +2052,11 @@ class LaunchSidebar(QFrame):
         self._vllm_key_input.editingFinished.connect(self._sync_qs)
         root.addWidget(self._vllm_key_input)
 
-        root.addWidget(hsep())
-        
-        
-        
-        
+        self._vllm_health_btn = QPushButton("vLLM HEALTH CHECK")
+        self._vllm_health_btn.setFixedHeight(28)
+        self._vllm_health_btn.setToolTip("Test connection and model availability for vLLM endpoint")
+        self._vllm_health_btn.clicked.connect(self.vllm_health_requested.emit)
+        root.addWidget(self._vllm_health_btn)
 
         root.addWidget(hsep())
         
@@ -2185,6 +2195,7 @@ class Header(QWidget):
             ("modal",  "MODAL PROXY", C["neon_blue"]),
             ("mcp",    "MCP",         C["neon_cyan"]),
             ("memory", "MEMORY",      C["neon_purple"]),
+            ("vllm",   "vLLM",        C["neon_blue"]),
         ]:
             ind = StatusRow(label, color)
             ind.setFixedWidth(130)
@@ -2275,6 +2286,7 @@ class MainWindow(QMainWindow):
         self._sidebar.stop_requested.connect(self._stop)
         self._sidebar.calib_requested.connect(self._start_calibration)
         self._sidebar.overlay_requested.connect(self._toggle_overlay)
+        self._sidebar.vllm_health_requested.connect(self._check_vllm_health)
         self._sidebar.quick_settings_changed.connect(self._on_quick_settings_changed)
         body.addWidget(self._sidebar)
         
@@ -2310,9 +2322,16 @@ class MainWindow(QMainWindow):
         sb.setStyleSheet(f"background:{C['bg_deep']}; border-top:1px solid {C['border']};")
         sbl = QHBoxLayout(sb)
         sbl.setContentsMargins(12, 0, 12, 0)
+        sbl.setSpacing(12)
         self._status = lbl("READY — Select an engine and click LAUNCH", 9, C["text_dim"], spacing=1)
         sbl.addWidget(self._status)
         sbl.addStretch()
+
+        # vLLM Status Indicator in Status Bar
+        self._vllm_status_row = StatusRow("vLLM: UNCHECKED", color=C["neon_blue"])
+        sbl.addWidget(self._vllm_status_row)
+        sbl.addWidget(lbl("·", 9, C["border"]))
+
         sbl.addWidget(lbl("AlphaLive GUI  ·  AlphaCore v4.0", 9, C["text_dark"]))
         root.addWidget(sb)
 
@@ -2522,6 +2541,73 @@ class MainWindow(QMainWindow):
     def _slog(self, text: str, level="info"):
         if hasattr(self, "_logs"):
             self._logs.append(text, level)
+
+    def _check_vllm_health(self):
+        ep = self._sidebar._vllm_ep_input.text().strip() or "http://localhost:8000"
+        key = self._sidebar._vllm_key_input.text().strip()
+        mdl = self._sidebar._vllm_mdl_input.text().strip()
+        
+        self._vllm_status_row.set_status("vLLM: CHECKING...", active=True, color=C["neon_yellow"])
+        self._set_status(f"Checking vLLM health at {ep}...")
+        self._slog(f"vLLM health check initiated for {ep}", "system")
+
+        def _worker():
+            import requests
+            headers = {}
+            if key:
+                headers["Authorization"] = f"Bearer {key}"
+            
+            base_url = ep.rstrip("/")
+            health_ok = False
+            models_ok = False
+            model_names = []
+            err_details = ""
+
+            try:
+                r = requests.get(f"{base_url}/health", headers=headers, timeout=3.0)
+                if r.status_code == 200:
+                    health_ok = True
+            except Exception as e:
+                err_details = str(e)
+
+            try:
+                r2 = requests.get(f"{base_url}/v1/models", headers=headers, timeout=3.0)
+                if r2.status_code == 200:
+                    models_ok = True
+                    data = r2.json()
+                    model_names = [m.get("id") for m in data.get("data", []) if "id" in m]
+            except Exception as e:
+                if not err_details:
+                    err_details = str(e)
+
+            if health_ok or models_ok:
+                display_model = mdl if mdl and mdl != "default" else (model_names[0] if model_names else "OK")
+                status_text = f"vLLM: ONLINE ({display_model})"
+                color = C["neon_green"]
+                active = True
+                bar_text = f"vLLM is ONLINE — {ep}"
+                log_msg = f"vLLM is ONLINE at {ep} (Models: {', '.join(model_names) if model_names else 'reachable'})"
+                level = "system"
+            else:
+                status_text = "vLLM: OFFLINE"
+                color = C["neon_red"]
+                active = True
+                bar_text = f"vLLM health check FAILED — {ep}"
+                log_msg = f"vLLM health check FAILED for {ep}: {err_details or 'Unreachable'}"
+                level = "error"
+
+            QTimer.singleShot(0, lambda: self._apply_vllm_health_result(status_text, active, color, bar_text, log_msg, level))
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_vllm_health_result(self, status_text: str, active: bool, color: str, bar_text: str, log_msg: str, level: str):
+        if hasattr(self, "_vllm_status_row"):
+            self._vllm_status_row.set_status(status_text, active=active, color=color)
+        if hasattr(self, "_header"):
+            self._header.set_ind("vllm", active and (color == C["neon_green"]))
+        self._set_status(bar_text)
+        self._slog(log_msg, level)
 
     def closeEvent(self, e):
         if hasattr(self, '_status_overlay'):

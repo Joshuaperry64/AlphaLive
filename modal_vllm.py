@@ -2,30 +2,24 @@ import modal
 import os
 import subprocess
 
-# We will sync your HuggingFace Bucket into a Modal Volume so vLLM can load it instantly
-BUCKET_ID = "hf://buckets/Joshuaperry64/Gemma"
+MODEL_ID = "DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED"
 CACHE_DIR = "/models"
-LOCAL_MODEL_PATH = f"{CACHE_DIR}/Gemma"
+LOCAL_MODEL_PATH = f"{CACHE_DIR}/Qwen3.5-9B"
 
 GPU_CONFIG = "A10G"
 
-# 1. Create a persistent Volume to store the synced bucket files
-model_volume = modal.Volume.from_name("alphalive-gemma-volume", create_if_missing=True)
+# 1. Create a persistent Volume to store the downloaded model files
+model_volume = modal.Volume.from_name("alphalive-qwen-volume", create_if_missing=True)
 
 vllm_image = (
     modal.Image.debian_slim(python_version="3.10")
     .pip_install(
         "vllm",
         "huggingface_hub",
-        "hf-xet",
         "fastapi",
         "uvicorn"
     )
-    # Install the new Hugging Face CLI (required for hf buckets sync)
-    .apt_install("curl")
-    .run_commands("curl -LsSf https://hf.co/cli/install.sh | bash -s")
     .env({
-        "HF_XET_HIGH_PERFORMANCE": "1",
         "HF_HOME": CACHE_DIR
     })
 )
@@ -43,31 +37,30 @@ app = modal.App("alphalive-vllm-bucket")
 @modal.web_server(8000, startup_timeout=300)
 def serve():
     import subprocess
+    from huggingface_hub import snapshot_download
     
-    # 2. Sync the HF Bucket to the Modal Volume before starting vLLM.
-    #    (This only downloads files that are missing or changed, so it's instant after the first run)
-    print(f"Syncing HF Bucket {BUCKET_ID} to {LOCAL_MODEL_PATH}...")
-    subprocess.run(["hf", "buckets", "sync", BUCKET_ID, LOCAL_MODEL_PATH], check=True)
+    # 2. Download / cache the model to the persistent volume
+    print(f"Verifying/downloading model {MODEL_ID} to {LOCAL_MODEL_PATH}...")
+    snapshot_download(
+        repo_id=MODEL_ID,
+        local_dir=LOCAL_MODEL_PATH,
+        local_dir_use_symlinks=False,
+    )
     model_volume.commit()
-    print("Sync complete!")
+    print("Model snapshot ready!")
     
-    # 3. Detect the main GGUF file in the synced directory
-    import glob
-    gguf_files = glob.glob(f"{LOCAL_MODEL_PATH}/*.gguf")
-    model_files = [f for f in gguf_files if "mmproj" not in f and "mtp" not in f]
-    target_model = model_files[0] if model_files else f"{LOCAL_MODEL_PATH}/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf"
-    print(f"Target model file: {target_model}")
-
-    # Start the vLLM OpenAI-compatible server using the official CLI
+    # 3. Start the vLLM OpenAI-compatible server using the official CLI
     cmd = [
-        "vllm", "serve", target_model,
-        "--tokenizer", "google/gemma-4-12B-it",
+        "vllm", "serve", LOCAL_MODEL_PATH,
+        "--served-model-name", MODEL_ID,
         "--host", "0.0.0.0",
         "--port", "8000",
         "--tensor-parallel-size", "1",
         "--max-model-len", "4096",
-        "--gpu-memory-utilization", "0.90"
+        "--gpu-memory-utilization", "0.90",
+        "--trust-remote-code"
     ]
     
     print("Starting vLLM server...")
     subprocess.run(cmd, check=True)
+

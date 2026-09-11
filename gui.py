@@ -2380,7 +2380,7 @@ class MainWindow(QMainWindow):
         if target == "proxy":
             cmd = "modal deploy modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
         elif target == "vllm":
-            cmd = "modal deploy modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm"
+            cmd = "modal deploy modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm-bucket"
         else:
             return
 

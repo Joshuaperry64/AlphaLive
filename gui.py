@@ -2279,6 +2279,7 @@ class MainWindow(QMainWindow):
         body.addWidget(self._sidebar)
         
         self._cursor_overlay = None
+        self._screenshot_overlay = None
         self._calib_overlay = None
 
         # Main tabs
@@ -2396,9 +2397,15 @@ class MainWindow(QMainWindow):
     def _toggle_overlay(self):
         if self._cursor_overlay is None:
             self._cursor_overlay = CoordinateOverlay()
+            self._screenshot_overlay = ScreenshotButtonOverlay()
+            self._screenshot_overlay.show()
         else:
             self._cursor_overlay.close()
             self._cursor_overlay = None
+            if self._screenshot_overlay:
+                self._screenshot_overlay.close()
+                self._screenshot_overlay = None
+        self.update_status("err", "NONE", C["text_dim"])
 
     def _start_calibration(self):
         if self._calib_overlay is not None:
@@ -2412,6 +2419,9 @@ class MainWindow(QMainWindow):
         if self._cursor_overlay is not None:
             self._cursor_overlay.close()
             self._cursor_overlay = None
+        if self._screenshot_overlay is not None:
+            self._screenshot_overlay.close()
+            self._screenshot_overlay = None
 
     # ── Engine control ────────────────────────────────────────────────────
 
@@ -2788,6 +2798,68 @@ class CalibrationOverlay(QWidget):
             painter.drawEllipse(pt, 6, 6)
 
 
+
+class ScreenshotButtonOverlay(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowStaysOnTopHint |
+            Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.btn = QPushButton("📸")
+        self.btn.setFixedSize(60, 60)
+        self.btn.setToolTip("Take Screenshot (Simulates PrintScreen)")
+        self.btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(40, 44, 52, 200);
+                color: white;
+                border-radius: 30px;
+                font-size: 28px;
+                border: 2px solid rgba(255, 255, 255, 100);
+            }
+            QPushButton:hover {
+                background-color: rgba(60, 64, 72, 220);
+                border: 2px solid rgba(255, 255, 255, 200);
+            }
+            QPushButton:pressed {
+                background-color: rgba(20, 24, 32, 250);
+            }
+        """)
+        self.btn.clicked.connect(self._take_screenshot)
+        layout.addWidget(self.btn)
+        
+        # Position in top-right corner by default
+        screen = QApplication.primaryScreen().geometry()
+        self.move(screen.width() - 80, 80)
+        
+        self._drag_pos = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        event.accept()
+
+    def _take_screenshot(self):
+        import pyautogui
+        try:
+            pyautogui.press('printscreen')
+        except Exception as e:
+            print(f"[ScreenshotButton] Error: {e}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT

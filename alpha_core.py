@@ -777,6 +777,17 @@ class AudioLoop:
             image_bytes = mss.tools.to_png(i.rgb, i.size)
             img = PIL.Image.open(io.BytesIO(image_bytes))
 
+            # Draw the mouse cursor directly onto the image
+            import pyautogui
+            import PIL.ImageDraw
+            mx, my = pyautogui.position()
+            draw = PIL.ImageDraw.Draw(img)
+            r = 15
+            # Draw a bright red crosshair and center dot
+            draw.line((mx - r, my, mx + r, my), fill="red", width=3)
+            draw.line((mx, my - r, mx, my + r), fill="red", width=3)
+            draw.ellipse((mx - 3, my - 3, mx + 3, my + 3), fill="red")
+
             # mss grabs PHYSICAL pixels (e.g. 1920x1080).
             # PyAutoGUI clicks in PHYSICAL space because the process is DPI-aware.
             # We send the physical screenshot directly to the AI, so its coordinates match 1:1.
@@ -1407,6 +1418,17 @@ class AudioLoop:
             image_bytes = mss.tools.to_png(i.rgb, i.size)
             img = PIL.Image.open(io.BytesIO(image_bytes))
             
+            # Draw the mouse cursor directly onto the image
+            import pyautogui
+            import PIL.ImageDraw
+            mx, my = pyautogui.position()
+            draw = PIL.ImageDraw.Draw(img)
+            r = 15
+            # Draw a bright red crosshair and center dot
+            draw.line((mx - r, my, mx + r, my), fill="red", width=3)
+            draw.line((mx, my - r, mx, my + r), fill="red", width=3)
+            draw.ellipse((mx - 3, my - 3, mx + 3, my + 3), fill="red")
+
             # Send physical pixels directly to AI
             img.thumbnail([1024, 1024])
             

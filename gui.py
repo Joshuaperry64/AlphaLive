@@ -2575,15 +2575,17 @@ class MainWindow(QMainWindow):
             model_names = []
             err_details = ""
 
+            timeout_val = 5.0 if ("localhost" in base_url or "127.0.0.1" in base_url) else 60.0
+
             try:
-                r = requests.get(f"{base_url}/health", headers=headers, timeout=3.0)
+                r = requests.get(f"{base_url}/health", headers=headers, timeout=timeout_val)
                 if r.status_code == 200:
                     health_ok = True
             except Exception as e:
                 err_details = str(e)
 
             try:
-                r2 = requests.get(f"{base_url}/v1/models", headers=headers, timeout=3.0)
+                r2 = requests.get(f"{base_url}/v1/models", headers=headers, timeout=timeout_val)
                 if r2.status_code == 200:
                     models_ok = True
                     data = r2.json()

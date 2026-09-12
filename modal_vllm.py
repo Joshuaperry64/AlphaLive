@@ -35,25 +35,31 @@ app = modal.App("alphalive-vllm-bucket")
 @app.function(
     image=vllm_image,
     gpu=GPU_CONFIG,
-    scaledown_window=300,
+    timeout=1800,
+    scaledown_window=600,
     volumes={CACHE_DIR: model_volume}, 
     secrets=[modal.Secret.from_name("huggingface-secret")] # Ensure your HF token is in this Modal secret!
 )
 @modal.concurrent(max_inputs=100)
-@modal.web_server(8000, startup_timeout=300)
+@modal.web_server(8000, startup_timeout=900)
 def serve():
+    import os
     import subprocess
     from huggingface_hub import snapshot_download
     
-    # 2. Download / cache the model to the persistent volume
-    print(f"Verifying/downloading model {MODEL_ID} to {LOCAL_MODEL_PATH}...")
-    snapshot_download(
-        repo_id=MODEL_ID,
-        local_dir=LOCAL_MODEL_PATH,
-        local_dir_use_symlinks=False,
-    )
-    model_volume.commit()
-    print("Model snapshot ready!")
+    # 2. Download / cache the model to the persistent volume if not already present
+    config_path = os.path.join(LOCAL_MODEL_PATH, "config.json")
+    if not os.path.exists(config_path):
+        print(f"Downloading model {MODEL_ID} to {LOCAL_MODEL_PATH}...")
+        snapshot_download(
+            repo_id=MODEL_ID,
+            local_dir=LOCAL_MODEL_PATH,
+            local_dir_use_symlinks=False,
+        )
+        model_volume.commit()
+        print("Model snapshot ready and committed to volume!")
+    else:
+        print(f"Model snapshot already cached in volume at {LOCAL_MODEL_PATH}.")
     
     # 3. Start the vLLM OpenAI-compatible server using the official CLI
     cmd = [
@@ -63,7 +69,7 @@ def serve():
         "--port", "8000",
         "--tensor-parallel-size", "1",
         "--max-model-len", "4096",
-        "--gpu-memory-utilization", "0.90",
+        "--gpu-memory-utilization", "0.85",
         "--trust-remote-code"
     ]
     

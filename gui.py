@@ -880,6 +880,14 @@ class EngineWorker(QThread):
             self._alive = False
             self.status_changed.emit("stopped")
 
+    def write_stdin(self, text: str):
+        if self._proc and self._proc.poll() is None and self._proc.stdin:
+            try:
+                self._proc.stdin.write(text.rstrip("\r\n") + "\n")
+                self._proc.stdin.flush()
+            except Exception as e:
+                self.line_received.emit(f"[SYSTEM] Failed to write to engine stdin: {e}")
+
     def stop(self):
         self._alive = False
         if self._proc and self._proc.poll() is None:
@@ -2345,8 +2353,10 @@ class MainWindow(QMainWindow):
         )
 
     def _send_text_to_engine(self, text: str):
-        if self._worker:
+        if self._worker and self._running:
             self._worker.write_stdin(text)
+        else:
+            self._terminal.append("[SYSTEM] Engine is not running. Launch an engine first.", C["neon_yellow"])
 
     def _on_quick_settings_changed(self, updates: dict):
         g = self._cfg.setdefault("Global", {})

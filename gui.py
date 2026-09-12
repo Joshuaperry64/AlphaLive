@@ -55,7 +55,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QPainter, QPen, QBrush,
     QLinearGradient, QRadialGradient, QFontMetrics, QCursor,
-    QTextCharFormat, QTextBlockFormat, QPainterPath
+    QTextCharFormat, QTextBlockFormat, QPainterPath, QKeySequence
 )
 
 
@@ -103,6 +103,29 @@ C = {
 
 FONT_MONO = "Consolas"
 FONT_UI   = "Segoe UI"
+
+
+def safe_set_clipboard(text: str) -> bool:
+    """Safely set clipboard text with retry and PowerShell fallback to avoid COM 0x800401d0 locks."""
+    if not text:
+        return False
+    for _ in range(5):
+        try:
+            cb = QApplication.clipboard()
+            if cb:
+                cb.setText(text)
+                return True
+        except Exception:
+            time.sleep(0.05)
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $input"],
+            input=text, text=True, timeout=4, creationflags=flags
+        )
+        return True
+    except Exception:
+        return False
 
 DEFAULT_CONFIG = {
     "Global": {
@@ -921,13 +944,14 @@ class TerminalTab(QWidget):
         # Toolbar
         bar = QHBoxLayout()
         self._clear_btn  = QPushButton("CLEAR")
+        self._copy_btn   = QPushButton("COPY")
         self._wrap_btn   = QPushButton("WRAP")
         self._wrap_btn.setCheckable(True)
         self._wrap_btn.setChecked(True)
         self._scroll_btn = QPushButton("AUTO-SCROLL")
         self._scroll_btn.setCheckable(True)
         self._scroll_btn.setChecked(True)
-        for b in (self._clear_btn, self._wrap_btn, self._scroll_btn):
+        for b in (self._clear_btn, self._copy_btn, self._wrap_btn, self._scroll_btn):
             b.setFixedHeight(24)
             b.setStyleSheet(f"""
                 QPushButton {{
@@ -972,6 +996,7 @@ class TerminalTab(QWidget):
                 padding: 8px;
             }}
         """)
+        self._out.installEventFilter(self)
         root.addWidget(self._out, 1)
 
         # Input
@@ -1001,7 +1026,26 @@ class TerminalTab(QWidget):
         self._last_speaker = None
         self._last_user_input = None
         self._clear_btn.clicked.connect(self._clear)
+        self._copy_btn.clicked.connect(self._copy_terminal)
         self._wrap_btn.toggled.connect(self._toggle_wrap)
+
+    def eventFilter(self, obj, event):
+        if obj is self._out and event.type() == event.Type.KeyPress:
+            if event.matches(QKeySequence.StandardKey.Copy):
+                self._copy_terminal()
+                return True
+        return super().eventFilter(obj, event)
+
+    def _copy_terminal(self):
+        cursor = self._out.textCursor()
+        text = cursor.selectedText().replace('\u2029', '\n').replace('\u2028', '\n')
+        if not text.strip():
+            text = self._out.toPlainText()
+        if text.strip():
+            safe_set_clipboard(text)
+            prev = self._line_count.text()
+            self._line_count.setText("COPIED!")
+            QTimer.singleShot(1500, lambda: self._line_count.setText(prev))
 
     def _toggle_wrap(self, checked: bool):
         mode = QTextEdit.LineWrapMode.WidgetWidth if checked else QTextEdit.LineWrapMode.NoWrap

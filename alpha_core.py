@@ -1441,12 +1441,20 @@ class AudioLoop:
 
             elif name == "type_text":
                 text = args.get("text", "")
-                # Use pyperclip for long text to avoid pyautogui slowness
                 if len(text) > 50:
-                    await asyncio.to_thread(pyperclip.copy, text)
-                    await asyncio.to_thread(pyautogui.hotkey, "ctrl", "v")
+                    def _paste_text():
+                        for _ in range(3):
+                            try:
+                                pyperclip.copy(text)
+                                break
+                            except Exception:
+                                time.sleep(0.05)
+                        time.sleep(0.08)  # Let Windows OLE release clipboard lock before firing paste shortcut
+                        pyautogui.hotkey("ctrl", "v")
+                        time.sleep(0.05)
+                    await asyncio.to_thread(_paste_text)
                 else:
-                    await asyncio.to_thread(pyautogui.write, text, interval=0.02)
+                    await asyncio.to_thread(pyautogui.write, text, interval=0.01)
                 return {"result": f"Typed text ({len(text)} chars). Continue execution."}
 
             elif name == "press_key":

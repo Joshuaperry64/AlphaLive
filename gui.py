@@ -2239,11 +2239,14 @@ class Header(QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
+    vllm_health_result = pyqtSignal(str, bool, str, str, str, str)
+
     def __init__(self):
         super().__init__()
         self._cfg     = load_config()
         self._worker  = None
         self._running = False
+        self.vllm_health_result.connect(self._apply_vllm_health_result)
 
         self.setWindowTitle("AlphaLive Control Interface")
         self.setMinimumSize(1100, 700)
@@ -2556,61 +2559,71 @@ class MainWindow(QMainWindow):
         ep = self._sidebar._vllm_ep_input.text().strip() or "http://localhost:8000"
         key = self._sidebar._vllm_key_input.text().strip()
         mdl = self._sidebar._vllm_mdl_input.text().strip()
+
+        if ep and not (ep.startswith("http://") or ep.startswith("https://")):
+            ep = f"https://{ep}" if "modal.run" in ep else f"http://{ep}"
         
         self._vllm_status_row.set_status("vLLM: CHECKING...", active=True, color=C["neon_yellow"])
         self._set_status(f"Checking vLLM health at {ep}...")
         self._slog(f"vLLM health check initiated for {ep}", "system")
 
         def _worker():
-            import requests
-            headers = {}
-            if key:
-                headers["Authorization"] = f"Bearer {key}"
-            
-            base_url = ep.rstrip("/")
-            if base_url.endswith("/v1"):
-                base_url = base_url[:-3]
-            health_ok = False
-            models_ok = False
-            model_names = []
-            err_details = ""
-
-            timeout_val = 5.0 if ("localhost" in base_url or "127.0.0.1" in base_url) else 60.0
-
             try:
-                r = requests.get(f"{base_url}/health", headers=headers, timeout=timeout_val)
-                if r.status_code == 200:
-                    health_ok = True
-            except Exception as e:
-                err_details = str(e)
+                import requests
+                headers = {}
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                
+                base_url = ep.rstrip("/")
+                if base_url.endswith("/v1"):
+                    base_url = base_url[:-3]
+                health_ok = False
+                models_ok = False
+                model_names = []
+                err_details = ""
 
-            try:
-                r2 = requests.get(f"{base_url}/v1/models", headers=headers, timeout=timeout_val)
-                if r2.status_code == 200:
-                    models_ok = True
-                    data = r2.json()
-                    model_names = [m.get("id") for m in data.get("data", []) if "id" in m]
-            except Exception as e:
-                if not err_details:
+                timeout_val = 5.0 if ("localhost" in base_url or "127.0.0.1" in base_url) else 30.0
+
+                try:
+                    r = requests.get(f"{base_url}/health", headers=headers, timeout=timeout_val)
+                    if r.status_code == 200:
+                        health_ok = True
+                except Exception as e:
                     err_details = str(e)
 
-            if health_ok or models_ok:
-                display_model = mdl if mdl and mdl != "default" else (model_names[0] if model_names else "OK")
-                status_text = f"vLLM: ONLINE ({display_model})"
-                color = C["neon_green"]
-                active = True
-                bar_text = f"vLLM is ONLINE — {ep}"
-                log_msg = f"vLLM is ONLINE at {ep} (Models: {', '.join(model_names) if model_names else 'reachable'})"
-                level = "system"
-            else:
-                status_text = "vLLM: OFFLINE"
-                color = C["neon_red"]
-                active = True
-                bar_text = f"vLLM health check FAILED — {ep}"
-                log_msg = f"vLLM health check FAILED for {ep}: {err_details or 'Unreachable'}"
-                level = "error"
+                try:
+                    r2 = requests.get(f"{base_url}/v1/models", headers=headers, timeout=timeout_val)
+                    if r2.status_code == 200:
+                        models_ok = True
+                        data = r2.json()
+                        model_names = [m.get("id") for m in data.get("data", []) if "id" in m]
+                except Exception as e:
+                    if not err_details:
+                        err_details = str(e)
 
-            QTimer.singleShot(0, lambda: self._apply_vllm_health_result(status_text, active, color, bar_text, log_msg, level))
+                if health_ok or models_ok:
+                    display_model = mdl if mdl and mdl != "default" else (model_names[0] if model_names else "OK")
+                    status_text = f"vLLM: ONLINE ({display_model})"
+                    color = C["neon_green"]
+                    active = True
+                    bar_text = f"vLLM is ONLINE — {ep}"
+                    log_msg = f"vLLM is ONLINE at {ep} (Models: {', '.join(model_names) if model_names else 'reachable'})"
+                    level = "system"
+                else:
+                    status_text = "vLLM: OFFLINE"
+                    color = C["neon_red"]
+                    active = True
+                    bar_text = f"vLLM health check FAILED — {ep}"
+                    log_msg = f"vLLM health check FAILED for {ep}: {err_details or 'Unreachable'}"
+                    level = "error"
+
+                self.vllm_health_result.emit(status_text, active, color, bar_text, log_msg, level)
+            except Exception as thread_err:
+                self.vllm_health_result.emit(
+                    "vLLM: OFFLINE", True, C["neon_red"],
+                    f"vLLM check error — {ep}",
+                    f"vLLM check exception: {thread_err}", "error"
+                )
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()

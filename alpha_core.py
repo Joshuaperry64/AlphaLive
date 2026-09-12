@@ -1012,6 +1012,8 @@ class AudioLoop:
             }
 
             endpoint = VLLM_ENDPOINT.rstrip("/")
+            if endpoint.endswith("/v1"):
+                endpoint = endpoint[:-3]
             url = f"{endpoint}/v1/chat/completions"
             print(f"\n[vLLM] Routing to {url} ...", end="", flush=True)
 

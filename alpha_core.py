@@ -12,6 +12,8 @@ import websockets
 import cv2
 import pyaudio
 import PIL.Image
+import PIL.ImageDraw
+from PIL import ImageGrab
 import pyautogui
 import keyboard
 
@@ -721,142 +723,206 @@ class AudioLoop:
                 f.write(text)
         await asyncio.to_thread(_write)
     async def send_text(self):
-        while True:
-            text = await asyncio.to_thread(
-                input,
-                "message > ",
-            )
+        while not self.stop_event.is_set():
+            try:
+                text = await asyncio.to_thread(
+                    input,
+                    "message > ",
+                )
+            except (EOFError, KeyboardInterrupt):
+                await self.stop_event.wait()
+                break
+            except Exception:
+                await asyncio.sleep(1.0)
+                continue
+
             if text.lower() == "q":
                 self.stop_event.set()
                 break
             if self.session is not None:
-                await self.session.send_realtime_input(text=text or ".")
-                await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
-
-    def _get_frame(self, cap):
-        ret, frame = cap.read()
-        if not ret:
-            return None
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)
-        img.thumbnail([768, 768])
-
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg", quality=40, optimize=True)
-        image_io.seek(0)
-        
-        image_bytes = image_io.read()
-        return {"video": types.Blob(data=image_bytes, mime_type="image/jpeg")}
-
-    async def get_frames(self):
-        cap = await asyncio.to_thread(
-            cv2.VideoCapture, 0
-        )
-
-        while True:
-            frame_kwargs = await asyncio.to_thread(self._get_frame, cap)
-            if frame_kwargs is None:
-                break
-
-            await asyncio.sleep(2.0)
-
-            if self.out_queue is not None:
                 try:
-                    self.out_queue.put_nowait(frame_kwargs)
-                except asyncio.QueueFull:
+                    await self.session.send_realtime_input(text=text or ".")
+                    await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
+                except Exception:
                     pass
 
-        cap.release()
-
-    def _get_screen(self):
+    def _get_frame(self, cap):
         try:
-            import mss
-        except ImportError as e:
-            raise ImportError("Please install mss package using 'pip install mss'") from e
-        
-        with mss.MSS() as sct:
-            monitor = sct.monitors[1]
-            i = sct.grab(monitor)
-            image_bytes = mss.tools.to_png(i.rgb, i.size)
-            img = PIL.Image.open(io.BytesIO(image_bytes))
-
-            # Draw the mouse cursor directly onto the image
-            import pyautogui
-            import PIL.ImageDraw
-            mx, my = pyautogui.position()
-            draw = PIL.ImageDraw.Draw(img)
-            r = 15
-            # Draw a bright red crosshair and center dot
-            draw.line((mx - r, my, mx + r, my), fill="red", width=3)
-            draw.line((mx, my - r, mx, my + r), fill="red", width=3)
-            draw.ellipse((mx - 3, my - 3, mx + 3, my + 3), fill="red")
-
-            # mss grabs PHYSICAL pixels (e.g. 1920x1080).
-            # PyAutoGUI clicks in PHYSICAL space because the process is DPI-aware.
-            # We send the physical screenshot directly to the AI, so its coordinates match 1:1.
-
-            img.thumbnail([1024, 1024])
+            ret, frame = cap.read()
+            if not ret:
+                return None
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = PIL.Image.fromarray(frame_rgb)
+            img.thumbnail([768, 768])
 
             image_io = io.BytesIO()
             img.save(image_io, format="jpeg", quality=40, optimize=True)
             image_io.seek(0)
-
+            
             image_bytes = image_io.read()
             return {"video": types.Blob(data=image_bytes, mime_type="image/jpeg")}
+        except Exception:
+            return None
+
+    async def get_frames(self):
+        cap = None
+        try:
+            cap = await asyncio.to_thread(
+                cv2.VideoCapture, 0
+            )
+
+            while not self.stop_event.is_set():
+                try:
+                    frame_kwargs = await asyncio.to_thread(self._get_frame, cap)
+                    if frame_kwargs is not None and self.out_queue is not None:
+                        try:
+                            self.out_queue.put_nowait(frame_kwargs)
+                        except asyncio.QueueFull:
+                            try:
+                                self.out_queue.get_nowait()
+                                self.out_queue.put_nowait(frame_kwargs)
+                            except Exception:
+                                pass
+                except Exception:
+                    await asyncio.sleep(2.0)
+                    continue
+
+                await asyncio.sleep(2.0)
+        except Exception as e:
+            print(f"\n[System Vision Error] Camera initialization failed: {e}")
+        finally:
+            if cap is not None:
+                cap.release()
+
+    @staticmethod
+    def _ensure_input_desktop():
+        """Ensure the calling thread is attached to the active user desktop on Windows."""
+        if os.name == "nt":
+            try:
+                u32 = ctypes.windll.user32
+                hdesk = u32.OpenInputDesktop(0, False, 0x0100)
+                if hdesk:
+                    u32.SetThreadDesktop(hdesk)
+                    u32.CloseDesktop(hdesk)
+            except Exception:
+                pass
+
+    def _grab_screen_image(self):
+        """Grab a screenshot safely, falling back across methods to never crash."""
+        self._ensure_input_desktop()
+        img = None
+        try:
+            import mss
+            with mss.MSS() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                i = sct.grab(monitor)
+                image_bytes = mss.tools.to_png(i.rgb, i.size)
+                img = PIL.Image.open(io.BytesIO(image_bytes))
+        except Exception:
+            pass
+
+        if img is None:
+            try:
+                img = ImageGrab.grab(all_screens=False)
+            except Exception:
+                pass
+
+        if img is None:
+            return None
+
+        try:
+            mx, my = pyautogui.position()
+            draw = PIL.ImageDraw.Draw(img)
+            r = 15
+            draw.line((mx - r, my, mx + r, my), fill="red", width=3)
+            draw.line((mx, my - r, mx, my + r), fill="red", width=3)
+            draw.ellipse((mx - 3, my - 3, mx + 3, my + 3), fill="red")
+        except Exception:
+            pass
+
+        img.thumbnail([1024, 1024])
+        return img
+
+    def _get_screen(self):
+        try:
+            img = self._grab_screen_image()
+            if img is None:
+                return None
+            image_io = io.BytesIO()
+            img.save(image_io, format="jpeg", quality=40, optimize=True)
+            image_io.seek(0)
+            return {"video": types.Blob(data=image_io.read(), mime_type="image/jpeg")}
+        except Exception:
+            return None
 
     async def get_screen(self):
-        while True:
-            frame_kwargs = await asyncio.to_thread(self._get_screen)
-            if frame_kwargs is None:
-                break
+        while not self.stop_event.is_set():
+            try:
+                frame_kwargs = await asyncio.to_thread(self._get_screen)
+                if frame_kwargs is not None and self.out_queue is not None:
+                    try:
+                        self.out_queue.put_nowait(frame_kwargs)
+                    except asyncio.QueueFull:
+                        try:
+                            self.out_queue.get_nowait()
+                            self.out_queue.put_nowait(frame_kwargs)
+                        except Exception:
+                            pass
+            except Exception:
+                await asyncio.sleep(2.0)
+                continue
 
             await asyncio.sleep(1.0)
 
+    async def send_realtime(self):
+        while not self.stop_event.is_set():
             if self.out_queue is not None:
                 try:
-                    self.out_queue.put_nowait(frame_kwargs)
-                except asyncio.QueueFull:
-                    pass
-
-    async def send_realtime(self):
-        while True:
-            if self.out_queue is not None:
-                media_kwargs = await self.out_queue.get()
+                    media_kwargs = await asyncio.wait_for(self.out_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
                 if self.session is not None:
                     try:
                         await self.session.send_realtime_input(**media_kwargs)
                     except Exception:
                         pass
-                await asyncio.sleep(0.005)
+            await asyncio.sleep(0.005)
 
     async def listen_audio(self):
-        mic_info = pya.get_default_input_device_info()
-        self.audio_stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=SEND_SAMPLE_RATE,
-            input=True,
-            input_device_index=mic_info["index"],
-            frames_per_buffer=CHUNK_SIZE,
-        )
-        kwargs = {"exception_on_overflow": False}
-        while not self.stop_event.is_set():
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-            
-            if self.is_ai_speaking or (time.time() - self.last_ai_speech_time < 0.40):
-                continue
-
-            if self.out_queue is not None:
-                payload = {"audio": types.Blob(data=data, mime_type="audio/pcm")}
+        try:
+            mic_info = pya.get_default_input_device_info()
+            self.audio_stream = await asyncio.to_thread(
+                pya.open,
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=SEND_SAMPLE_RATE,
+                input=True,
+                input_device_index=mic_info["index"],
+                frames_per_buffer=CHUNK_SIZE,
+            )
+            kwargs = {"exception_on_overflow": False}
+            while not self.stop_event.is_set():
                 try:
-                    self.out_queue.put_nowait(payload)
-                except asyncio.QueueFull:
+                    data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+                except Exception:
+                    await asyncio.sleep(0.05)
+                    continue
+                
+                if self.is_ai_speaking or (time.time() - self.last_ai_speech_time < 0.40):
+                    continue
+
+                if self.out_queue is not None:
+                    payload = {"audio": types.Blob(data=data, mime_type="audio/pcm")}
                     try:
-                        self.out_queue.get_nowait()
                         self.out_queue.put_nowait(payload)
-                    except Exception:
-                        pass
+                    except asyncio.QueueFull:
+                        try:
+                            self.out_queue.get_nowait()
+                            self.out_queue.put_nowait(payload)
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"\n[System Audio Error] Microphone error: {e}")
 
     # ── vLLM Hybrid Relay ─────────────────────────────────────────────────────
 
@@ -1348,13 +1414,24 @@ class AudioLoop:
 
     async def send_text_ws(self):
         while not self.stop_event.is_set():
-            text = await asyncio.to_thread(input, "message > ")
+            try:
+                text = await asyncio.to_thread(input, "message > ")
+            except (EOFError, KeyboardInterrupt):
+                await self.stop_event.wait()
+                break
+            except Exception:
+                await asyncio.sleep(1.0)
+                continue
+
             if text.lower() == "q":
                 self.stop_event.set()
                 break
             if self.websocket is not None:
-                await self.send_ws_json({"type": "text", "data": text or "."})
-                await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
+                try:
+                    await self.send_ws_json({"type": "text", "data": text or "."})
+                    await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
+                except Exception:
+                    pass
 
     async def send_ws_json(self, payload, websocket=None):
         target = websocket or self.websocket
@@ -1413,70 +1490,72 @@ class AudioLoop:
 
     def _get_screen_b64(self):
         try:
-            import mss
-        except ImportError as e:
-            raise ImportError("Please install mss: pip install mss") from e
-        with mss.MSS() as sct:
-            monitor = sct.monitors[1]
-            i = sct.grab(monitor)
-            image_bytes = mss.tools.to_png(i.rgb, i.size)
-            img = PIL.Image.open(io.BytesIO(image_bytes))
-            
-            # Draw the mouse cursor directly onto the image
-            import pyautogui
-            import PIL.ImageDraw
-            mx, my = pyautogui.position()
-            draw = PIL.ImageDraw.Draw(img)
-            r = 15
-            # Draw a bright red crosshair and center dot
-            draw.line((mx - r, my, mx + r, my), fill="red", width=3)
-            draw.line((mx, my - r, mx, my + r), fill="red", width=3)
-            draw.ellipse((mx - 3, my - 3, mx + 3, my + 3), fill="red")
-
-            # Send physical pixels directly to AI
-            img.thumbnail([1024, 1024])
-            
+            img = self._grab_screen_image()
+            if img is None:
+                return None
             image_io = io.BytesIO()
             img.save(image_io, format="jpeg", quality=40, optimize=True)
             return base64.b64encode(image_io.getvalue()).decode("utf-8")
+        except Exception:
+            return None
 
     def _get_frame_b64(self, cap):
-        ret, frame = cap.read()
-        if not ret:
+        try:
+            ret, frame = cap.read()
+            if not ret:
+                return None
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = PIL.Image.fromarray(frame_rgb)
+            img.thumbnail([768, 768])
+            image_io = io.BytesIO()
+            img.save(image_io, format="jpeg", quality=40, optimize=True)
+            return base64.b64encode(image_io.getvalue()).decode("utf-8")
+        except Exception:
             return None
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = PIL.Image.fromarray(frame_rgb)
-        img.thumbnail([768, 768])
-        image_io = io.BytesIO()
-        img.save(image_io, format="jpeg", quality=40, optimize=True)
-        return base64.b64encode(image_io.getvalue()).decode("utf-8")
 
     async def get_screen_ws(self):
         while not self.stop_event.is_set():
-            b64 = await asyncio.to_thread(self._get_screen_b64)
-            await asyncio.sleep(1.0)
-            if self.video_queue is not None:
-                try:
-                    self.video_queue.put_nowait({"type": "video", "data": b64})
-                except asyncio.QueueFull:
+            try:
+                b64 = await asyncio.to_thread(self._get_screen_b64)
+                if b64 is not None and self.video_queue is not None:
                     try:
-                        self.video_queue.get_nowait()
                         self.video_queue.put_nowait({"type": "video", "data": b64})
-                    except Exception:
-                        pass
+                    except asyncio.QueueFull:
+                        try:
+                            self.video_queue.get_nowait()
+                            self.video_queue.put_nowait({"type": "video", "data": b64})
+                        except Exception:
+                            pass
+            except Exception:
+                await asyncio.sleep(2.0)
+                continue
+            await asyncio.sleep(1.0)
 
     async def get_frames_ws(self):
-        cap = await asyncio.to_thread(cv2.VideoCapture, 0)
-        while not self.stop_event.is_set():
-            b64 = await asyncio.to_thread(self._get_frame_b64, cap)
-            if b64 is None:
-                break
-            await asyncio.sleep(2.0)
-            if self.video_queue is not None:
+        cap = None
+        try:
+            cap = await asyncio.to_thread(cv2.VideoCapture, 0)
+            while not self.stop_event.is_set():
                 try:
-                    self.video_queue.put_nowait({"type": "video", "data": b64})
-                except asyncio.QueueFull:
-                    pass
+                    b64 = await asyncio.to_thread(self._get_frame_b64, cap)
+                    if b64 is not None and self.video_queue is not None:
+                        try:
+                            self.video_queue.put_nowait({"type": "video", "data": b64})
+                        except asyncio.QueueFull:
+                            try:
+                                self.video_queue.get_nowait()
+                                self.video_queue.put_nowait({"type": "video", "data": b64})
+                            except Exception:
+                                pass
+                except Exception:
+                    await asyncio.sleep(2.0)
+                    continue
+                await asyncio.sleep(2.0)
+        except Exception as e:
+            print(f"\n[System Vision Error] Camera WS initialization failed: {e}")
+        finally:
+            if cap is not None:
+                cap.release()
 
     async def send_video_ws(self):
         while not self.stop_event.is_set():
@@ -1836,12 +1915,16 @@ class AudioLoop:
                 except asyncio.CancelledError:
                     raise
 
-                except ExceptionGroup:
-                    print("\n[System] Connection dropped! Attempting to reconnect in 3 seconds...")
+                except ExceptionGroup as eg:
+                    print(f"\n[System] Connection dropped! ExceptionGroup: {eg}")
+                    for exc in eg.exceptions:
+                        print(f"  - Sub-exception: {type(exc).__name__}: {exc}")
+                        traceback.print_exception(type(exc), exc, exc.__traceback__)
                     await asyncio.sleep(3)
 
                 except Exception as e:
                     print(f"\n[System] Unexpected error: {e}. Reconnecting in 3 seconds...")
+                    traceback.print_exc()
                     await asyncio.sleep(3)
 
         except asyncio.CancelledError:

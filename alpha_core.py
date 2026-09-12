@@ -7,6 +7,11 @@ import json
 import base64
 import re
 import ctypes
+from ctypes import wintypes
+import subprocess
+import pyperclip
+import webbrowser
+import urllib.parse
 
 import websockets
 import cv2
@@ -1358,7 +1363,6 @@ class AudioLoop:
 
     async def _execute_tool(self, name: str, args: dict) -> dict:
         """Execute any registered tool by name and return a result dict."""
-        import subprocess
         try:
             # ── Mouse & Keyboard ─────────────────────────────────────────────
             if name == "mouse_click":
@@ -1377,7 +1381,6 @@ class AudioLoop:
                         u32.SetCursorPos(target_x, target_y)
                         time.sleep(0.05)  # Allow Windows to deliver WM_MOUSEMOVE and hover/focus
                     else:
-                        from ctypes import wintypes
                         cur_pt = wintypes.POINT()
                         u32.GetCursorPos(ctypes.byref(cur_pt))
                         target_x, target_y = cur_pt.x, cur_pt.y
@@ -1440,7 +1443,6 @@ class AudioLoop:
                 text = args.get("text", "")
                 # Use pyperclip for long text to avoid pyautogui slowness
                 if len(text) > 50:
-                    import pyperclip
                     await asyncio.to_thread(pyperclip.copy, text)
                     await asyncio.to_thread(pyautogui.hotkey, "ctrl", "v")
                 else:
@@ -1459,14 +1461,37 @@ class AudioLoop:
                 return {"result": f"Hotkey pressed: {'+'.join(keys)}."}
 
             elif name == "get_clipboard":
-                import pyperclip
-                content = await asyncio.to_thread(pyperclip.paste)
+                def _do_get():
+                    for _ in range(3):
+                        try:
+                            return pyperclip.paste()
+                        except Exception:
+                            time.sleep(0.05)
+                    try:
+                        p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
+                                           capture_output=True, text=True, timeout=5)
+                        return p.stdout.strip()
+                    except Exception:
+                        return ""
+                content = await asyncio.to_thread(_do_get)
                 return {"result": content or "(clipboard is empty)"}
 
             elif name == "set_clipboard":
-                import pyperclip
                 text = args.get("text", "")
-                await asyncio.to_thread(pyperclip.copy, text)
+                def _do_set():
+                    for _ in range(3):
+                        try:
+                            pyperclip.copy(text)
+                            return True
+                        except Exception:
+                            time.sleep(0.05)
+                    try:
+                        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                        "Set-Clipboard -Value $input"], input=text, text=True, timeout=5)
+                        return True
+                    except Exception:
+                        return False
+                await asyncio.to_thread(_do_set)
                 return {"result": f"Clipboard set to: '{text[:80]}{'...' if len(text) > 80 else ''}'"}
 
             elif name == "run_shell_command":
@@ -1507,14 +1532,11 @@ class AudioLoop:
 
             # ✨ Added Tools ✨
             elif name == "browser_open_url":
-                import webbrowser
                 url = args.get("url", "")
                 await asyncio.to_thread(webbrowser.open, url)
                 return {"result": f"Opened {url} in default browser."}
 
             elif name == "browser_search":
-                import webbrowser
-                import urllib.parse
                 query = args.get("query", "")
                 url = f"https://www.google.com/search?q={urllib.parse.quote(query)}"
                 await asyncio.to_thread(webbrowser.open, url)
@@ -1529,7 +1551,6 @@ class AudioLoop:
                 return {"result": f"Displayed notification: {message}"}
 
             elif name == "get_active_window":
-                import ctypes
                 hwnd = ctypes.windll.user32.GetForegroundWindow()
                 length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
                 buff = ctypes.create_unicode_buffer(length + 1)
@@ -1537,7 +1558,6 @@ class AudioLoop:
                 return {"result": f"Active window title: '{buff.value}'"}
 
             elif name == "window_action":
-                import ctypes
                 hwnd = ctypes.windll.user32.GetForegroundWindow()
                 action = args.get("action", "").lower()
                 if action == "maximize":

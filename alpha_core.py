@@ -1022,9 +1022,21 @@ class AudioLoop:
                                      timeout=aiohttp.ClientTimeout(total=60)) as resp:
                     if resp.status != 200:
                         err = await resp.text()
-                        print(f"\n[vLLM Error] HTTP {resp.status}: {err}")
-                        return
-                    data = await resp.json()
+                        if resp.status == 400 and ("tool choice" in err or "tool-call-parser" in err):
+                            print(f"\n[vLLM Notice] Server does not have tool-call-parser enabled, retrying without tools...", flush=True)
+                            payload_no_tools = {k: v for k, v in payload.items() if k not in ("tools", "tool_choice")}
+                            async with http.post(url, json=payload_no_tools, headers=headers,
+                                                 timeout=aiohttp.ClientTimeout(total=60)) as retry_resp:
+                                if retry_resp.status != 200:
+                                    retry_err = await retry_resp.text()
+                                    print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}")
+                                    return
+                                data = await retry_resp.json()
+                        else:
+                            print(f"\n[vLLM Error] HTTP {resp.status}: {err}")
+                            return
+                    else:
+                        data = await resp.json()
 
             choice = data["choices"][0]["message"]
             response_text = choice.get("content", "") or ""

@@ -70,6 +70,8 @@ def serve():
         "--tensor-parallel-size", "1",
         "--max-model-len", "4096",
         "--gpu-memory-utilization", "0.85",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "hermes",
         "--trust-remote-code"
     ]
     

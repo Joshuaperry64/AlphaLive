@@ -386,7 +386,7 @@ CONFIG = types.LiveConnectConfig(
         trigger_tokens=trigger_val,
         sliding_window=types.SlidingWindow(target_tokens=target_val),
     ),
-    tools=tools,
+    tools=None if VLLM_MODE else tools,
     system_instruction=types.Content(
         parts=[types.Part.from_text(text="""Respond laid back, chill, direct, you can use profanity and curse words. 
 [VISION NOTE: The exact current position of your mouse cursor is explicitly marked on your screenshots by a small red crosshair with a solid red dot in the center. Use this red dot to orient yourself and know exactly where you are pointing!]
@@ -646,14 +646,14 @@ if _mode_injections:
 if VLLM_MODE:
     _vllm_relay_prompt = (
         "\n\n[vLLM HYBRID MODE ACTIVE]\n"
-        "You are now operating as a voice interface relay. Your ONLY job in this mode is:\n"
+        "You are operating strictly as a voice interface relay (STT and TTS).\n"
         "1. When you receive a message beginning with [RELAY], you MUST speak the content that follows [RELAY] "
         "EXACTLY as written — word for word, verbatim. Do not paraphrase, summarize, add commentary, add "
         "greetings, or change anything. Just speak it naturally.\n"
-        "2. When you detect user speech being transcribed, wait for the incoming [RELAY] message. "
-        "Do not generate your own independent response or chatter while waiting for the relay. "
-        "The external vLLM engine is handling the actual response generation.\n"
-        "3. You are the voice. The external model is the brain. Trust the relay.\n"
+        "2. When user speech is detected or transcribed, DO NOT generate any spontaneous verbal responses or audio on your own. "
+        "Remain completely silent and wait for the incoming [RELAY] message. The external vLLM engine is handling all reasoning.\n"
+        "3. You have no local tools enabled in this mode; all actions, commands, and tools are executed by the external engine.\n"
+        "4. You are the voice. The external model is the brain. Trust the relay.\n"
         f"Current vLLM endpoint: {VLLM_ENDPOINT} | Model: {VLLM_MODEL}"
     )
     CONFIG.system_instruction.parts.append(types.Part.from_text(text=_vllm_relay_prompt))
@@ -926,6 +926,36 @@ class AudioLoop:
         self._vllm_pending = True
         try:
             import aiohttp
+            import re
+
+            def _clean_thinking(raw_text: str, reasoning_text: str = "") -> tuple[str, str]:
+                thoughts = []
+                if reasoning_text and reasoning_text.strip():
+                    thoughts.append(reasoning_text.strip())
+                cleaned = raw_text or ""
+                # Strip <think>...</think> or <thought>...</thought>
+                pattern = re.compile(r'<(think|thought)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
+                for match in pattern.finditer(cleaned):
+                    t = match.group(2).strip()
+                    if t:
+                        thoughts.append(t)
+                cleaned = pattern.sub('', cleaned).strip()
+                # Strip unclosed <think> or <thought> (e.g. if cut off by token limit)
+                unclosed = re.compile(r'<(think|thought)>(.*)', re.DOTALL | re.IGNORECASE)
+                unclosed_m = unclosed.search(cleaned)
+                if unclosed_m:
+                    t = unclosed_m.group(2).strip()
+                    if t:
+                        thoughts.append(t)
+                    cleaned = cleaned[:unclosed_m.start()].strip()
+                # Strip markdown thought code blocks ```thought ... ```
+                md_t = re.compile(r'```(?:thought|thinking)\s*(.*?)```', re.DOTALL | re.IGNORECASE)
+                for match in md_t.finditer(cleaned):
+                    t = match.group(1).strip()
+                    if t:
+                        thoughts.append(t)
+                cleaned = md_t.sub('', cleaned).strip()
+                return "\n".join(thoughts).strip(), cleaned
 
             # Load the vLLM system prompt from memory (personality + identity)
             traits = self.mm.get_personality()
@@ -939,18 +969,22 @@ class AudioLoop:
                     f"  {k}: {v}" for k, v in traits.items()
                 )
 
+            # Keep rolling history compact (last 10 items max, ~5 turns)
+            while len(self._vllm_history) > 10:
+                self._vllm_history.pop(0)
+
             messages = [{"role": "system", "content": vllm_system}]
-            # Add rolling history (cap at last 20 turns to avoid ballooning context)
-            messages.extend(self._vllm_history[-20:])
+            messages.extend(self._vllm_history)
             
             user_content = [{"type": "text", "text": user_text}]
             if self.video_mode == "screen":
                 try:
                     b64_img = await asyncio.to_thread(self._get_screen_b64)
-                    user_content.append({
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}
-                    })
+                    if b64_img:
+                        user_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}
+                        })
                 except Exception as e:
                     print(f"\n[vLLM Vision Error] {e}")
 
@@ -1022,57 +1056,112 @@ class AudioLoop:
                                     print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}")
                                     return
                                 data = await retry_resp.json()
+                        elif resp.status == 400 and ("context length" in err or "input_tokens" in err):
+                            print(f"\n[vLLM Notice] Context length exceeded, resetting history and retrying with reduced tokens...", flush=True)
+                            self._vllm_history.clear()
+                            retry_payload = dict(payload)
+                            retry_payload["messages"] = [
+                                {"role": "system", "content": vllm_system},
+                                {"role": "user", "content": user_text}
+                            ]
+                            retry_payload["max_tokens"] = 512
+                            async with http.post(url, json=retry_payload, headers=headers,
+                                                 timeout=aiohttp.ClientTimeout(total=60)) as retry_resp:
+                                if retry_resp.status != 200:
+                                    retry_err = await retry_resp.text()
+                                    print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}")
+                                    return
+                                data = await retry_resp.json()
                         else:
                             print(f"\n[vLLM Error] HTTP {resp.status}: {err}")
                             return
                     else:
                         data = await resp.json()
 
-            choice = data["choices"][0]["message"]
-            response_text = choice.get("content", "") or ""
-            response_text = response_text.strip()
-            
-            tool_calls = choice.get("tool_calls") or []
-            
-            if response_text:
-                print(f" got {len(response_text)} chars", flush=True)
-                # Store in rolling history — always use plain strings, not multipart content
-                self._vllm_history.append({"role": "user",      "content": user_text})
-                self._vllm_history.append({"role": "assistant",  "content": response_text})
+                choice = data["choices"][0]["message"]
+                raw_response = choice.get("content", "") or ""
+                reasoning = choice.get("reasoning_content", "") or ""
+                tool_calls = choice.get("tool_calls") or []
 
-                # Log to session file
-                with open(self.log_file, "a", encoding="utf-8") as f:
-                    f.write(f"\n[You (vLLM)]: {user_text}\n[Alpha (vLLM)]: {response_text}\n")
+                thoughts, clean_response = _clean_thinking(raw_response, reasoning)
 
-                # Relay through Gemini TTS: send response as text input so Gemini speaks it.
-                # The relay system prompt instructs Gemini to repeat [RELAY] content verbatim.
-                if self.session is not None:
-                    await self.session.send_realtime_input(text=f"[RELAY] {response_text}")
-                elif self.websocket is not None:
-                    msg = json.dumps({"type": "text", "data": f"[RELAY] {response_text}"})
-                    async with self.websocket_send_lock:
-                        await self.websocket.send(msg)
-            
-            if tool_calls:
-                print(f"\n[vLLM Tool Calls]: {len(tool_calls)} requested.")
-                tool_results = []
-                for tc in tool_calls:
-                    fn = tc.get("function", {})
-                    t_name = fn.get("name", "")
-                    raw_args = fn.get("arguments", "{}")
+                if thoughts:
+                    print(f"\n[Alpha Thoughts]: {thoughts}", flush=True)
+
+                # ── Tool execution and follow-up loop ──────────────────────────
+                if tool_calls:
+                    print(f"\n[vLLM Tool Calls]: {len(tool_calls)} requested.")
+                    followup_messages = list(messages)
+                    followup_messages.append({
+                        "role": "assistant",
+                        "content": raw_response if raw_response else None,
+                        "tool_calls": tool_calls
+                    })
+
+                    tool_summaries = []
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        t_name = fn.get("name", "")
+                        raw_args = fn.get("arguments", "{}")
+                        try:
+                            t_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                        except json.JSONDecodeError:
+                            t_args = {}
+                        print(f"\n[Tool Executing (vLLM)] {t_name} with args: {t_args}")
+                        t_res = await self._execute_tool(t_name, t_args)
+                        print(f"[Tool Finished] Result: {t_res}\n")
+                        res_val = t_res.get("result") or t_res.get("error") or str(t_res)
+                        tool_summaries.append(f"{t_name}: {res_val}")
+
+                        followup_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc.get("id", f"call_{t_name}"),
+                            "name": t_name,
+                            "content": json.dumps(t_res)
+                        })
+
+                    # Follow-up request to get conversational outcome after tool execution
+                    followup_payload = {
+                        "model": VLLM_MODEL,
+                        "messages": followup_messages,
+                        "max_tokens": VLLM_MAX_TOKENS,
+                        "temperature": 0.85,
+                        "stream": False
+                    }
+                    print(f"[vLLM] Sending tool results back for response...", flush=True)
                     try:
-                        t_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                    except json.JSONDecodeError:
-                        t_args = {}
-                    print(f"\n[Tool Executing (vLLM)] {t_name} with args: {t_args}")
-                    t_res = await self._execute_tool(t_name, t_args)
-                    print(f"[Tool Finished] Result: {t_res}\n")
-                    tool_results.append(f"{t_name}: {t_res.get('result', '')}")
-                
-                # Feed results back into history so next turn has context
-                tool_summary = "; ".join(tool_results)
-                self._vllm_history.append({"role": "user",      "content": user_text})
-                self._vllm_history.append({"role": "assistant",  "content": f"[Executed tools: {tool_summary}]"})
+                        async with http.post(url, json=followup_payload, headers=headers,
+                                             timeout=aiohttp.ClientTimeout(total=60)) as fu_resp:
+                            if fu_resp.status == 200:
+                                fu_data = await fu_resp.json()
+                                fu_choice = fu_data["choices"][0]["message"]
+                                fu_raw = fu_choice.get("content", "") or ""
+                                fu_reasoning = fu_choice.get("reasoning_content", "") or ""
+                                fu_thoughts, fu_clean = _clean_thinking(fu_raw, fu_reasoning)
+                                if fu_thoughts:
+                                    print(f"\n[Alpha Thoughts]: {fu_thoughts}", flush=True)
+                                clean_response = fu_clean
+                            else:
+                                clean_response = f"Action completed: {', '.join(tool_summaries)}"
+                    except Exception as fu_err:
+                        print(f"\n[vLLM Tool Followup Error] {fu_err}")
+                        clean_response = f"Action completed: {', '.join(tool_summaries)}"
+
+                # Relay clean response to voice output (only if there is spoken content)
+                if clean_response:
+                    print(f" got {len(clean_response)} chars", flush=True)
+                    self._vllm_history.append({"role": "user",      "content": user_text})
+                    self._vllm_history.append({"role": "assistant",  "content": clean_response})
+
+                    with open(self.log_file, "a", encoding="utf-8") as f:
+                        f.write(f"\n[You (vLLM)]: {user_text}\n[Alpha (vLLM)]: {clean_response}\n")
+
+                    if self.session is not None:
+                        await self.session.send_realtime_input(text=f"[RELAY] {clean_response}")
+                    elif self.websocket is not None:
+                        msg = json.dumps({"type": "text", "data": f"[RELAY] {clean_response}"})
+                        async with self.websocket_send_lock:
+                            await self.websocket.send(msg)
 
         except ImportError:
             print("\n[vLLM Error] aiohttp not installed. Run: uv pip install aiohttp")
@@ -1128,6 +1217,9 @@ class AudioLoop:
                                     await self._async_log(part.text)
                         
                     if tool_call := response.tool_call:
+                        if VLLM_MODE:
+                            # In vLLM mode, Gemini Live is audio relay only; ignore any stray Gemini tool calls
+                            continue
                         self._auto_last_had_tools = True   # mark that this turn was active
                         self._auto_idle_turns = 0
                         

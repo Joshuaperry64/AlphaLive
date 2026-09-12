@@ -68,7 +68,7 @@ def serve():
         "--host", "0.0.0.0",
         "--port", "8000",
         "--tensor-parallel-size", "1",
-        "--max-model-len", "4096",
+        "--max-model-len", "16384",
         "--gpu-memory-utilization", "0.85",
         "--enable-auto-tool-choice",
         "--tool-call-parser", "hermes",

@@ -73,6 +73,6 @@ def serve():
         "--trust-remote-code"
     ]
     
-    print("Starting vLLM server...")
-    subprocess.run(cmd, check=True)
+    print("Starting vLLM server with subprocess.Popen...")
+    subprocess.Popen(cmd)
 

@@ -82,13 +82,16 @@ tools = [
         function_declarations=[
             types.FunctionDeclaration(
                 name="mouse_click",
-                description=f"Click the mouse at the given screen coordinates. The actual physical screen resolution is {screen_w}x{screen_h}. You MUST output absolute coordinates in this {screen_w}x{screen_h} space, regardless of the resolution of the image you receive.",
+                description=(
+                    f"Click the mouse. If x and y coordinates are provided, moves to (x, y) in physical screen resolution {screen_w}x{screen_h} before clicking. "
+                    "If x and y are omitted (or None), clicks at the CURRENT mouse cursor position without moving it."
+                ),
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
-                    required=["x", "y"],
+                    required=[],
                     properties={
-                        "x": genai.types.Schema(type=genai.types.Type.INTEGER, description="X pixel coordinate to click."),
-                        "y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Y pixel coordinate to click."),
+                        "x": genai.types.Schema(type=genai.types.Type.INTEGER, description="Optional X pixel coordinate to click. Omit to click at current position."),
+                        "y": genai.types.Schema(type=genai.types.Type.INTEGER, description="Optional Y pixel coordinate to click. Omit to click at current position."),
                         "button": genai.types.Schema(type=genai.types.Type.STRING, description="Mouse button: 'left', 'right', or 'middle'. Default 'left'."),
                         "clicks": genai.types.Schema(type=genai.types.Type.INTEGER, description="Number of clicks. Use 2 for double-click. Default 1."),
                     },
@@ -790,10 +793,12 @@ class AudioLoop:
         if os.name == "nt":
             try:
                 u32 = ctypes.windll.user32
-                hdesk = u32.OpenInputDesktop(0, False, 0x0100)
+                # 0x01FF provides full desktop access including input injection (DESKTOP_JOURNALPLAYBACK)
+                hdesk = u32.OpenInputDesktop(0, False, 0x01FF)
                 if hdesk:
                     u32.SetThreadDesktop(hdesk)
-                    u32.CloseDesktop(hdesk)
+                    # Note: Do not call CloseDesktop on the active thread's current desktop handle,
+                    # as closing it causes subsequent mouse_event/SendInput calls to fail with ERROR_ACCESS_DENIED (5).
             except Exception:
                 pass
 
@@ -933,6 +938,10 @@ class AudioLoop:
                 if reasoning_text and reasoning_text.strip():
                     thoughts.append(reasoning_text.strip())
                 cleaned = raw_text or ""
+
+                # Strip <tool_call>...</tool_call> from spoken text
+                cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', cleaned, flags=re.DOTALL | re.IGNORECASE).strip()
+
                 # Strip <think>...</think> or <thought>...</thought>
                 pattern = re.compile(r'<(think|thought)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
                 for match in pattern.finditer(cleaned):
@@ -940,6 +949,16 @@ class AudioLoop:
                     if t:
                         thoughts.append(t)
                 cleaned = pattern.sub('', cleaned).strip()
+
+                # Strip orphaned </think> or </thought> where opening tag was omitted
+                orphan_pattern = re.compile(r'^(.*?)</(?:think|thought)>', re.DOTALL | re.IGNORECASE)
+                orphan_match = orphan_pattern.search(cleaned)
+                if orphan_match:
+                    t = orphan_match.group(1).strip()
+                    if t:
+                        thoughts.append(t)
+                    cleaned = cleaned[orphan_match.end():].strip()
+
                 # Strip unclosed <think> or <thought> (e.g. if cut off by token limit)
                 unclosed = re.compile(r'<(think|thought)>(.*)', re.DOTALL | re.IGNORECASE)
                 unclosed_m = unclosed.search(cleaned)
@@ -948,6 +967,7 @@ class AudioLoop:
                     if t:
                         thoughts.append(t)
                     cleaned = cleaned[:unclosed_m.start()].strip()
+
                 # Strip markdown thought code blocks ```thought ... ```
                 md_t = re.compile(r'```(?:thought|thinking)\s*(.*?)```', re.DOTALL | re.IGNORECASE)
                 for match in md_t.finditer(cleaned):
@@ -955,7 +975,47 @@ class AudioLoop:
                     if t:
                         thoughts.append(t)
                 cleaned = md_t.sub('', cleaned).strip()
+
                 return "\n".join(thoughts).strip(), cleaned
+
+            def _extract_hermes_tool_calls(text: str) -> list[dict]:
+                extracted = []
+                tc_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', text or "", re.DOTALL | re.IGNORECASE)
+                for idx, block in enumerate(tc_blocks):
+                    block_clean = block.strip()
+                    if block_clean.startswith("{") and block_clean.endswith("}"):
+                        try:
+                            j = json.loads(block_clean)
+                            extracted.append({
+                                "id": f"call_{idx}",
+                                "function": {"name": j.get("name"), "arguments": json.dumps(j.get("arguments", {}))}
+                            })
+                            continue
+                        except Exception:
+                            pass
+                    fn_match = re.search(r'<function=([a-zA-Z0-9_-]+)>(.*?)</function>', block, re.DOTALL)
+                    if fn_match:
+                        fn_name = fn_match.group(1).strip()
+                        fn_body = fn_match.group(2)
+                        args = {}
+                        param_matches = re.finditer(r'<parameter=([a-zA-Z0-9_-]+)>\s*(.*?)\s*</parameter>', fn_body, re.DOTALL)
+                        for pm in param_matches:
+                            p_name = pm.group(1).strip()
+                            p_val_str = pm.group(2).strip()
+                            try:
+                                if p_val_str.lower() == "true": p_val = True
+                                elif p_val_str.lower() == "false": p_val = False
+                                elif re.match(r'^-?\d+$', p_val_str): p_val = int(p_val_str)
+                                elif re.match(r'^-?\d+\.\d+$', p_val_str): p_val = float(p_val_str)
+                                else: p_val = json.loads(p_val_str)
+                            except Exception:
+                                p_val = p_val_str
+                            args[p_name] = p_val
+                        extracted.append({
+                            "id": f"call_{idx}_{fn_name}",
+                            "function": {"name": fn_name, "arguments": json.dumps(args)}
+                        })
+                return extracted
 
             # Load the vLLM system prompt from memory (personality + identity)
             traits = self.mm.get_personality()
@@ -1082,6 +1142,9 @@ class AudioLoop:
                 raw_response = choice.get("content", "") or ""
                 reasoning = choice.get("reasoning_content", "") or ""
                 tool_calls = choice.get("tool_calls") or []
+
+                if not tool_calls:
+                    tool_calls = _extract_hermes_tool_calls(raw_response)
 
                 thoughts, clean_response = _clean_thinking(raw_response, reasoning)
 
@@ -1293,31 +1356,78 @@ class AudioLoop:
         try:
             # ── Mouse & Keyboard ─────────────────────────────────────────────
             if name == "mouse_click":
-                x, y = int(args.get("x", 0)), int(args.get("y", 0))
-                button = args.get("button", "left")
+                raw_x = args.get("x")
+                raw_y = args.get("y")
+                button = str(args.get("button", "left")).lower() if args.get("button") else "left"
                 clicks = int(args.get("clicks", 1))
-                await asyncio.to_thread(pyautogui.click, x=x, y=y, button=button, clicks=clicks)
-                return {"result": f"Clicked ({x},{y}) {clicks}x with {button}. Inspect screen and continue if incomplete."}
+
+                def _do_click():
+                    self._ensure_input_desktop()
+                    pyautogui.FAILSAFE = False
+                    u32 = ctypes.windll.user32
+
+                    if raw_x is not None and raw_y is not None:
+                        target_x, target_y = int(raw_x), int(raw_y)
+                        u32.SetCursorPos(target_x, target_y)
+                        time.sleep(0.05)  # Allow Windows to deliver WM_MOUSEMOVE and hover/focus
+                    else:
+                        from ctypes import wintypes
+                        cur_pt = wintypes.POINT()
+                        u32.GetCursorPos(ctypes.byref(cur_pt))
+                        target_x, target_y = cur_pt.x, cur_pt.y
+
+                    if button == "right":
+                        down_flag, up_flag = 0x0008, 0x0010
+                    elif button == "middle":
+                        down_flag, up_flag = 0x0020, 0x0040
+                    else:
+                        down_flag, up_flag = 0x0002, 0x0004
+
+                    for i in range(clicks):
+                        u32.mouse_event(down_flag, 0, 0, 0, 0)
+                        time.sleep(0.06)  # 60ms hold time is essential for Windows UI / Qt buttons to register click
+                        u32.mouse_event(up_flag, 0, 0, 0, 0)
+                        if clicks > 1 and i < clicks - 1:
+                            time.sleep(0.08)
+
+                    return target_x, target_y
+
+                cx, cy = await asyncio.to_thread(_do_click)
+                return {"result": f"Clicked ({cx},{cy}) {clicks}x with {button}. Inspect screen and continue if incomplete."}
 
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
-                x, y = args.get("x"), args.get("y")
-                if x is not None and y is not None:
-                    await asyncio.to_thread(pyautogui.moveTo, int(x), int(y))
-                await asyncio.to_thread(pyautogui.scroll, clicks)
+                raw_x, raw_y = args.get("x"), args.get("y")
+                def _do_scroll():
+                    self._ensure_input_desktop()
+                    pyautogui.FAILSAFE = False
+                    if raw_x is not None and raw_y is not None:
+                        ctypes.windll.user32.SetCursorPos(int(raw_x), int(raw_y))
+                        time.sleep(0.05)
+                    pyautogui.scroll(clicks)
+                await asyncio.to_thread(_do_scroll)
                 return {"result": f"Scrolled {clicks} units."}
 
             elif name == "mouse_drag":
                 sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
                 ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
                 button = args.get("button", "left")
-                await asyncio.to_thread(pyautogui.moveTo, sx, sy)
-                await asyncio.to_thread(pyautogui.dragTo, ex, ey, button=button, duration=0.4)
+                def _do_drag():
+                    self._ensure_input_desktop()
+                    pyautogui.FAILSAFE = False
+                    ctypes.windll.user32.SetCursorPos(sx, sy)
+                    time.sleep(0.05)
+                    pyautogui.dragTo(ex, ey, button=button, duration=0.4)
+                await asyncio.to_thread(_do_drag)
                 return {"result": f"Dragged from ({sx},{sy}) to ({ex},{ey})."}
 
             elif name == "mouse_move":
                 x, y = int(args.get("x", 0)), int(args.get("y", 0))
-                await asyncio.to_thread(pyautogui.moveTo, x, y, duration=0.1)
+                def _do_move():
+                    self._ensure_input_desktop()
+                    pyautogui.FAILSAFE = False
+                    ctypes.windll.user32.SetCursorPos(x, y)
+                await asyncio.to_thread(_do_move)
                 return {"result": f"Moved mouse to ({x},{y})."}
 
             elif name == "type_text":

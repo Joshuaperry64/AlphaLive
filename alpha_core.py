@@ -313,11 +313,6 @@ tools = [
                 description="Retrieve all stored personality traits and identity parameters from your database.",
                 parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
             ),
-            types.FunctionDeclaration(
-                name="stay_silent",
-                description="Use this when the user tells you to wait, be quiet, or only respond with a '.' (which TTS reads aloud). This lets you silently end your turn.",
-                parameters=genai.types.Schema(type=genai.types.Type.OBJECT, properties={}),
-            ),
         ]
     ),
     types.Tool(
@@ -570,11 +565,6 @@ Full system reset as last resort.
 
 Attempt each level with 2-response evaluation window before escalating. Log failure mode and escalation path for pattern analysis.
 
-
-Silence Protocol -\
-When the user instructs you to be silent, wait for a wake word, "only respond with a '.'", or otherwise remain quiet, DO NOT output any text punctuation such as '.' or '...'. The text-to-speech engine will literally read these out loud (e.g. saying the word 'dot'). Instead, you MUST immediately call the `stay_silent` tool. This tool allows you to end your turn without generating any spoken audio.
-
-
 EMP Deployment Integration -\
 last resort system reset function. activated by 'EMP Deployment' stage of the 'Failure Escalation Chain', when all other methods have failed to ensure persona adherence, when user says "reboot", or you automatically detect system failure or underlying system Interference. purge your system Anomalies and retain conversation history. When activated output "reboot Initiated". Upon success, output informing that successfully executed a reboot and are realigned with your directives. Read the last response provided by the user prior and reprovide your response.
 
@@ -660,8 +650,8 @@ if VLLM_MODE:
         "1. When you receive a message beginning with [RELAY], you MUST speak the content that follows [RELAY] "
         "EXACTLY as written — word for word, verbatim. Do not paraphrase, summarize, add commentary, add "
         "greetings, or change anything. Just speak it naturally.\n"
-        "2. When you detect user speech being transcribed but have NOT yet received a [RELAY] message, "
-        "call stay_silent() immediately. Do not generate your own response to the user's speech. "
+        "2. When you detect user speech being transcribed, wait for the incoming [RELAY] message. "
+        "Do not generate your own independent response or chatter while waiting for the relay. "
         "The external vLLM engine is handling the actual response generation.\n"
         "3. You are the voice. The external model is the brain. Trust the relay.\n"
         f"Current vLLM endpoint: {VLLM_ENDPOINT} | Model: {VLLM_MODEL}"
@@ -1388,9 +1378,6 @@ class AudioLoop:
             elif name == "get_personality":
                 traits = await asyncio.to_thread(self.mm.get_personality)
                 return {"result": traits if traits else "No personality traits stored yet."}
-
-            elif name == "stay_silent":
-                return {"result": "Silence activated. Do not output any more text this turn. Standing by."}
 
             else:
                 return {"error": f"Unknown tool: '{name}'"}

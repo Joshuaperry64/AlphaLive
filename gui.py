@@ -862,7 +862,7 @@ class EngineWorker(QThread):
             for raw in iter(self._proc.stdout.readline, ""):
                 if not self._alive:
                     break
-                line = raw.rstrip("\n")
+                line = raw.rstrip("\r\n")
                 if not line:
                     continue
                 self.line_received.emit(line)
@@ -870,7 +870,7 @@ class EngineWorker(QThread):
                 if "[you]:" in lo or "user:" in lo:
                     self.transcript_update.emit("user",
                         line.split(":", 1)[-1].strip())
-                elif "[gemini]:" in lo or "gemini:" in lo:
+                elif "[alpha]:" in lo or "alpha:" in lo or "[gemini]:" in lo or "gemini:" in lo:
                     self.transcript_update.emit("ai",
                         line.split(":", 1)[-1].strip())
             self._proc.wait()
@@ -923,11 +923,33 @@ class TerminalTab(QWidget):
         self._clear_btn  = QPushButton("CLEAR")
         self._wrap_btn   = QPushButton("WRAP")
         self._wrap_btn.setCheckable(True)
+        self._wrap_btn.setChecked(True)
         self._scroll_btn = QPushButton("AUTO-SCROLL")
         self._scroll_btn.setCheckable(True)
         self._scroll_btn.setChecked(True)
         for b in (self._clear_btn, self._wrap_btn, self._scroll_btn):
             b.setFixedHeight(24)
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    background: {C['bg_panel']};
+                    color: {C['text_dim']};
+                    border: 1px solid {C['border']};
+                    border-radius: 2px;
+                    font-family: '{FONT_MONO}';
+                    font-size: 10px;
+                    font-weight: bold;
+                    padding: 2px 8px;
+                }}
+                QPushButton:hover {{
+                    color: {C['text_bright']};
+                    border-color: {C['neon_blue']};
+                }}
+                QPushButton:checked {{
+                    background: {C['border']};
+                    color: {C['neon_cyan']};
+                    border-color: {C['neon_cyan']};
+                }}
+            """)
             bar.addWidget(b)
         bar.addStretch(1)
         self._line_count = lbl("0 lines", 9, C["text_dim"])
@@ -939,10 +961,16 @@ class TerminalTab(QWidget):
         self._out.setReadOnly(True)
         self._out.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._out.setStyleSheet(f"""
-            background:{C['bg_deep']};
-            color:{C['neon_green']};
-            border:1px solid {C['border']};
-            font-family:'Segoe UI', '{FONT_MONO}'; font-size:12px; padding:8px;
+            QTextEdit {{
+                background-color: {C['bg_deep']};
+                color: {C['text_main']};
+                border: 1px solid {C['border']};
+                border-radius: 4px;
+                font-family: 'Consolas', 'Fira Code', '{FONT_MONO}', monospace;
+                font-size: 12px;
+                line-height: 1.4;
+                padding: 8px;
+            }}
         """)
         root.addWidget(self._out, 1)
 
@@ -971,84 +999,214 @@ class TerminalTab(QWidget):
         
         self._lines = 0
         self._last_speaker = None
+        self._last_user_input = None
         self._clear_btn.clicked.connect(self._clear)
+        self._wrap_btn.toggled.connect(self._toggle_wrap)
+
+    def _toggle_wrap(self, checked: bool):
+        mode = QTextEdit.LineWrapMode.WidgetWidth if checked else QTextEdit.LineWrapMode.NoWrap
+        self._out.setLineWrapMode(mode)
 
     def _clear(self):
         self._out.clear()
         self._lines = 0
         self._last_speaker = None
+        self._last_user_input = None
         self._line_count.setText("0 lines")
 
     def _send(self):
         t = self._inp.text().strip()
         if t:
             self._inp.clear()
+            self._last_user_input = t
             self.append(f"[YOU] {t}", C["neon_cyan"])
-            self.append("[Processing...]", C["neon_yellow"])
             self.send_text_requested.emit(t)
 
     def append(self, text: str, color: str = None):
+        if not text:
+            return
+        raw = text.strip()
+        if not raw:
+            return
+
+        lo = raw.lower()
+
+        # Suppress console prompt artifacts and noise
+        if raw in ("message >", "ALPHA") or raw.startswith("message >"):
+            return
+
+        # Check for User input
+        if raw.startswith("[You]:") or raw.startswith("[YOU]") or raw.startswith("User:") or (color == C["neon_cyan"] and "[you]" in lo):
+            body = raw
+            for pfx in ("[You]:", "[YOU]:", "[YOU]", "[you]:", "User:", "user:"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+
+            # Deduplicate if this was just typed into the GUI input
+            if getattr(self, "_last_user_input", None) is not None and body == self._last_user_input:
+                self._last_user_input = None
+                return
+
+            self._last_speaker = "user"
+            self._render_entry("YOU ❯", C["neon_cyan"], body, C["text_bright"], bold_badge=True)
+
+        # Check for Alpha AI response
+        elif raw.startswith("[Alpha]:") or raw.startswith("[ALPHA]:") or raw.startswith("[Gemini]:") or raw.startswith("Alpha:") or raw.startswith("Gemini:"):
+            self._last_speaker = "ai"
+            body = raw
+            for pfx in ("[Alpha]:", "[ALPHA]:", "[Gemini]:", "Alpha:", "Gemini:"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+            self._render_entry("ALPHA ❯", C["neon_purple"], body, C["text_bright"], bold_badge=True)
+
+        # Check for Alpha Thoughts
+        elif raw.startswith("[Alpha Thoughts]:") or raw.startswith("[Thoughts]:") or raw.startswith("Thoughts:"):
+            self._last_speaker = "thoughts"
+            body = raw
+            for pfx in ("[Alpha Thoughts]:", "[Thoughts]:", "Thoughts:"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+            self._render_entry("🧠 THOUGHTS ❯", "#A78BFA", body, "#94A3B8", bold_badge=False, italic_body=True)
+
+        # Tool executing
+        elif "[tool executing" in lo or raw.startswith("[Tool Executing"):
+            self._last_speaker = "tool"
+            body = raw
+            if "]" in body:
+                body = body.split("]", 1)[-1].strip()
+            self._render_entry("⚙ TOOL ❯", C["neon_blue"], body, C["text_main"], bold_badge=True)
+
+        # Tool finished / result
+        elif "[tool finished]" in lo or "[tool result]" in lo or raw.startswith("[Tool Finished]"):
+            self._last_speaker = "tool_result"
+            body = raw
+            if "]" in body:
+                body = body.split("]", 1)[-1].strip()
+            self._render_entry("✔ RESULT ❯", C["neon_green"], body, C["text_bright"], bold_badge=True)
+
+        # vLLM routing and info
+        elif raw.startswith("[vLLM]") or "[vllm]" in lo:
+            self._last_speaker = "vllm"
+            body = raw
+            if "]" in body:
+                body = body.split("]", 1)[-1].strip()
+            self._render_entry("⚡ vLLM ❯", C["neon_cyan"], body, C["text_main"], bold_badge=True)
+
+        # Processing request
+        elif "[processing...]" in lo:
+            self._last_speaker = "processing"
+            self._render_entry("⏳", C["neon_yellow"], "Processing request...", C["text_dim"], bold_badge=False)
+
+        # Errors
+        elif "error" in lo and not "engine error" in lo:
+            self._last_speaker = "error"
+            self._render_entry("✖ ERROR ❯", C["neon_red"], raw, C["neon_red"], bold_badge=True)
+
+        # Warnings
+        elif "warning" in lo or "warn" in lo:
+            self._last_speaker = "warning"
+            self._render_entry("▲ WARN ❯", C["neon_yellow"], raw, C["neon_yellow"], bold_badge=True)
+
+        # System messages
+        elif raw.startswith("[System]") or raw.startswith("[SYSTEM]") or raw.startswith("[ENGINE") or color in (C["neon_blue"], C["neon_yellow"]):
+            self._last_speaker = "system"
+            body = raw
+            for pfx in ("[System]", "[SYSTEM]", "[Engine]", "[ENGINE]"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+            clr = color or C["neon_blue"]
+            self._render_entry("⋯ SYS ❯", clr, body, C["text_main"], bold_badge=False)
+
+        # Multi-line continuations from previous speaker
+        elif self._last_speaker == "ai":
+            self._render_continuation(raw, C["text_bright"])
+
+        elif self._last_speaker == "thoughts":
+            self._render_continuation(raw, "#94A3B8", italic=True)
+
+        elif self._last_speaker == "user":
+            self._render_continuation(raw, C["text_bright"])
+
+        # Unclassified output
+        else:
+            clr = color or C["text_main"]
+            self._render_entry("⋯", C["text_dim"], raw, clr, bold_badge=False)
+
+    def _render_entry(self, badge: str, badge_color: str, body: str, body_color: str,
+                      bold_badge: bool = True, italic_body: bool = False):
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        if not lines:
+            lines = [""]
+
         cur = self._out.textCursor()
         cur.movePosition(cur.MoveOperation.End)
-        lo = text.lower()
 
-        if ("[you]" in lo or "[you]:" in lo or "user:" in lo) and color == C["neon_cyan"]:
-            self._last_speaker = "user"
-            msg = text.replace("[YOU]", "").replace("[You]:", "").strip()
-            fmt = QTextBlockFormat()
-            fmt.setLeftMargin(10); fmt.setRightMargin(100); fmt.setTopMargin(10); fmt.setBottomMargin(5)
-            fmt.setBackground(QColor(C["neon_blue"] + "1a"))
-            cur.insertBlock(fmt)
-            
-            cfmt = QTextCharFormat()
-            cfmt.setForeground(QColor(C["neon_cyan"]))
-            cfmt.setFontWeight(QFont.Weight.Bold)
-            cur.insertText("YOU\n", cfmt)
-            
-            cfmt.setForeground(QColor(C["text_bright"]))
-            cfmt.setFontWeight(QFont.Weight.Normal)
-            cur.insertText(msg, cfmt)
+        fmt = QTextBlockFormat()
+        fmt.setTopMargin(4)
+        fmt.setBottomMargin(2)
+        fmt.setLeftMargin(6)
+        fmt.setRightMargin(6)
+        cur.insertBlock(fmt)
 
-        elif "[system]" in lo or "[engine" in lo or "message >" in lo or "error" in lo or "warning" in lo or color == C["neon_yellow"]:
-            self._last_speaker = "system"
-            fmt = QTextBlockFormat()
-            fmt.setLeftMargin(5); fmt.setRightMargin(5); fmt.setTopMargin(2); fmt.setBottomMargin(2)
-            fmt.setBackground(QColor(C["bg_deep"]))
-            cur.insertBlock(fmt)
-            
-            cfmt = QTextCharFormat()
-            if color:
-                cfmt.setForeground(QColor(color))
-            elif "[system]" in lo or "[engine" in lo:  cfmt.setForeground(QColor(C["neon_blue"]))
-            elif "error" in lo:                         cfmt.setForeground(QColor(C["neon_red"]))
-            elif "warning" in lo:                       cfmt.setForeground(QColor(C["neon_yellow"]))
-            elif "[tool" in lo:                         cfmt.setForeground(QColor(C["neon_cyan"]))
-            else:                                       cfmt.setForeground(QColor(C["neon_green"]))
-            
-            ts = datetime.now().strftime("%H:%M:%S")
-            cur.insertText(f"[{ts}] {text}", cfmt)
+        ts = datetime.now().strftime("%H:%M:%S")
 
-        else:
-            if not text.strip(): return
-            if self._last_speaker != "ai":
-                self._last_speaker = "ai"
-                fmt = QTextBlockFormat()
-                fmt.setLeftMargin(100); fmt.setRightMargin(10); fmt.setTopMargin(10); fmt.setBottomMargin(5)
-                fmt.setBackground(QColor(C["neon_purple"] + "1a"))
-                cur.insertBlock(fmt)
-                
-                cfmt = QTextCharFormat()
-                cfmt.setForeground(QColor(C["neon_purple"]))
-                cfmt.setFontWeight(QFont.Weight.Bold)
-                cur.insertText("ALPHA\n", cfmt)
-            else:
-                cur.insertText("\n")
+        # Timestamp [HH:MM:SS]
+        cfmt_ts = QTextCharFormat()
+        cfmt_ts.setForeground(QColor(C["text_dim"]))
+        cfmt_ts.setFontWeight(QFont.Weight.Normal)
+        cur.insertText(f"[{ts}] ", cfmt_ts)
 
-            cfmt = QTextCharFormat()
-            cfmt.setForeground(QColor(C["text_bright"]))
-            cfmt.setFontWeight(QFont.Weight.Normal)
-            cur.insertText(text.strip(), cfmt)
+        # Badge
+        cfmt_badge = QTextCharFormat()
+        cfmt_badge.setForeground(QColor(badge_color))
+        cfmt_badge.setFontWeight(QFont.Weight.Bold if bold_badge else QFont.Weight.Normal)
+        cur.insertText(f"{badge} ", cfmt_badge)
 
+        # First line of body
+        cfmt_body = QTextCharFormat()
+        cfmt_body.setForeground(QColor(body_color))
+        cfmt_body.setFontWeight(QFont.Weight.Normal)
+        if italic_body:
+            cfmt_body.setFontItalic(True)
+        cur.insertText(lines[0], cfmt_body)
+
+        # Indented subsequent lines if multi-line body
+        for extra in lines[1:]:
+            cont_fmt = QTextBlockFormat()
+            cont_fmt.setTopMargin(1)
+            cont_fmt.setBottomMargin(1)
+            cont_fmt.setLeftMargin(24)
+            cont_fmt.setRightMargin(6)
+            cur.insertBlock(cont_fmt)
+            cur.insertText(extra, cfmt_body)
+
+        self._finalize_append(cur)
+
+    def _render_continuation(self, text: str, color: str, italic: bool = False):
+        cur = self._out.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+
+        fmt = QTextBlockFormat()
+        fmt.setTopMargin(1)
+        fmt.setBottomMargin(1)
+        fmt.setLeftMargin(24)
+        fmt.setRightMargin(6)
+        cur.insertBlock(fmt)
+
+        cfmt = QTextCharFormat()
+        cfmt.setForeground(QColor(color))
+        cfmt.setFontWeight(QFont.Weight.Normal)
+        if italic:
+            cfmt.setFontItalic(True)
+        cur.insertText(text, cfmt)
+
+        self._finalize_append(cur)
+
+    def _finalize_append(self, cur):
         self._out.setTextCursor(cur)
         self._lines += 1
         self._line_count.setText(f"{self._lines} lines")

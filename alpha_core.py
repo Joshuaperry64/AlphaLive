@@ -732,10 +732,13 @@ class AudioLoop:
             if text.lower() == "q":
                 self.stop_event.set()
                 break
-            if self.session is not None:
+            if VLLM_MODE and text and text.strip():
+                print(f"\n[You]: {text}\n[Processing...]", flush=True)
+                asyncio.create_task(self._relay_to_vllm(text))
+            elif self.session is not None:
                 try:
                     await self.session.send_realtime_input(text=text or ".")
-                    await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
+                    await self._async_log(f"\n[You]: {text}\n[Alpha]: ")
                 except Exception:
                     pass
 
@@ -1149,7 +1152,7 @@ class AudioLoop:
                 thoughts, clean_response = _clean_thinking(raw_response, reasoning)
 
                 if thoughts:
-                    print(f"\n[Alpha Thoughts]: {thoughts}", flush=True)
+                    print(f"\n[Alpha Thoughts]: {thoughts}\n", flush=True)
 
                 # ── Tool execution and follow-up loop ──────────────────────────
                 if tool_calls:
@@ -1202,8 +1205,8 @@ class AudioLoop:
                                 fu_reasoning = fu_choice.get("reasoning_content", "") or ""
                                 fu_thoughts, fu_clean = _clean_thinking(fu_raw, fu_reasoning)
                                 if fu_thoughts:
-                                    print(f"\n[Alpha Thoughts]: {fu_thoughts}", flush=True)
-                                clean_response = fu_clean
+                                    print(f"\n[Alpha Thoughts]: {fu_thoughts}\n", flush=True)
+                                clean_response = fu_clean or f"Action completed: {', '.join(tool_summaries)}"
                             else:
                                 clean_response = f"Action completed: {', '.join(tool_summaries)}"
                     except Exception as fu_err:
@@ -1212,7 +1215,7 @@ class AudioLoop:
 
                 # Relay clean response to voice output (only if there is spoken content)
                 if clean_response:
-                    print(f" got {len(clean_response)} chars", flush=True)
+                    print(f"\n[Alpha]: {clean_response}\n", flush=True)
                     self._vllm_history.append({"role": "user",      "content": user_text})
                     self._vllm_history.append({"role": "assistant",  "content": clean_response})
 
@@ -1253,9 +1256,9 @@ class AudioLoop:
                     if sc := getattr(response, "server_content", None):
                         if input_transcript := getattr(sc, "input_transcription", None):
                             user_text = input_transcript.text
-                            print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
+                            print(f"\n\n[You]: {user_text}\n[Processing...]", flush=True)
                             
-                            await self._async_log(f"\n[You]: {user_text}\n[Gemini]: ")
+                            await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
 
                             # ✨ vLLM hybrid: intercept and relay ✨
                             if VLLM_MODE and user_text and user_text.strip():
@@ -1263,21 +1266,22 @@ class AudioLoop:
                             
                         if output_transcript := getattr(sc, "output_transcription", None):
                             if text := output_transcript.text:
-                                if not ai_started:
-                                    print("\n[Gemini]: ", end="")
-                                    ai_started = True
-                                print(text, end="", flush=True)
-                                
-                                await self._async_log(text)
+                                if not VLLM_MODE:
+                                    if not ai_started:
+                                        print("\n[Alpha]: ", end="", flush=True)
+                                        ai_started = True
+                                    print(text, end="", flush=True)
+                                    await self._async_log(text)
 
                         if getattr(sc, "model_turn", None):
                             for part in sc.model_turn.parts:
                                 if getattr(part, "text", None):
-                                    if not ai_started:
-                                        print("\n[Gemini]: ", end="")
-                                        ai_started = True
-                                    print(part.text, end="", flush=True)
-                                    await self._async_log(part.text)
+                                    if not VLLM_MODE:
+                                        if not ai_started:
+                                            print("\n[Alpha]: ", end="", flush=True)
+                                            ai_started = True
+                                        print(part.text, end="", flush=True)
+                                        await self._async_log(part.text)
                         
                     if tool_call := response.tool_call:
                         if VLLM_MODE:
@@ -1311,6 +1315,8 @@ class AudioLoop:
                                 function_responses=function_responses
                             )
 
+                if ai_started:
+                    print("", flush=True)
                 print("\nmessage > ", end="", flush=True)
 
                 while not self.audio_in_queue.empty():
@@ -1629,10 +1635,13 @@ class AudioLoop:
             if text.lower() == "q":
                 self.stop_event.set()
                 break
-            if self.websocket is not None:
+            if VLLM_MODE and text and text.strip():
+                print(f"\n[You]: {text}\n[Processing...]", flush=True)
+                asyncio.create_task(self._relay_to_vllm(text))
+            elif self.websocket is not None:
                 try:
                     await self.send_ws_json({"type": "text", "data": text or "."})
-                    await self._async_log(f"\n[You]: {text}\n[Gemini]: ")
+                    await self._async_log(f"\n[You]: {text}\n[Alpha]: ")
                 except Exception:
                     pass
 
@@ -1817,13 +1826,15 @@ class AudioLoop:
 
                     elif data["type"] in ("input_transcript", "input_transcription"):
                         user_text = data["data"]
-                        print(f"\n\n[You]: {user_text}\n[Processing...]", end="", flush=True)
-                        await self._async_log(f"\n[You]: {user_text}\n[Gemini]: ")
+                        print(f"\n\n[You]: {user_text}\n[Processing...]", flush=True)
+                        await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
+                        if VLLM_MODE and user_text and user_text.strip():
+                            asyncio.create_task(self._relay_to_vllm(user_text))
 
                     elif data["type"] == "output_transcription":
                         text = data.get("data", "")
-                        if text:
-                            print(text, end="", flush=True)
+                        if text and not VLLM_MODE:
+                            print(f"\n[Alpha]: {text}", flush=True)
                             await self._async_log(text)
 
                     elif data["type"] == "turn_complete":

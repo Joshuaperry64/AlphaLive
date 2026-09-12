@@ -869,7 +869,7 @@ class EngineWorker(QThread):
             modal = self._cfg.get("Global", {}).get("Modal", "disabled")
             if modal in ("enabled", "true"):
                 env["ALPHALIVE_WS_URL"] = (
-                    "wss://alphacoreprogramming-ai--alphalive-proxy-fastapi-app.modal.run/ws"
+                    "wss://josh64perry--alphalive-proxy-fastapi-app.modal.run/ws"
                 )
             else:
                 env["ALPHALIVE_WS_URL"] = "off"

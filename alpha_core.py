@@ -70,6 +70,8 @@ VLLM_API_KEY  = engine_cfg.get("VllmApiKey",   global_cfg.get("VllmApiKey",   ""
 VLLM_MAX_TOKENS = int(engine_cfg.get("VllmMaxTokens", global_cfg.get("VllmMaxTokens", 1024)))
 api_key = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", global_cfg.get("ApiKey", "")))
 WS_URL = os.environ.get("ALPHALIVE_WS_URL", "off")
+if "alphacoreprogramming-ai" in WS_URL:
+    WS_URL = WS_URL.replace("alphacoreprogramming-ai", "josh64perry")
 client = genai.Client(
     http_options={"api_version": "v1beta"},
     api_key=api_key,
@@ -1878,7 +1880,7 @@ class AudioLoop:
                                 try:
                                     await self.send_ws_json({"type": "text", "data": "[System]: Continue."})
                                 except Exception as auto_err:
-                                    print(f"\n[System] Autonomous continue error: {auto_err}")
+                                    print(f"\n[System] Autonomous continue error: {auto_err}", flush=True)
                                 self._auto_last_had_tools = False
                             else:
                                 self._auto_idle_turns += 1
@@ -1890,13 +1892,13 @@ class AudioLoop:
                                             "data": f"[System]: You have tools available. If there is an objective, take action now. ({self._auto_idle_turns}/{self._auto_max_idle})"
                                         })
                                     except Exception as auto_err:
-                                        print(f"\n[System] Autonomous nudge error: {auto_err}")
+                                        print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
                                 else:
-                                    print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.")
+                                    print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
                                     self._auto_idle_turns = 0
 
                     elif data["type"] == "error":
-                        print(f"\n[Proxy Error]: {data.get('data', 'Unknown error')}")
+                        print(f"\n[Proxy Error]: {data.get('data', 'Unknown error')}", flush=True)
 
                     elif data["type"] == "function_call":
                         # Mark that this turn is active before dispatching
@@ -1956,13 +1958,17 @@ class AudioLoop:
 
     async def _run_modal(self):
         """Route through the Modal WebSocket proxy."""
+        global WS_URL
+        if "alphacoreprogramming-ai" in WS_URL:
+            WS_URL = WS_URL.replace("alphacoreprogramming-ai", "josh64perry")
+
         # Use by_alias=False to generate snake_case keys so the Proxy can validate it natively
         config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=False)
 
         try:
             while True:
                 try:
-                    print("\n[System] Waking up Modal cloud proxy. Please wait for container warm up...")
+                    print(f"\n[System] Waking up Modal cloud proxy ({WS_URL}). Please wait for container warm up...", flush=True)
                     async with websockets.connect(
                         WS_URL,
                         max_size=10**8,
@@ -1975,7 +1981,7 @@ class AudioLoop:
                         self.last_heartbeat_ack = time.time()
                         init_msg = json.dumps({"api_key": api_key, "config": config_payload})
                         await ws.send(init_msg)
-                        print("[System] Modal proxy connected!")
+                        print("[System] Modal proxy connected!", flush=True)
 
                         prior_history = ""
                         if os.path.exists(self.log_file):
@@ -1995,7 +2001,7 @@ class AudioLoop:
                                 memory_context += "Recent Episodic Memories:\n" + "\n".join(f"  - [{ep['timestamp']}] {ep['session_name']}: {ep['content']} (sentiment: {ep['sentiment_score']})" for ep in episodes) + "\n"
 
                         if prior_history and prior_history != "=== Session Start ===":
-                            print("[System] Restoring session context via Modal proxy...")
+                            print("[System] Restoring session context via Modal proxy...", flush=True)
                             time_ctx = "The connection was restored."
                             try:
                                 diff = time.time() - os.path.getmtime(self.log_file)
@@ -2018,13 +2024,13 @@ class AudioLoop:
                         else:
                             with open(self.log_file, "w", encoding="utf-8") as f:
                                 f.write("=== Session Start ===\n")
-                            print("[System] Triggering initial greeting via Modal proxy...")
+                            print("[System] Triggering initial greeting via Modal proxy...", flush=True)
                             greet_msg = f"Say what's up, introduce yourself briefly, and let me know you're ready to autonomously control my desktop.{memory_context}"
                             await ws.send(json.dumps({"type": "text", "data": greet_msg}))
                             
                         if self.autonomous:
                             await ws.send(json.dumps({"type": "text", "data": "[System]: Autonomous mode is ENABLED. You are operating with 100% proactivity. Continue executing actions and responding continuously without waiting for user input. Complain when it is disabled."}))
-                            print("[System] Sent autonomous mode initialization prompt.")
+                            print("[System] Sent autonomous mode initialization prompt.", flush=True)
 
                         self.audio_in_queue = asyncio.Queue()
                         self.out_queue = asyncio.Queue(maxsize=5)
@@ -2050,12 +2056,12 @@ class AudioLoop:
 
                 except asyncio.CancelledError:
                     raise
-                except ExceptionGroup:
-                    print("\n[System] Modal connection dropped! Reconnecting in 3 seconds...")
+                except ExceptionGroup as eg:
+                    print(f"\n[System] Modal connection dropped! ExceptionGroup: {eg}. Reconnecting in 3 seconds...", flush=True)
                     self.websocket = None
                     await asyncio.sleep(3)
                 except Exception as e:
-                    print(f"\n[System] Modal error: {e}. Reconnecting in 3 seconds...")
+                    print(f"\n[System] Modal error: {e}. Reconnecting in 3 seconds...", flush=True)
                     self.websocket = None
                     await asyncio.sleep(3)
 

@@ -32,6 +32,9 @@ async def websocket_endpoint(websocket: WebSocket):
         setup = json.loads(init_data)
         
         api_key = setup.get("api_key")
+        model_name = setup.get("model", "gemini-3.1-flash-live-preview")
+        if model_name.startswith("models/"):
+            model_name = model_name[len("models/"):]
         config_dict = setup.get("config", {})
         
         # We process the configuration mapping directly rather than stripping keys
@@ -44,7 +47,7 @@ async def websocket_endpoint(websocket: WebSocket):
         client = genai.Client(http_options={"api_version": "v1beta"}, api_key=api_key)
         
         try:
-            async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
+            async with client.aio.live.connect(model=model_name, config=config) as session:
                 
                 async def receive_from_google():
                     try:
@@ -149,8 +152,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                 await session.send_realtime_input(text=data["data"])
                             elif message_type == "tool_response":
                                 resp = data["response"]
+                                ret_resp = resp.get("response", {})
+                                if not isinstance(ret_resp, dict):
+                                    ret_resp = {"result": str(ret_resp)}
                                 await session.send_tool_response(function_responses=[
-                                    types.FunctionResponse(name=resp["name"], id=resp.get("id"), response=resp.get("response", {}))
+                                    types.FunctionResponse(name=resp["name"], id=resp.get("id"), response=ret_resp)
                                 ])
                     except WebSocketDisconnect:
                         raise
@@ -172,6 +178,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 
         except Exception as gemini_err:
             print(f"[Proxy] Connection failed: {gemini_err}")
+            try:
+                await send_json({"type": "error", "data": f"Proxy Gemini connection failed: {gemini_err}"})
+            except Exception:
+                pass
 
     except Exception as e:
         print(f"[Proxy] Proxy failure: {e}")

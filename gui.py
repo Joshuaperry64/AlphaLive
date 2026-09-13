@@ -39,6 +39,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
+import memory_manager
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -46,7 +47,8 @@ from PyQt6.QtWidgets import (
     QLineEdit, QSlider, QComboBox, QCheckBox, QGroupBox,
     QScrollArea, QFrame, QSplitter, QProgressBar, QSpinBox,
     QListWidget, QListWidgetItem, QSizePolicy, QDialog,
-    QDialogButtonBox, QMessageBox
+    QDialogButtonBox, QMessageBox, QTableWidget, QTableWidgetItem,
+    QHeaderView
 )
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, QProcess, pyqtSignal, QRect, QSize, QPoint,
@@ -1256,6 +1258,9 @@ class TerminalTab(QWidget):
         self._line_count.setText(f"{self._lines} lines")
         if self._scroll_btn.isChecked():
             self._out.ensureCursorVisible()
+            sb = self._out.verticalScrollBar()
+            if sb:
+                sb.setValue(sb.maximum())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2147,6 +2152,290 @@ class ModalTab(QWidget):
         self._log.setTextCursor(cur)
         self._log.ensureCursorVisible()
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB 7: MEMORY
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MemoryTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._mm = memory_manager.MemoryManager()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(15, 15, 15, 15)
+        root.setSpacing(10)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.addWidget(lbl("STRUCTURED MEMORY & KNOWLEDGE GRAPH", 12, C["neon_purple"], bold=True, spacing=2))
+        hdr.addStretch()
+        self._refresh_btn = QPushButton("REFRESH ALL")
+        self._refresh_btn.setFixedHeight(26)
+        self._refresh_btn.clicked.connect(self.refresh_all)
+        hdr.addWidget(self._refresh_btn)
+        root.addLayout(hdr)
+
+        root.addWidget(lbl("Permanent SQLite knowledge graph, evolving identity traits, and episodic session memories.", 9, C["text_dim"]))
+        root.addWidget(hsep())
+
+        # Sub-tabs
+        self._subtabs = QTabWidget()
+        self._subtabs.setStyleSheet(f"""
+            QTabWidget::pane {{
+                border: 1px solid {C['border']};
+                background: {C['bg_deep']};
+                border-radius: 4px;
+            }}
+            QTabBar::tab {{
+                background: {C['bg_panel']};
+                color: {C['text_dim']};
+                padding: 6px 14px;
+                border: 1px solid {C['border']};
+                font-family: '{FONT_MONO}';
+                font-size: 10px;
+                font-weight: bold;
+            }}
+            QTabBar::tab:selected {{
+                background: {C['bg_card']};
+                color: {C['neon_cyan']};
+                border-bottom: 2px solid {C['neon_cyan']};
+            }}
+        """)
+
+        # Sub-tab 1: Knowledge Graph Facts
+        self._facts_widget = QWidget()
+        fl = QVBoxLayout(self._facts_widget)
+        fl.setContentsMargins(10, 10, 10, 10)
+        fl.setSpacing(8)
+
+        f_top = QHBoxLayout()
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("Filter facts by subject, predicate, or object...")
+        self._search_input.setStyleSheet(f"background:{C['bg_card']}; color:{C['text_bright']}; border:1px solid {C['border']}; padding:4px 8px; font-size:11px;")
+        self._search_input.textChanged.connect(self._on_search_facts)
+        f_top.addWidget(self._search_input, 1)
+
+        self._del_fact_btn = QPushButton("DELETE SELECTED")
+        self._del_fact_btn.setObjectName("btn_danger")
+        self._del_fact_btn.clicked.connect(self._delete_selected_fact)
+        f_top.addWidget(self._del_fact_btn)
+        fl.addLayout(f_top)
+
+        self._facts_table = QTableWidget()
+        self._facts_table.setColumnCount(6)
+        self._facts_table.setHorizontalHeaderLabels(["ID", "Subject", "Predicate", "Object", "Source", "Created"])
+        self._facts_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._facts_table.horizontalHeader().setStretchLastSection(True)
+        self._facts_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._facts_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self._facts_table.setStyleSheet(self._table_stylesheet())
+        fl.addWidget(self._facts_table, 1)
+
+        add_box = QFrame()
+        add_box.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px; padding:4px;")
+        abl = QHBoxLayout(add_box)
+        abl.setContentsMargins(8, 4, 8, 4)
+        abl.setSpacing(6)
+        self._in_subj = QLineEdit(); self._in_subj.setPlaceholderText("Subject (e.g. user)")
+        self._in_pred = QLineEdit(); self._in_pred.setPlaceholderText("Predicate (e.g. likes)")
+        self._in_obj  = QLineEdit(); self._in_obj.setPlaceholderText("Object (e.g. cyberpunk)")
+        for inp in (self._in_subj, self._in_pred, self._in_obj):
+            inp.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_bright']}; border:1px solid {C['border']}; font-size:11px; padding:3px 6px;")
+        b_add_fact = QPushButton("ADD FACT")
+        b_add_fact.setStyleSheet(f"background:{C['neon_purple']}33; color:{C['neon_purple']}; border:1px solid {C['neon_purple']}; font-weight:bold; font-size:10px; padding:4px 10px;")
+        b_add_fact.clicked.connect(self._add_fact)
+        abl.addWidget(self._in_subj)
+        abl.addWidget(self._in_pred)
+        abl.addWidget(self._in_obj)
+        abl.addWidget(b_add_fact)
+        fl.addWidget(add_box)
+
+        self._subtabs.addTab(self._facts_widget, " FACTS & KNOWLEDGE GRAPH ")
+
+        # Sub-tab 2: Core Personality Traits
+        self._traits_widget = QWidget()
+        tl = QVBoxLayout(self._traits_widget)
+        tl.setContentsMargins(10, 10, 10, 10)
+        tl.setSpacing(8)
+
+        t_top = QHBoxLayout()
+        t_top.addWidget(lbl("Alpha's persistent identity traits and internal state variables.", 9, C["text_dim"]))
+        t_top.addStretch()
+        self._del_trait_btn = QPushButton("DELETE SELECTED")
+        self._del_trait_btn.setObjectName("btn_danger")
+        self._del_trait_btn.clicked.connect(self._delete_selected_trait)
+        t_top.addWidget(self._del_trait_btn)
+        tl.addLayout(t_top)
+
+        self._traits_table = QTableWidget()
+        self._traits_table.setColumnCount(4)
+        self._traits_table.setHorizontalHeaderLabels(["ID", "Trait Name", "Trait Value", "Updated At"])
+        self._traits_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._traits_table.horizontalHeader().setStretchLastSection(True)
+        self._traits_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._traits_table.setStyleSheet(self._table_stylesheet())
+        tl.addWidget(self._traits_table, 1)
+
+        trait_add_box = QFrame()
+        trait_add_box.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px; padding:4px;")
+        tabl = QHBoxLayout(trait_add_box)
+        tabl.setContentsMargins(8, 4, 8, 4)
+        tabl.setSpacing(6)
+        self._in_trait_name = QLineEdit(); self._in_trait_name.setPlaceholderText("Trait Name (e.g. mood)")
+        self._in_trait_val  = QLineEdit(); self._in_trait_val.setPlaceholderText("Value (e.g. focused)")
+        for inp in (self._in_trait_name, self._in_trait_val):
+            inp.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_bright']}; border:1px solid {C['border']}; font-size:11px; padding:3px 6px;")
+        b_save_trait = QPushButton("SAVE / UPSERT")
+        b_save_trait.setStyleSheet(f"background:{C['neon_cyan']}33; color:{C['neon_cyan']}; border:1px solid {C['neon_cyan']}; font-weight:bold; font-size:10px; padding:4px 10px;")
+        b_save_trait.clicked.connect(self._upsert_trait)
+        tabl.addWidget(self._in_trait_name)
+        tabl.addWidget(self._in_trait_val)
+        tabl.addWidget(b_save_trait)
+        tl.addWidget(trait_add_box)
+
+        self._subtabs.addTab(self._traits_widget, " CORE PERSONALITY ")
+
+        # Sub-tab 3: Episodic Memories
+        self._episodes_widget = QWidget()
+        el = QVBoxLayout(self._episodes_widget)
+        el.setContentsMargins(10, 10, 10, 10)
+        el.setSpacing(8)
+
+        e_top = QHBoxLayout()
+        e_top.addWidget(lbl("Recent episodic memories, session summaries, and emotional sentiment.", 9, C["text_dim"]))
+        e_top.addStretch()
+        self._del_ep_btn = QPushButton("DELETE SELECTED")
+        self._del_ep_btn.setObjectName("btn_danger")
+        self._del_ep_btn.clicked.connect(self._delete_selected_episode)
+        e_top.addWidget(self._del_ep_btn)
+        el.addLayout(e_top)
+
+        self._episodes_table = QTableWidget()
+        self._episodes_table.setColumnCount(5)
+        self._episodes_table.setHorizontalHeaderLabels(["ID", "Session", "Timestamp", "Sentiment", "Content"])
+        self._episodes_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._episodes_table.horizontalHeader().setStretchLastSection(True)
+        self._episodes_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._episodes_table.setStyleSheet(self._table_stylesheet())
+        el.addWidget(self._episodes_table, 1)
+
+        self._subtabs.addTab(self._episodes_widget, " EPISODIC LOGS ")
+
+        root.addWidget(self._subtabs, 1)
+        self.refresh_all()
+
+    def _table_stylesheet(self):
+        return f"""
+            QTableWidget {{
+                background-color: {C['bg_deep']};
+                color: {C['text_main']};
+                gridline-color: {C['border']};
+                border: 1px solid {C['border']};
+                font-family: '{FONT_MONO}';
+                font-size: 11px;
+            }}
+            QHeaderView::section {{
+                background-color: {C['bg_card']};
+                color: {C['neon_blue']};
+                font-weight: bold;
+                font-size: 10px;
+                padding: 4px;
+                border: 1px solid {C['border']};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {C['neon_blue']}33;
+                color: {C['text_bright']};
+            }}
+        """
+
+    def refresh_all(self):
+        self._refresh_facts()
+        self._refresh_traits()
+        self._refresh_episodes()
+
+    def _refresh_facts(self, query=None):
+        if query and query.strip():
+            facts = self._mm.search_knowledge(query.strip())
+        else:
+            facts = self._mm.get_all_facts(200)
+        self._facts_table.setRowCount(len(facts))
+        for r, f in enumerate(facts):
+            self._facts_table.setItem(r, 0, QTableWidgetItem(str(f.get("id", ""))))
+            self._facts_table.setItem(r, 1, QTableWidgetItem(str(f.get("subject", ""))))
+            self._facts_table.setItem(r, 2, QTableWidgetItem(str(f.get("predicate", ""))))
+            self._facts_table.setItem(r, 3, QTableWidgetItem(str(f.get("object", ""))))
+            self._facts_table.setItem(r, 4, QTableWidgetItem(str(f.get("source", ""))))
+            self._facts_table.setItem(r, 5, QTableWidgetItem(str(f.get("created_at", ""))))
+
+    def _on_search_facts(self, text):
+        self._refresh_facts(text)
+
+    def _add_fact(self):
+        s = self._in_subj.text().strip()
+        p = self._in_pred.text().strip()
+        o = self._in_obj.text().strip()
+        if s and p and o:
+            self._mm.memorize_fact(s, p, o, "manual_gui")
+            self._in_subj.clear()
+            self._in_pred.clear()
+            self._in_obj.clear()
+            self._refresh_facts()
+
+    def _delete_selected_fact(self):
+        row = self._facts_table.currentRow()
+        if row >= 0:
+            id_item = self._facts_table.item(row, 0)
+            if id_item and id_item.text().isdigit():
+                self._mm.delete_fact(int(id_item.text()))
+                self._refresh_facts()
+
+    def _refresh_traits(self):
+        traits = self._mm.get_personality_details()
+        self._traits_table.setRowCount(len(traits))
+        for r, t in enumerate(traits):
+            self._traits_table.setItem(r, 0, QTableWidgetItem(str(t.get("id", ""))))
+            self._traits_table.setItem(r, 1, QTableWidgetItem(str(t.get("trait_name", ""))))
+            self._traits_table.setItem(r, 2, QTableWidgetItem(str(t.get("trait_value", ""))))
+            self._traits_table.setItem(r, 3, QTableWidgetItem(str(t.get("updated_at", ""))))
+
+    def _upsert_trait(self):
+        name = self._in_trait_name.text().strip()
+        val = self._in_trait_val.text().strip()
+        if name and val:
+            self._mm.update_personality(name, val)
+            self._in_trait_name.clear()
+            self._in_trait_val.clear()
+            self._refresh_traits()
+
+    def _delete_selected_trait(self):
+        row = self._traits_table.currentRow()
+        if row >= 0:
+            name_item = self._traits_table.item(row, 1)
+            if name_item and name_item.text():
+                self._mm.delete_personality(name_item.text())
+                self._refresh_traits()
+
+    def _refresh_episodes(self):
+        eps = self._mm.get_recent_episodes(100)
+        self._episodes_table.setRowCount(len(eps))
+        for r, e in enumerate(eps):
+            self._episodes_table.setItem(r, 0, QTableWidgetItem(str(e.get("id", ""))))
+            self._episodes_table.setItem(r, 1, QTableWidgetItem(str(e.get("session_name", ""))))
+            self._episodes_table.setItem(r, 2, QTableWidgetItem(str(e.get("timestamp", ""))))
+            sent = e.get("sentiment_score", 0.0)
+            sent_str = f"{sent:+.2f}" if isinstance(sent, (int, float)) else str(sent)
+            self._episodes_table.setItem(r, 3, QTableWidgetItem(sent_str))
+            self._episodes_table.setItem(r, 4, QTableWidgetItem(str(e.get("content", ""))))
+
+    def _delete_selected_episode(self):
+        row = self._episodes_table.currentRow()
+        if row >= 0:
+            id_item = self._episodes_table.item(row, 0)
+            if id_item and id_item.text().isdigit():
+                self._mm.delete_episode(int(id_item.text()))
+                self._refresh_episodes()
+
+
 # SIDEBAR LAUNCH PANEL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2516,6 +2805,7 @@ class MainWindow(QMainWindow):
         self._history.session_selected.connect(self._on_history_session_selected)
         self._config   = ConfigTab(self._cfg)
         self._modal_db = ModalTab()
+        self._memory   = MemoryTab()
         self._logs     = LogsTab()
 
         self._tabs.addTab(self._dashboard, " OVERVIEW ")
@@ -2523,6 +2813,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._monitor,  " MONITOR ")
         self._tabs.addTab(self._history,  " HISTORY ")
         self._tabs.addTab(self._config,   " CONFIG ")
+        self._tabs.addTab(self._memory,   " MEMORY ")
         self._tabs.addTab(self._modal_db, " MODAL ")
         self._tabs.addTab(self._logs,     " LOGS ")
         body.addWidget(self._tabs, 1)

@@ -72,7 +72,7 @@ class MemoryManager:
                     ON CONFLICT(trait_name) DO UPDATE SET 
                         trait_value = excluded.trait_value,
                         updated_at = CURRENT_TIMESTAMP
-                ''', (trait_name, str(trait_value)))
+                ''', (trait_name.strip(), str(trait_value).strip()))
                 conn.commit()
             return True
         except Exception as e:
@@ -81,9 +81,34 @@ class MemoryManager:
 
     def get_personality(self) -> dict:
         """Fetch all core identity traits as a dictionary."""
-        with self._get_conn() as conn:
-            rows = conn.execute('SELECT trait_name, trait_value FROM core_identity').fetchall()
-            return {row['trait_name']: row['trait_value'] for row in rows}
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute('SELECT trait_name, trait_value FROM core_identity').fetchall()
+                return {row['trait_name']: row['trait_value'] for row in rows}
+        except Exception as e:
+            print(f"[MemoryManager] Error getting personality: {e}")
+            return {}
+
+    def get_personality_details(self) -> list:
+        """Fetch all core identity traits with timestamps and IDs."""
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute('SELECT id, trait_name, trait_value, updated_at FROM core_identity ORDER BY updated_at DESC').fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[MemoryManager] Error getting personality details: {e}")
+            return []
+
+    def delete_personality(self, trait_name: str) -> bool:
+        """Delete a trait from core identity."""
+        try:
+            with self._get_conn() as conn:
+                conn.execute('DELETE FROM core_identity WHERE trait_name = ?', (trait_name,))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error deleting personality trait: {e}")
+            return False
 
     # --- Knowledge Graph Operations ---
 
@@ -94,34 +119,67 @@ class MemoryManager:
                 conn.execute('''
                     INSERT INTO knowledge_graph (subject, predicate, object, source)
                     VALUES (?, ?, ?, ?)
-                ''', (subject.lower(), predicate.lower(), object_.lower(), source))
+                ''', (subject.strip().lower(), predicate.strip().lower(), object_.strip().lower(), source.strip()))
                 conn.commit()
             return True
         except Exception as e:
             print(f"[MemoryManager] Error memorizing fact: {e}")
             return False
 
+    def get_all_facts(self, limit: int = 200) -> list:
+        """Fetch all facts ordered by newest."""
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute('''
+                    SELECT id, subject, predicate, object, confidence_score, source, created_at
+                    FROM knowledge_graph
+                    ORDER BY created_at DESC LIMIT ?
+                ''', (limit,)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[MemoryManager] Error fetching all facts: {e}")
+            return []
+
     def recall_knowledge(self, query_subject: str) -> list:
         """Fetch all facts about a specific subject."""
-        with self._get_conn() as conn:
-            rows = conn.execute('''
-                SELECT predicate, object, source, created_at 
-                FROM knowledge_graph 
-                WHERE subject = ?
-            ''', (query_subject.lower(),)).fetchall()
-            return [dict(row) for row in rows]
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute('''
+                    SELECT id, subject, predicate, object, source, created_at 
+                    FROM knowledge_graph 
+                    WHERE subject = ?
+                ''', (query_subject.strip().lower(),)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[MemoryManager] Error recalling knowledge: {e}")
+            return []
 
     def search_knowledge(self, query: str) -> list:
         """Full-text search across subjects, predicates, and objects."""
-        with self._get_conn() as conn:
-            q = f"%{query.lower()}%"
-            rows = conn.execute('''
-                SELECT subject, predicate, object, source, created_at
-                FROM knowledge_graph
-                WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ?
-                ORDER BY created_at DESC LIMIT 50
-            ''', (q, q, q)).fetchall()
-            return [dict(row) for row in rows]
+        try:
+            with self._get_conn() as conn:
+                q = f"%{query.strip().lower()}%"
+                rows = conn.execute('''
+                    SELECT id, subject, predicate, object, source, created_at
+                    FROM knowledge_graph
+                    WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ?
+                    ORDER BY created_at DESC LIMIT 50
+                ''', (q, q, q)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[MemoryManager] Error searching knowledge: {e}")
+            return []
+
+    def delete_fact(self, fact_id: int) -> bool:
+        """Delete a fact by its primary key ID."""
+        try:
+            with self._get_conn() as conn:
+                conn.execute('DELETE FROM knowledge_graph WHERE id = ?', (fact_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error deleting fact: {e}")
+            return False
 
     # --- Episodic Memory Operations ---
 
@@ -139,15 +197,30 @@ class MemoryManager:
             print(f"[MemoryManager] Error writing diary entry: {e}")
             return False
 
-    def get_recent_episodes(self, limit: int = 10) -> list:
+    def get_recent_episodes(self, limit: int = 50) -> list:
         """Fetch the most recent episodic memories."""
-        with self._get_conn() as conn:
-            rows = conn.execute('''
-                SELECT session_name, timestamp, event_type, content, sentiment_score 
-                FROM episodic_memory 
-                ORDER BY timestamp DESC LIMIT ?
-            ''', (limit,)).fetchall()
-            return [dict(row) for row in rows]
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute('''
+                    SELECT id, session_name, timestamp, event_type, content, sentiment_score 
+                    FROM episodic_memory 
+                    ORDER BY timestamp DESC LIMIT ?
+                ''', (limit,)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[MemoryManager] Error fetching episodes: {e}")
+            return []
+
+    def delete_episode(self, episode_id: int) -> bool:
+        """Delete an episodic memory by its ID."""
+        try:
+            with self._get_conn() as conn:
+                conn.execute('DELETE FROM episodic_memory WHERE id = ?', (episode_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error deleting episode: {e}")
+            return False
 
 # Optional quick-test block
 if __name__ == "__main__":

@@ -146,12 +146,13 @@ tools = [
             ),
             types.FunctionDeclaration(
                 name="type_text",
-                description="Type a string of text on the keyboard, character by character.",
+                description="Type a string of text on the keyboard, character by character or via paste for speed/unicode.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["text"],
                     properties={
                         "text": genai.types.Schema(type=genai.types.Type.STRING, description="Text to type on the physical keyboard."),
+                        "enter": genai.types.Schema(type=genai.types.Type.BOOLEAN, description="Whether to press Enter after typing. Default false."),
                     },
                 ),
             ),
@@ -713,6 +714,8 @@ class AudioLoop:
         self._auto_last_had_tools: bool = False   # did the last model turn call tools?
         self._auto_idle_turns: int = 0             # consecutive idle turns (no tools called)
         self._auto_max_idle: int = 3               # stop nudging after N idle turns in a row
+
+        self._ws_ai_started: bool = False
 
         os.makedirs("history", exist_ok=True)
 
@@ -1408,6 +1411,7 @@ class AudioLoop:
 
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
+                scroll_amount = clicks * 120 if abs(clicks) <= 20 else clicks
                 raw_x, raw_y = args.get("x"), args.get("y")
                 def _do_scroll():
                     self._ensure_input_desktop()
@@ -1415,9 +1419,9 @@ class AudioLoop:
                     if raw_x is not None and raw_y is not None:
                         ctypes.windll.user32.SetCursorPos(int(raw_x), int(raw_y))
                         time.sleep(0.05)
-                    pyautogui.scroll(clicks)
+                    pyautogui.scroll(scroll_amount)
                 await asyncio.to_thread(_do_scroll)
-                return {"result": f"Scrolled {clicks} units."}
+                return {"result": f"Scrolled {clicks} units (delta {scroll_amount})."}
 
             elif name == "mouse_drag":
                 sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
@@ -1442,32 +1446,55 @@ class AudioLoop:
                 return {"result": f"Moved mouse to ({x},{y})."}
 
             elif name == "type_text":
-                text = args.get("text", "")
-                if len(text) > 50:
-                    def _paste_text():
-                        for _ in range(3):
+                text = str(args.get("text", ""))
+                enter = bool(args.get("enter", False))
+                def _do_type():
+                    self._ensure_input_desktop()
+                    use_paste = len(text) > 15 or "\n" in text or "\t" in text or any(ord(c) > 127 for c in text)
+                    if use_paste:
+                        for _ in range(5):
                             try:
                                 pyperclip.copy(text)
                                 break
                             except Exception:
-                                time.sleep(0.05)
+                                time.sleep(0.04)
                         time.sleep(0.08)  # Let Windows OLE release clipboard lock before firing paste shortcut
                         pyautogui.hotkey("ctrl", "v")
                         time.sleep(0.05)
-                    await asyncio.to_thread(_paste_text)
-                else:
-                    await asyncio.to_thread(pyautogui.write, text, interval=0.01)
-                return {"result": f"Typed text ({len(text)} chars). Continue execution."}
+                    else:
+                        pyautogui.write(text, interval=0.01)
+                    if enter:
+                        time.sleep(0.05)
+                        pyautogui.press("enter")
+                await asyncio.to_thread(_do_type)
+                return {"result": f"Typed text ({len(text)} chars){' and pressed Enter' if enter else ''}. Continue execution."}
 
             elif name == "press_key":
-                key = args.get("key", "").lower()
-                await asyncio.to_thread(pyautogui.press, key)
+                key = str(args.get("key", "")).strip().lower()
+                def _do_press():
+                    self._ensure_input_desktop()
+                    if "+" in key:
+                        parts = [p.strip() for p in key.split("+") if p.strip()]
+                        alias_map = {"return": "enter", "escape": "esc", "control": "ctrl"}
+                        parts = [alias_map.get(k, k) for k in parts]
+                        pyautogui.hotkey(*parts)
+                    else:
+                        alias_map = {"return": "enter", "escape": "esc", "control": "ctrl"}
+                        norm_key = alias_map.get(key, key)
+                        pyautogui.press(norm_key)
+                await asyncio.to_thread(_do_press)
                 return {"result": f"Pressed key: '{key}'."}
 
             elif name == "hotkey":
-                keys_str = args.get("keys", "")
-                keys = [k.strip().lower() for k in keys_str.split(",") if k.strip()]
-                await asyncio.to_thread(pyautogui.hotkey, *keys)
+                keys_str = str(args.get("keys", ""))
+                delims = "+" if "+" in keys_str else ","
+                keys = [k.strip().lower() for k in keys_str.split(delims) if k.strip()]
+                alias_map = {"return": "enter", "escape": "esc", "control": "ctrl"}
+                keys = [alias_map.get(k, k) for k in keys]
+                def _do_hotkey():
+                    self._ensure_input_desktop()
+                    pyautogui.hotkey(*keys)
+                await asyncio.to_thread(_do_hotkey)
                 return {"result": f"Hotkey pressed: {'+'.join(keys)}."}
 
             elif name == "get_clipboard":
@@ -1851,8 +1878,12 @@ class AudioLoop:
 
                     elif data["type"] == "text":
                         text = data["data"]
-                        print(text, end="", flush=True)
-                        await self._async_log(text)
+                        if not VLLM_MODE:
+                            if not self._ws_ai_started:
+                                print("\n[Alpha]: ", end="", flush=True)
+                                self._ws_ai_started = True
+                            print(text, end="", flush=True)
+                            await self._async_log(text)
 
                     elif data["type"] in ("input_transcript", "input_transcription"):
                         user_text = data["data"]
@@ -1864,7 +1895,10 @@ class AudioLoop:
                     elif data["type"] == "output_transcription":
                         text = data.get("data", "")
                         if text and not VLLM_MODE:
-                            print(f"\n[Alpha]: {text}", flush=True)
+                            if not self._ws_ai_started:
+                                print("\n[Alpha]: ", end="", flush=True)
+                                self._ws_ai_started = True
+                            print(text, end="", flush=True)
                             await self._async_log(text)
 
                     elif data["type"] == "turn_complete":
@@ -1872,6 +1906,9 @@ class AudioLoop:
                         self.last_ai_speech_time = time.time()
                         while not self.audio_in_queue.empty():
                             self.audio_in_queue.get_nowait()
+                        if self._ws_ai_started:
+                            print("", flush=True)
+                            self._ws_ai_started = False
                         print("\nmessage > ", end="", flush=True)
                         # ── Autonomous decision framework (WS path) ────────────
                         if self.autonomous:
@@ -1979,7 +2016,7 @@ class AudioLoop:
                     ) as ws:
                         self.websocket = ws
                         self.last_heartbeat_ack = time.time()
-                        init_msg = json.dumps({"api_key": api_key, "config": config_payload})
+                        init_msg = json.dumps({"api_key": api_key, "model": MODEL, "config": config_payload})
                         await ws.send(init_msg)
                         print("[System] Modal proxy connected!", flush=True)
 

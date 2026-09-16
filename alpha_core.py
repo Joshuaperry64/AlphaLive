@@ -78,10 +78,18 @@ client = genai.Client(
 )
 
 # ── Screen resolution ──────────────────────────────────────────────────────────
-_user32 = ctypes.windll.user32
-_user32.SetProcessDPIAware()
-screen_w = _user32.GetSystemMetrics(0)
-screen_h = _user32.GetSystemMetrics(1)
+try:
+    # Force DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
+    ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+except Exception:
+    try:
+        # Fallback for Windows 8.1 / older Windows 10
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        ctypes.windll.user32.SetProcessDPIAware()
+
+screen_w = ctypes.windll.user32.GetSystemMetrics(0)
+screen_h = ctypes.windll.user32.GetSystemMetrics(1)
 
 
 tools = [
@@ -291,6 +299,17 @@ tools = [
                     required=["action"],
                     properties={
                         "action": genai.types.Schema(type=genai.types.Type.STRING, description="Action to perform: 'minimize', 'maximize', 'restore', or 'close'"),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="delay_execution",
+                description="Pause execution for a specified number of seconds. Use this to explicitly wait for a webpage, application, or animation to fully load before taking the next action.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["seconds"],
+                    properties={
+                        "seconds": genai.types.Schema(type=genai.types.Type.NUMBER, description="Number of seconds to wait (e.g., 2.5)."),
                     },
                 ),
             ),
@@ -1333,36 +1352,27 @@ class AudioLoop:
                     self.audio_in_queue.get_nowait()
                 
                 # ── Autonomous decision framework ──────────────────────────────
-                # Only nudge if:
-                #   1. Autonomous mode is enabled
-                #   2. The PREVIOUS turn had tool calls (active task in flight), OR
-                #      this is the very first turn (initializing objective)
-                #   3. We haven't exceeded the idle-turn threshold (model stopped acting)
                 if self.autonomous:
-                    if self._auto_last_had_tools:
-                        # Active task — give the model a short beat then continue
-                        await asyncio.sleep(0.4)
-                        try:
-                            await self.session.send_realtime_input(text="[System]: Continue.")
-                        except Exception as auto_err:
-                            print(f"\n[System] Autonomous continue error: {auto_err}")
-                        self._auto_last_had_tools = False  # reset; next turn will set it again if needed
-                    else:
-                        # Idle turn (no tools called) — count up, back off
+                    # Nudge ONLY if the AI went idle (did not call any tools this turn)
+                    if not self._auto_last_had_tools:
                         self._auto_idle_turns += 1
                         if self._auto_idle_turns <= self._auto_max_idle:
-                            # Model responded but didn't act — give it one more chance
                             await asyncio.sleep(1.0)
                             try:
                                 await self.session.send_realtime_input(
-                                    text=f"[System]: You have tools available. If there is an objective, take action now. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                    text=f"[System]: You have tools available. If there is an active objective, take action now or state that it is complete. ({self._auto_idle_turns}/{self._auto_max_idle})"
                                 )
                             except Exception as auto_err:
-                                print(f"\n[System] Autonomous nudge error: {auto_err}")
+                                print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
                         else:
-                            # Model has gone idle repeatedly — stand down and wait for human input
-                            print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.")
+                            print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
                             self._auto_idle_turns = 0
+                    else:
+                        # Tools were called. Sending the tool_response will naturally resume generation.
+                        self._auto_idle_turns = 0
+
+                # Reset for the next turn
+                self._auto_last_had_tools = False
 
     # ── Unified tool executor (used by both direct and modal routes) ──────────
 
@@ -1608,6 +1618,11 @@ class AudioLoop:
                 else:
                     return {"result": f"Unknown action: {action}"}
                 return {"result": f"Action '{action}' performed on active window."}
+
+            elif name == "delay_execution":
+                seconds = float(args.get("seconds", 2.0))
+                await asyncio.sleep(seconds)
+                return {"result": f"Waited for {seconds} seconds. Look at the screen and determine the next action."}
 
             # ── Memory & Persona ───────────────────────────────────────────────────────
             elif name == "memorize_fact":
@@ -1912,27 +1927,27 @@ class AudioLoop:
                         print("\nmessage > ", end="", flush=True)
                         # ── Autonomous decision framework (WS path) ────────────
                         if self.autonomous:
-                            if self._auto_last_had_tools:
-                                await asyncio.sleep(0.4)
-                                try:
-                                    await self.send_ws_json({"type": "text", "data": "[System]: Continue."})
-                                except Exception as auto_err:
-                                    print(f"\n[System] Autonomous continue error: {auto_err}", flush=True)
-                                self._auto_last_had_tools = False
-                            else:
+                            # Nudge ONLY if the AI went idle (did not call any tools this turn)
+                            if not self._auto_last_had_tools:
                                 self._auto_idle_turns += 1
                                 if self._auto_idle_turns <= self._auto_max_idle:
                                     await asyncio.sleep(1.0)
                                     try:
                                         await self.send_ws_json({
                                             "type": "text",
-                                            "data": f"[System]: You have tools available. If there is an objective, take action now. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                            "data": f"[System]: You have tools available. If there is an active objective, take action now or state that it is complete. ({self._auto_idle_turns}/{self._auto_max_idle})"
                                         })
                                     except Exception as auto_err:
                                         print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
                                 else:
                                     print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
                                     self._auto_idle_turns = 0
+                            else:
+                                # Tools were called. Sending the tool_response will naturally resume generation.
+                                self._auto_idle_turns = 0
+
+                        # Reset for the next turn
+                        self._auto_last_had_tools = False
 
                     elif data["type"] == "error":
                         print(f"\n[Proxy Error]: {data.get('data', 'Unknown error')}", flush=True)
@@ -1999,8 +2014,8 @@ class AudioLoop:
         if "alphacoreprogramming-ai" in WS_URL:
             WS_URL = WS_URL.replace("alphacoreprogramming-ai", "josh64perry")
 
-        # Use by_alias=False to generate snake_case keys so the Proxy can validate it natively
-        config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=False)
+        # Use by_alias=True to generate standard schema keys for LiveConnectConfig.model_validate
+        config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=True)
 
         try:
             while True:

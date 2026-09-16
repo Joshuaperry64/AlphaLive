@@ -37,11 +37,18 @@ async def websocket_endpoint(websocket: WebSocket):
             model_name = model_name[len("models/"):]
         config_dict = setup.get("config", {})
         
-        # We process the configuration mapping directly rather than stripping keys
+        # Properly deserialize the nested LiveConnectConfig using Pydantic
         try:
-            config = types.LiveConnectConfig(**config_dict) if config_dict else None
+            if config_dict:
+                if hasattr(types.LiveConnectConfig, "model_validate"):
+                    config = types.LiveConnectConfig.model_validate(config_dict)
+                else:
+                    config = types.LiveConnectConfig(**config_dict)
+            else:
+                config = types.LiveConnectConfig(response_modalities=["AUDIO"])
         except Exception as cfg_err:
             print(f"[Proxy] Config parse error: {cfg_err}")
+            traceback.print_exc()
             config = types.LiveConnectConfig(response_modalities=["AUDIO"])
         
         client = genai.Client(http_options={"api_version": "v1beta"}, api_key=api_key)

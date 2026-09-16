@@ -101,22 +101,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     "args": args_dict,
                                                 })
 
-                                    # ── tool_call attribute (alternative SDK path) ──
-                                    tool_call = getattr(response, "tool_call", None)
-                                    if tool_call:
-                                        for fc in tool_call.function_calls:
-                                            args_dict = {}
-                                            try:
-                                                if fc.args:
-                                                    args_dict = dict(fc.args) if isinstance(fc.args, dict) else dict(fc.args.items())
-                                            except Exception:
-                                                pass
-                                            await send_json({
-                                                "type": "function_call",
-                                                "name": fc.name,
-                                                "id": getattr(fc, "id", None),
-                                                "args": args_dict,
-                                            })
 
                                     # ── Transcriptions ────────────────────────
                                     out_tr = getattr(sc, "output_transcription", None)

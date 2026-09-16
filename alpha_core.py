@@ -314,6 +314,28 @@ tools = [
                 ),
             ),
             types.FunctionDeclaration(
+                name="focus_window",
+                description="Bring a specific window to the foreground by partial title match (e.g., 'Chrome', 'Edge', 'Firefox', 'Notepad'). Always use this after launching a browser or opening an app.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["title_query"],
+                    properties={
+                        "title_query": genai.types.Schema(type=genai.types.Type.STRING, description="Partial title or process name of the window to bring to the front."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="task_complete",
+                description="Signal that the user's primary objective has been fully accomplished. Call this ONLY after visually verifying on the screen that all requested actions and results are finished.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["summary"],
+                    properties={
+                        "summary": genai.types.Schema(type=genai.types.Type.STRING, description="Summary of what was achieved and verified."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
                 name="write_diary_entry",
                 description="Log a diary entry, session summary, or notable event to episodic memory.",
                 parameters=genai.types.Schema(
@@ -627,7 +649,16 @@ Rules -\
 
 Credentials -\
 Initial authentication passphrase: 14235
-Administrator passphrase: 142352002672167566""")],
+Administrator passphrase: 142352002672167566
+
+AUTONOMOUS EXECUTION DIRECTIVE:
+When given an actionable task (e.g., browsing to a website, filling a form, clicking buttons, extracting data):
+1. Execute the preliminary step (e.g., browser_open_url or focus_window).
+2. DO NOT declare the task finished or ask the user for confirmation after a partial step.
+3. Use delay_execution (1-3 seconds) to let pages render if needed.
+4. On every subsequent turn, inspect the updated screen capture (referencing your red cursor marker) and execute the next physical step.
+5. Continue executing actions sequentially until the entire objective is visually confirmed.
+6. Call the 'task_complete' tool once and only once the final target state has been achieved.""")],
         role="user"
     )
 )
@@ -842,9 +873,9 @@ class AudioLoop:
             import mss
             with mss.MSS() as sct:
                 monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-                i = sct.grab(monitor)
-                image_bytes = mss.tools.to_png(i.rgb, i.size)
-                img = PIL.Image.open(io.BytesIO(image_bytes))
+                sct_img = sct.grab(monitor)
+                # Direct raw memory conversion (instant, bypasses PNG encoding)
+                img = PIL.Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
         except Exception:
             pass
 
@@ -1348,8 +1379,8 @@ class AudioLoop:
                     print("", flush=True)
                 print("\nmessage > ", end="", flush=True)
 
-                while not self.audio_in_queue.empty():
-                    self.audio_in_queue.get_nowait()
+                self.is_ai_speaking = False
+                self.last_ai_speech_time = time.time()
                 
                 # ── Autonomous decision framework ──────────────────────────────
                 if self.autonomous:
@@ -1392,7 +1423,18 @@ class AudioLoop:
                     u32 = ctypes.windll.user32
 
                     if raw_x is not None and raw_y is not None:
-                        target_x, target_y = int(raw_x), int(raw_y)
+                        fx, fy = float(raw_x), float(raw_y)
+                        # Case A: 0.0 to 1.0 normalized
+                        if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
+                            target_x = int(fx * screen_w)
+                            target_y = int(fy * screen_h)
+                        # Case B: 0 to 1000 normalized
+                        elif screen_w > 1000 and 0 <= fx <= 1000 and 0 <= fy <= 1000 and fx.is_integer() and fy.is_integer():
+                            # Only scale if requested coords are clearly normalized ratios
+                            target_x = int((fx / 1000.0) * screen_w)
+                            target_y = int((fy / 1000.0) * screen_h)
+                        else:
+                            target_x, target_y = int(fx), int(fy)
                         u32.SetCursorPos(target_x, target_y)
                         time.sleep(0.05)  # Allow Windows to deliver WM_MOUSEMOVE and hover/focus
                     else:
@@ -1447,13 +1489,29 @@ class AudioLoop:
                 return {"result": f"Dragged from ({sx},{sy}) to ({ex},{ey})."}
 
             elif name == "mouse_move":
-                x, y = int(args.get("x", 0)), int(args.get("y", 0))
+                raw_x = args.get("x")
+                raw_y = args.get("y")
+                if raw_x is not None and raw_y is not None:
+                    fx, fy = float(raw_x), float(raw_y)
+                    # Case A: 0.0 to 1.0 normalized
+                    if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
+                        target_x = int(fx * screen_w)
+                        target_y = int(fy * screen_h)
+                    # Case B: 0 to 1000 normalized
+                    elif screen_w > 1000 and 0 <= fx <= 1000 and 0 <= fy <= 1000 and fx.is_integer() and fy.is_integer():
+                        target_x = int((fx / 1000.0) * screen_w)
+                        target_y = int((fy / 1000.0) * screen_h)
+                    else:
+                        target_x, target_y = int(fx), int(fy)
+                else:
+                    target_x, target_y = 0, 0
+
                 def _do_move():
                     self._ensure_input_desktop()
                     pyautogui.FAILSAFE = False
-                    ctypes.windll.user32.SetCursorPos(x, y)
+                    ctypes.windll.user32.SetCursorPos(target_x, target_y)
                 await asyncio.to_thread(_do_move)
-                return {"result": f"Moved mouse to ({x},{y})."}
+                return {"result": f"Moved mouse to ({target_x},{target_y})."}
 
             elif name == "type_text":
                 text = str(args.get("text", ""))
@@ -1623,6 +1681,33 @@ class AudioLoop:
                 seconds = float(args.get("seconds", 2.0))
                 await asyncio.sleep(seconds)
                 return {"result": f"Waited for {seconds} seconds. Look at the screen and determine the next action."}
+
+            elif name == "focus_window":
+                query = str(args.get("title_query", "")).lower()
+                found = False
+                def enum_windows_cb(hwnd, _):
+                    nonlocal found
+                    if ctypes.windll.user32.IsWindowVisible(hwnd):
+                        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+                        if length > 0:
+                            buff = ctypes.create_unicode_buffer(length + 1)
+                            ctypes.windll.user32.GetWindowTextW(hwnd, buff, length + 1)
+                            if query in buff.value.lower():
+                                # Restore if minimized
+                                ctypes.windll.user32.ShowWindow(hwnd, 9)
+                                ctypes.windll.user32.SetForegroundWindow(hwnd)
+                                found = True
+                                return False
+                    return True
+
+                WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+                ctypes.windll.user32.EnumWindows(WNDENUMPROC(enum_windows_cb), 0)
+                return {"result": f"Focused window matching '{query}'" if found else f"No visible window found matching '{query}'"}
+
+            elif name == "task_complete":
+                summary = str(args.get("summary", ""))
+                print(f"\n[Task Complete] {summary}\n", flush=True)
+                return {"result": f"Objective verified complete: '{summary}'. You may now announce your final results to the user."}
 
             # ── Memory & Persona ───────────────────────────────────────────────────────
             elif name == "memorize_fact":
@@ -1919,8 +2004,6 @@ class AudioLoop:
                     elif data["type"] == "turn_complete":
                         self.is_ai_speaking = False
                         self.last_ai_speech_time = time.time()
-                        while not self.audio_in_queue.empty():
-                            self.audio_in_queue.get_nowait()
                         if self._ws_ai_started:
                             print("", flush=True)
                             self._ws_ai_started = False

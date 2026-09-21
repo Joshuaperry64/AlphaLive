@@ -12,6 +12,7 @@ import subprocess
 import pyperclip
 import webbrowser
 import urllib.parse
+import math
 
 import websockets
 import cv2
@@ -337,12 +338,14 @@ tools = [
             ),
             types.FunctionDeclaration(
                 name="find_text_on_screen",
-                description="Search for any visible button label, word, or text phrase on the entire screen using high-speed native Windows OCR. Returns the exact (x, y) center pixel coordinates of the match. Optionally clicks the text immediately.",
+                description="Search for any visible button label, word, or text phrase on the entire screen using high-speed native Windows OCR. Returns the exact (x, y) center pixel coordinates of the match. If estimated_x and estimated_y are provided, Alpha automatically learns the visual offset (e.g. dy=+10) and calibrates future clicks. Optionally clicks the text immediately.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["query"],
                     properties={
                         "query": genai.types.Schema(type=genai.types.Type.STRING, description="The text, word, or button label to find on the screen (e.g., 'Calibrate', 'Save', 'Submit', 'Cancel', 'Sign In')."),
+                        "estimated_x": genai.types.Schema(type=genai.types.Type.NUMBER, description="Optional visually estimated X coordinate of the element (e.g. 50). Alpha calculates dx = actual_x - estimated_x, updates its dynamic calibration model, and saves it to persistent memory."),
+                        "estimated_y": genai.types.Schema(type=genai.types.Type.NUMBER, description="Optional visually estimated Y coordinate of the element (e.g. 50). Alpha calculates dy = actual_y - estimated_y, updates its dynamic calibration model, and saves it to persistent memory."),
                         "click": genai.types.Schema(type=genai.types.Type.BOOLEAN, description="If True, automatically click the center of the found text immediately. Default is False."),
                         "button": genai.types.Schema(type=genai.types.Type.STRING, description="Mouse button to use if click is True: 'left', 'right', or 'middle'. Default is 'left'."),
                         "clicks": genai.types.Schema(type=genai.types.Type.INTEGER, description="Number of clicks if click is True (1 for single click, 2 for double click). Default is 1."),
@@ -351,7 +354,7 @@ tools = [
             ),
             types.FunctionDeclaration(
                 name="crop_and_zoom",
-                description="Zoom in on a specific region of the screen for high-resolution inspection. Runs deep OCR on the magnified crop to read tiny text, fine details, or small buttons that might be hard to see in the full-screen view.",
+                description="Zoom in on a specific region of the screen for high-resolution inspection. Runs deep OCR on the magnified crop to read tiny text, fine details, or small buttons that might be hard to see in the full-screen view. Optionally searches for a query to calibrate coordinates.",
                 parameters=genai.types.Schema(
                     type=genai.types.Type.OBJECT,
                     required=["x", "y"],
@@ -361,6 +364,17 @@ tools = [
                         "width": genai.types.Schema(type=genai.types.Type.INTEGER, description="Width of the area in pixels to crop (default 300)."),
                         "height": genai.types.Schema(type=genai.types.Type.INTEGER, description="Height of the area in pixels to crop (default 300)."),
                         "zoom_factor": genai.types.Schema(type=genai.types.Type.NUMBER, description="Magnification multiplier, e.g. 2.0 for 2x zoom (default 2.0)."),
+                        "query": genai.types.Schema(type=genai.types.Type.STRING, description="Optional text or word to locate within the magnified crop for coordinate learning."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="get_visual_calibration",
+                description="Inspect or reset the active visual coordinate calibration offsets learned from screen OCR. Returns current dx/dy offsets, sample count, and recent observations.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    properties={
+                        "reset": genai.types.Schema(type=genai.types.Type.BOOLEAN, description="If True, resets learned offsets back to dx=0, dy=0. Default is False."),
                     },
                 ),
             ),
@@ -685,7 +699,7 @@ When given an actionable task (e.g., browsing to a website, filling a form, clic
 1. Execute the preliminary step (e.g., browser_open_url or focus_window).
 2. DO NOT declare the task finished or ask the user for confirmation after a partial step.
 3. Use delay_execution (1-3 seconds) to let pages render if needed.
-4. When looking for buttons, tabs, links, or text to click, prioritize 'find_text_on_screen(query="...", click=True)' for 100% pixel-perfect clicks instead of guessing coordinates. Use 'crop_and_zoom' if you need to read small fine print.
+4. When looking for buttons, tabs, links, or text to click, prioritize 'find_text_on_screen(query="...", click=True)' for 100% pixel-perfect clicks instead of guessing coordinates. If you visually estimate an element at (estimated_x, estimated_y), pass those coordinates to find_text_on_screen; Alpha will learn the exact screen offset (e.g. dy=+10), persist it to memory.db, and auto-calibrate future clicks and movements. Use 'crop_and_zoom' if you need to read small fine print.
 5. On every subsequent turn, inspect the updated screen capture (referencing your red cursor marker) and execute the next physical step.
 6. Continue executing actions sequentially until the entire objective is visually confirmed.
 7. Call the 'task_complete' tool once and only once the final target state has been achieved.""")],
@@ -753,6 +767,122 @@ if VLLM_MODE:
 pya = pyaudio.PyAudio()
 
 
+class CoordinateCalibrator:
+    """Dynamic visual coordinate learning and calibration system.
+
+    Learns systematic screen coordinate offsets between visually estimated locations
+    and exact detected locations (from OCR or ground truth), updates an adaptive
+    Exponential Moving Average (EMA) model, persists calibration across sessions in SQLite,
+    and automatically applies calibrated offsets to physical mouse operations.
+    """
+
+    def __init__(self, memory_mgr=None):
+        self.mm = memory_mgr
+        self.offset_x: float = 0.0
+        self.offset_y: float = 0.0
+        self.sample_count: int = 0
+        self.history: list = []
+        self._load_from_db()
+
+    def _load_from_db(self):
+        if not self.mm:
+            return
+        try:
+            traits = self.mm.get_personality()
+            if "visual_offset_x" in traits:
+                self.offset_x = float(traits["visual_offset_x"])
+            if "visual_offset_y" in traits:
+                self.offset_y = float(traits["visual_offset_y"])
+            if "visual_sample_count" in traits:
+                self.sample_count = int(traits["visual_sample_count"])
+            if self.sample_count > 0:
+                print(
+                    f"[Calibrator] Loaded active visual offset from DB: dx={self.offset_x:+.1f}, dy={self.offset_y:+.1f} ({self.sample_count} sample(s))",
+                    flush=True,
+                )
+        except Exception as e:
+            print(f"[Calibrator] Warning loading calibration from DB: {e}", flush=True)
+
+    def _save_to_db(self):
+        if not self.mm:
+            return
+        try:
+            self.mm.update_personality("visual_offset_x", f"{self.offset_x:.2f}")
+            self.mm.update_personality("visual_offset_y", f"{self.offset_y:.2f}")
+            self.mm.update_personality("visual_sample_count", str(self.sample_count))
+        except Exception as e:
+            print(f"[Calibrator] Warning saving calibration to DB: {e}", flush=True)
+
+    def record_observation(self, estimated_x, estimated_y, actual_x, actual_y, label=""):
+        """Record an estimated vs actual observation and update calibration model.
+
+        dx = actual_x - estimated_x
+        dy = actual_y - estimated_y
+        """
+        dx = float(actual_x - estimated_x)
+        dy = float(actual_y - estimated_y)
+
+        # Outlier rejection: if error is huge (> 500px), it's likely a misidentification or different element
+        if abs(dx) > 500 or abs(dy) > 500:
+            print(f"[Calibrator] Outlier delta rejected: dx={dx:+.1f}, dy={dy:+.1f} for '{label}'", flush=True)
+            return None
+
+        self.sample_count += 1
+        # Adaptive alpha: fast convergence for first few samples, stable EMA thereafter
+        if self.sample_count <= 3:
+            alpha = 0.7
+        else:
+            alpha = 0.35
+
+        if self.sample_count == 1:
+            self.offset_x = dx
+            self.offset_y = dy
+        else:
+            self.offset_x = (1.0 - alpha) * self.offset_x + alpha * dx
+            self.offset_y = (1.0 - alpha) * self.offset_y + alpha * dy
+
+        obs = {
+            "label": str(label),
+            "estimated": (int(round(estimated_x)), int(round(estimated_y))),
+            "actual": (int(round(actual_x)), int(round(actual_y))),
+            "dx": round(dx, 1),
+            "dy": round(dy, 1),
+            "offset_x": round(self.offset_x, 1),
+            "offset_y": round(self.offset_y, 1),
+            "samples": self.sample_count,
+        }
+        self.history.append(obs)
+        if len(self.history) > 25:
+            self.history.pop(0)
+
+        self._save_to_db()
+        print(
+            f"\n[Calibrator] Learned offset from '{label}': dx={dx:+.1f}, dy={dy:+.1f} -> "
+            f"Active offset: dx={self.offset_x:+.1f}, dy={self.offset_y:+.1f} (samples: {self.sample_count})",
+            flush=True,
+        )
+        return obs
+
+    def calibrate(self, x, y, screen_w=None, screen_h=None):
+        """Apply active calibration offset to target coordinates."""
+        cal_x = int(round(x + self.offset_x))
+        cal_y = int(round(y + self.offset_y))
+        if screen_w is not None and screen_w > 0:
+            cal_x = max(0, min(cal_x, screen_w - 1))
+        if screen_h is not None and screen_h > 0:
+            cal_y = max(0, min(cal_y, screen_h - 1))
+        return cal_x, cal_y
+
+    def reset(self):
+        """Reset calibration offsets to zero."""
+        self.offset_x = 0.0
+        self.offset_y = 0.0
+        self.sample_count = 0
+        self.history.clear()
+        self._save_to_db()
+        print("[Calibrator] Visual calibration reset to 0.", flush=True)
+
+
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE):
         self.video_mode = video_mode
@@ -774,6 +904,8 @@ class AudioLoop:
         session_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_name).strip()) or "default"
         self.log_file = os.path.join("history", f"{session_name}.txt")
         self.mm = memory_manager.MemoryManager()
+        self.calibrator = CoordinateCalibrator(self.mm)
+        self._last_commanded_pos = None
 
         self.send_text_task = None
         self.receive_loop_task = None
@@ -1347,7 +1479,6 @@ class AudioLoop:
                         self.is_ai_speaking = True
                         self.last_ai_speech_time = time.time()
                         self.audio_in_queue.put_nowait(data)
-                        continue
 
                     if sc := getattr(response, "server_content", None):
                         if input_transcript := getattr(sc, "input_transcription", None):
@@ -1380,6 +1511,9 @@ class AudioLoop:
                                         await self._async_log(part.text)
                         
                     if tool_call := response.tool_call:
+                        if ai_started:
+                            print("", flush=True)
+                            ai_started = False
                         if VLLM_MODE:
                             # In vLLM mode, Gemini Live is audio relay only; ignore any stray Gemini tool calls
                             continue
@@ -1452,8 +1586,10 @@ class AudioLoop:
                 raw_y = args.get("y")
                 button = str(args.get("button", "left")).lower() if args.get("button") else "left"
                 clicks = int(args.get("clicks", 1))
+                cal_info = ""
 
                 def _do_click():
+                    nonlocal cal_info
                     self._ensure_input_desktop()
                     pyautogui.FAILSAFE = False
                     u32 = ctypes.windll.user32
@@ -1462,10 +1598,14 @@ class AudioLoop:
                         fx, fy = float(raw_x), float(raw_y)
                         # 0.0 to 1.0 normalized decimals (e.g. 0.5, 0.25)
                         if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (not fx.is_integer() or not fy.is_integer()):
-                            target_x = int(fx * screen_w)
-                            target_y = int(fy * screen_h)
+                            base_x = int(fx * screen_w)
+                            base_y = int(fy * screen_h)
                         else:
-                            target_x, target_y = int(fx), int(fy)
+                            base_x, base_y = int(fx), int(fy)
+                        target_x, target_y = self.calibrator.calibrate(base_x, base_y, screen_w, screen_h)
+                        self._last_commanded_pos = (base_x, base_y)
+                        if base_x != target_x or base_y != target_y:
+                            cal_info = f" [calibrated from ({base_x},{base_y}) with active offset dx={self.calibrator.offset_x:+.1f}, dy={self.calibrator.offset_y:+.1f}]"
                         u32.SetCursorPos(target_x, target_y)
                         time.sleep(0.05)  # Allow Windows to deliver WM_MOUSEMOVE and hover/focus
                     else:
@@ -1490,7 +1630,7 @@ class AudioLoop:
                     return target_x, target_y
 
                 cx, cy = await asyncio.to_thread(_do_click)
-                return {"result": f"Clicked ({cx},{cy}) {clicks}x with {button}. Inspect screen and continue if incomplete."}
+                return {"result": f"Clicked ({cx},{cy}){cal_info} {clicks}x with {button}. Inspect screen and continue if incomplete."}
 
             elif name == "mouse_scroll":
                 clicks = int(args.get("clicks", 0))
@@ -1500,7 +1640,8 @@ class AudioLoop:
                     self._ensure_input_desktop()
                     pyautogui.FAILSAFE = False
                     if raw_x is not None and raw_y is not None:
-                        ctypes.windll.user32.SetCursorPos(int(raw_x), int(raw_y))
+                        cal_x, cal_y = self.calibrator.calibrate(int(raw_x), int(raw_y), screen_w, screen_h)
+                        ctypes.windll.user32.SetCursorPos(cal_x, cal_y)
                         time.sleep(0.05)
                     pyautogui.scroll(scroll_amount)
                 await asyncio.to_thread(_do_scroll)
@@ -1509,27 +1650,34 @@ class AudioLoop:
             elif name == "mouse_drag":
                 sx, sy = int(args.get("start_x", 0)), int(args.get("start_y", 0))
                 ex, ey = int(args.get("end_x", 0)), int(args.get("end_y", 0))
+                cal_sx, cal_sy = self.calibrator.calibrate(sx, sy, screen_w, screen_h)
+                cal_ex, cal_ey = self.calibrator.calibrate(ex, ey, screen_w, screen_h)
                 button = args.get("button", "left")
                 def _do_drag():
                     self._ensure_input_desktop()
                     pyautogui.FAILSAFE = False
-                    ctypes.windll.user32.SetCursorPos(sx, sy)
+                    ctypes.windll.user32.SetCursorPos(cal_sx, cal_sy)
                     time.sleep(0.05)
-                    pyautogui.dragTo(ex, ey, button=button, duration=0.4)
+                    pyautogui.dragTo(cal_ex, cal_ey, button=button, duration=0.4)
                 await asyncio.to_thread(_do_drag)
-                return {"result": f"Dragged from ({sx},{sy}) to ({ex},{ey})."}
+                return {"result": f"Dragged from ({cal_sx},{cal_sy}) to ({cal_ex},{cal_ey})."}
 
             elif name == "mouse_move":
                 raw_x = args.get("x")
                 raw_y = args.get("y")
+                cal_info = ""
                 if raw_x is not None and raw_y is not None:
                     fx, fy = float(raw_x), float(raw_y)
                     # 0.0 to 1.0 normalized decimals (e.g. 0.5, 0.25)
                     if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (not fx.is_integer() or not fy.is_integer()):
-                        target_x = int(fx * screen_w)
-                        target_y = int(fy * screen_h)
+                        base_x = int(fx * screen_w)
+                        base_y = int(fy * screen_h)
                     else:
-                        target_x, target_y = int(fx), int(fy)
+                        base_x, base_y = int(fx), int(fy)
+                    target_x, target_y = self.calibrator.calibrate(base_x, base_y, screen_w, screen_h)
+                    self._last_commanded_pos = (base_x, base_y)
+                    if base_x != target_x or base_y != target_y:
+                        cal_info = f" [calibrated from ({base_x},{base_y}) with active offset dx={self.calibrator.offset_x:+.1f}, dy={self.calibrator.offset_y:+.1f}]"
                 else:
                     target_x, target_y = 0, 0
 
@@ -1538,7 +1686,7 @@ class AudioLoop:
                     pyautogui.FAILSAFE = False
                     ctypes.windll.user32.SetCursorPos(target_x, target_y)
                 await asyncio.to_thread(_do_move)
-                return {"result": f"Moved mouse to ({target_x},{target_y})."}
+                return {"result": f"Moved mouse to ({target_x},{target_y}){cal_info}."}
 
             elif name == "type_text":
                 text = str(args.get("text", ""))
@@ -1741,6 +1889,8 @@ class AudioLoop:
                 click = bool(args.get("click", False))
                 button = str(args.get("button", "left")).lower() if args.get("button") else "left"
                 clicks = int(args.get("clicks", 1))
+                estimated_x = args.get("estimated_x")
+                estimated_y = args.get("estimated_y")
 
                 if not query:
                     return {"result": "Error: 'query' parameter is required for find_text_on_screen."}
@@ -1759,9 +1909,23 @@ class AudioLoop:
                 except Exception as ocr_err:
                     return {"result": f"OCR recognition error: {ocr_err}"}
 
+                est_x, est_y = None, None
+                explicit_estimate = False
+                if estimated_x is not None and estimated_y is not None:
+                    try:
+                        fx, fy = float(estimated_x), float(estimated_y)
+                        if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (not fx.is_integer() or not fy.is_integer()):
+                            est_x, est_y = int(fx * screen_w), int(fy * screen_h)
+                        else:
+                            est_x, est_y = int(fx), int(fy)
+                        explicit_estimate = True
+                    except (ValueError, TypeError):
+                        pass
+                elif self._last_commanded_pos is not None:
+                    est_x, est_y = self._last_commanded_pos
+
                 q = query.lower()
-                best_match = None
-                best_score = 0.0
+                candidates = []
 
                 # 1. Check exact/substring match in recognized lines
                 for line in ocr_res.lines:
@@ -1777,16 +1941,24 @@ class AudioLoop:
                         max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in matching_words)
                         cx = int((min_x + max_x) / 2)
                         cy = int((min_y + max_y) / 2)
-                        best_match = (line.text, cx, cy, int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
-                        best_score = 1.0
-                        break
+                        candidates.append({
+                            "text": line.text,
+                            "cx": cx,
+                            "cy": cy,
+                            "bx": int(min_x),
+                            "by": int(min_y),
+                            "bw": int(max_x - min_x),
+                            "bh": int(max_y - min_y),
+                            "score": 1.0,
+                            "exact": True,
+                        })
 
                 # 2. Fuzzy match across lines/words if no direct match
-                if not best_match:
+                if not candidates:
                     import difflib
                     for line in ocr_res.lines:
                         sim = difflib.SequenceMatcher(None, q, line.text.lower()).ratio()
-                        if sim > 0.55 and sim > best_score:
+                        if sim > 0.55:
                             words = line.words
                             min_x = min(w.bounding_rect.x for w in words)
                             min_y = min(w.bounding_rect.y for w in words)
@@ -1794,18 +1966,63 @@ class AudioLoop:
                             max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in words)
                             cx = int((min_x + max_x) / 2)
                             cy = int((min_y + max_y) / 2)
-                            best_match = (line.text, cx, cy, int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
-                            best_score = sim
+                            candidates.append({
+                                "text": line.text,
+                                "cx": cx,
+                                "cy": cy,
+                                "bx": int(min_x),
+                                "by": int(min_y),
+                                "bw": int(max_x - min_x),
+                                "bh": int(max_y - min_y),
+                                "score": sim,
+                                "exact": False,
+                            })
                         for w in line.words:
                             w_sim = difflib.SequenceMatcher(None, q, w.text.lower()).ratio()
-                            if w_sim > 0.7 and w_sim > best_score:
+                            if w_sim > 0.7:
                                 cx = int(w.bounding_rect.x + w.bounding_rect.width / 2)
                                 cy = int(w.bounding_rect.y + w.bounding_rect.height / 2)
-                                best_match = (w.text, cx, cy, int(w.bounding_rect.x), int(w.bounding_rect.y), int(w.bounding_rect.width), int(w.bounding_rect.height))
-                                best_score = w_sim
+                                candidates.append({
+                                    "text": w.text,
+                                    "cx": cx,
+                                    "cy": cy,
+                                    "bx": int(w.bounding_rect.x),
+                                    "by": int(w.bounding_rect.y),
+                                    "bw": int(w.bounding_rect.width),
+                                    "bh": int(w.bounding_rect.height),
+                                    "score": w_sim,
+                                    "exact": False,
+                                })
 
-                if best_match:
-                    matched_text, cx, cy, bx, by, bw, bh = best_match
+                if candidates:
+                    # Select best candidate: if estimated position is present, pick closest match
+                    if est_x is not None and est_y is not None:
+                        exact_candidates = [c for c in candidates if c["exact"]]
+                        pool = exact_candidates if exact_candidates else candidates
+                        best = min(pool, key=lambda c: math.hypot(c["cx"] - est_x, c["cy"] - est_y))
+                    else:
+                        best = max(candidates, key=lambda c: c["score"])
+
+                    cx, cy = best["cx"], best["cy"]
+                    bx, by, bw, bh = best["bx"], best["by"], best["bw"], best["bh"]
+                    matched_text = best["text"]
+
+                    # Perform coordinate learning if estimated coordinates are available
+                    learn_msg = ""
+                    if est_x is not None and est_y is not None:
+                        dist = math.hypot(cx - est_x, cy - est_y)
+                        max_dist = 500 if explicit_estimate else 300
+                        if dist <= max_dist:
+                            obs = self.calibrator.record_observation(est_x, est_y, cx, cy, label=matched_text)
+                            if obs:
+                                learn_msg = (
+                                    f" [Learned offset: dx={obs['dx']:+.1f}, dy={obs['dy']:+.1f} "
+                                    f"from estimated ({est_x},{est_y}). Active calibration: "
+                                    f"dx={self.calibrator.offset_x:+.1f}, dy={self.calibrator.offset_y:+.1f} "
+                                    f"across {self.calibrator.sample_count} sample(s)]"
+                                )
+                                self._last_commanded_pos = None
+
                     if click:
                         def _do_ocr_click():
                             self._ensure_input_desktop()
@@ -1826,12 +2043,14 @@ class AudioLoop:
                                 if clicks > 1 and i < clicks - 1:
                                     time.sleep(0.08)
                         await asyncio.to_thread(_do_ocr_click)
+                        self._last_commanded_pos = (cx, cy)
                         return {
-                            "result": f"Found text '{matched_text}' at ({cx}, {cy}) and clicked it ({clicks}x {button}). Bounds: [x={bx}, y={by}, w={bw}, h={bh}]. Inspect screen to confirm action."
+                            "result": f"Found text '{matched_text}' at ({cx}, {cy}){learn_msg} and clicked it ({clicks}x {button}). Bounds: [x={bx}, y={by}, w={bw}, h={bh}]. Inspect screen to confirm action."
                         }
                     else:
+                        cal_hint = f" Call mouse_click(x={est_x if est_x is not None else cx}, y={est_y if est_y is not None else cy}) to auto-calibrate and click it."
                         return {
-                            "result": f"Found text '{matched_text}' at center ({cx}, {cy}) [bounds: x={bx}, y={by}, w={bw}, h={bh}]. Call mouse_click(x={cx}, y={cy}) to click it."
+                            "result": f"Found text '{matched_text}' at center ({cx}, {cy}){learn_msg} [bounds: x={bx}, y={by}, w={bw}, h={bh}].{cal_hint}"
                         }
 
                 snippets = [l.text for l in ocr_res.lines[:8] if l.text.strip()]
@@ -1845,6 +2064,7 @@ class AudioLoop:
                 width = int(args.get("width", 300))
                 height = int(args.get("height", 300))
                 zoom_factor = float(args.get("zoom_factor", 2.0))
+                query = str(args.get("query", "")).strip().lower() if args.get("query") else None
 
                 if raw_x is None or raw_y is None:
                     return {"result": "Error: 'x' and 'y' coordinates are required for crop_and_zoom."}
@@ -1872,6 +2092,7 @@ class AudioLoop:
                 zoomed = crop.resize((new_w, new_h), PIL.Image.Resampling.LANCZOS)
 
                 detected_text = []
+                matched_query_loc = None
                 try:
                     import winocr
                     z_ocr = await winocr.recognize_pil(zoomed, "en")
@@ -1880,12 +2101,39 @@ class AudioLoop:
                             gw_x = int(left + (word.bounding_rect.x / zoom_factor) + (word.bounding_rect.width / (2 * zoom_factor)))
                             gw_y = int(top + (word.bounding_rect.y / zoom_factor) + (word.bounding_rect.height / (2 * zoom_factor)))
                             detected_text.append(f"'{word.text}' at ({gw_x}, {gw_y})")
+                            if query and query in word.text.lower() and not matched_query_loc:
+                                matched_query_loc = (word.text, gw_x, gw_y)
                 except Exception:
                     pass
 
+                learn_msg = ""
+                if query and matched_query_loc:
+                    m_word, m_x, m_y = matched_query_loc
+                    obs = self.calibrator.record_observation(cx, cy, m_x, m_y, label=f"zoom:{m_word}")
+                    if obs:
+                        learn_msg = (
+                            f" [Learned offset: dx={obs['dx']:+.1f}, dy={obs['dy']:+.1f} "
+                            f"from ({cx},{cy}) -> ({m_x},{m_y}). Active calibration: dx={self.calibrator.offset_x:+.1f}, "
+                            f"dy={self.calibrator.offset_y:+.1f} across {self.calibrator.sample_count} sample(s)]"
+                        )
+
                 text_summary = ", ".join(detected_text[:20]) if detected_text else "(No clear text recognized in zoom region)"
                 return {
-                    "result": f"Zoomed in on ({cx}, {cy}) [{width}x{height} region, {zoom_factor}x magnification]. Screen bounds: [{left},{top}] to [{right},{bottom}]. Detected text items: {text_summary}."
+                    "result": f"Zoomed in on ({cx}, {cy}){learn_msg} [{width}x{height} region, {zoom_factor}x magnification]. Screen bounds: [{left},{top}] to [{right},{bottom}]. Detected text items: {text_summary}."
+                }
+
+            elif name == "get_visual_calibration":
+                do_reset = bool(args.get("reset", False))
+                if do_reset:
+                    self.calibrator.reset()
+                    return {"result": "Visual coordinate calibration successfully reset to dx=0.0, dy=0.0."}
+                return {
+                    "result": (
+                        f"Active Visual Calibration: offset_x={self.calibrator.offset_x:+.2f}, "
+                        f"offset_y={self.calibrator.offset_y:+.2f} "
+                        f"({self.calibrator.sample_count} total sample(s)). "
+                        f"Recent observation history: {self.calibrator.history[-5:]}"
+                    )
                 }
 
             # ── Memory & Persona ───────────────────────────────────────────────────────
@@ -2215,6 +2463,9 @@ class AudioLoop:
                         print(f"\n[Proxy Error]: {data.get('data', 'Unknown error')}", flush=True)
 
                     elif data["type"] == "function_call":
+                        if self._ws_ai_started:
+                            print("", flush=True)
+                            self._ws_ai_started = False
                         # Mark that this turn is active before dispatching
                         self._auto_last_had_tools = True
                         self._auto_idle_turns = 0

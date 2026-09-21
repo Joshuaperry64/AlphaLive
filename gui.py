@@ -108,17 +108,59 @@ FONT_UI   = "Segoe UI"
 
 
 def safe_set_clipboard(text: str) -> bool:
-    """Safely set clipboard text with retry and PowerShell fallback to avoid COM 0x800401d0 locks."""
+    """Safely set clipboard text using native Win32 API to completely avoid Qt/OLE 0x800401d0 locks."""
     if not text:
         return False
-    for _ in range(5):
+    if sys.platform == "win32":
         try:
-            cb = QApplication.clipboard()
-            if cb:
-                cb.setText(text)
-                return True
+            import ctypes
+            u32 = ctypes.windll.user32
+            k32 = ctypes.windll.kernel32
+
+            GMEM_MOVEABLE = 0x0002
+            CF_UNICODETEXT = 13
+
+            k32.GlobalAlloc.restype = ctypes.c_void_p
+            k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+            k32.GlobalLock.restype = ctypes.c_void_p
+            k32.GlobalLock.argtypes = [ctypes.c_void_p]
+            k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+            u32.SetClipboardData.restype = ctypes.c_void_p
+            u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+            u32.OpenClipboard.restype = ctypes.c_bool
+            u32.EmptyClipboard.restype = ctypes.c_bool
+            u32.CloseClipboard.restype = ctypes.c_bool
+
+            opened = False
+            for _ in range(8):
+                if u32.OpenClipboard(None):
+                    opened = True
+                    break
+                time.sleep(0.03)
+
+            if opened:
+                try:
+                    u32.EmptyClipboard()
+                    encoded = text.encode("utf-16-le") + b"\x00\x00"
+                    h_mem = k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                    if h_mem:
+                        p_mem = k32.GlobalLock(h_mem)
+                        if p_mem:
+                            ctypes.memmove(p_mem, encoded, len(encoded))
+                            k32.GlobalUnlock(h_mem)
+                            if u32.SetClipboardData(CF_UNICODETEXT, h_mem):
+                                return True
+                            else:
+                                k32.GlobalFree(h_mem)
+                        else:
+                            k32.GlobalFree(h_mem)
+                finally:
+                    u32.CloseClipboard()
         except Exception:
-            time.sleep(0.05)
+            pass
+
+    # Fallback to PowerShell
     try:
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.run(
@@ -127,7 +169,17 @@ def safe_set_clipboard(text: str) -> bool:
         )
         return True
     except Exception:
-        return False
+        pass
+
+    # Last resort fallback to Qt clipboard
+    try:
+        cb = QApplication.clipboard()
+        if cb:
+            cb.setText(text)
+            return True
+    except Exception:
+        pass
+    return False
 
 DEFAULT_CONFIG = {
     "Global": {
@@ -491,24 +543,29 @@ class MatrixRain(QWidget):
 
 
 class ScanlineOverlay(QWidget):
-    """CRT scanlines + moving sweep glow."""
+    """CRT scanlines + moving sweep glow (disabled by default for clean text readability)."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, enabled: bool = False):
         super().__init__(parent)
+        self.enabled = enabled
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self._off = 0
         self._static_cache = None
         self._last_size = QSize()
-        t = QTimer(self)
-        t.timeout.connect(self._tick)
-        t.start(45)
+        if self.enabled:
+            t = QTimer(self)
+            t.timeout.connect(self._tick)
+            t.start(45)
 
     def _tick(self):
-        self._off = (self._off + 4) % max(1, self.height())
-        self.update()
+        if self.enabled:
+            self._off = (self._off + 4) % max(1, self.height())
+            self.update()
 
     def paintEvent(self, e):
+        if not self.enabled:
+            return
         w, h = self.width(), self.height()
         current_size = QSize(w, h)
         if self._static_cache is None or self._last_size != current_size:

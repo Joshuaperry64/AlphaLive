@@ -65,7 +65,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if response.data:
                                     b64_audio = base64.b64encode(response.data).decode("utf-8")
                                     await send_json({"type": "audio", "data": b64_audio})
-                                    continue
 
                                 sc = getattr(response, "server_content", None)
                                 if sc:

@@ -336,6 +336,35 @@ tools = [
                 ),
             ),
             types.FunctionDeclaration(
+                name="find_text_on_screen",
+                description="Search for any visible button label, word, or text phrase on the entire screen using high-speed native Windows OCR. Returns the exact (x, y) center pixel coordinates of the match. Optionally clicks the text immediately.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["query"],
+                    properties={
+                        "query": genai.types.Schema(type=genai.types.Type.STRING, description="The text, word, or button label to find on the screen (e.g., 'Calibrate', 'Save', 'Submit', 'Cancel', 'Sign In')."),
+                        "click": genai.types.Schema(type=genai.types.Type.BOOLEAN, description="If True, automatically click the center of the found text immediately. Default is False."),
+                        "button": genai.types.Schema(type=genai.types.Type.STRING, description="Mouse button to use if click is True: 'left', 'right', or 'middle'. Default is 'left'."),
+                        "clicks": genai.types.Schema(type=genai.types.Type.INTEGER, description="Number of clicks if click is True (1 for single click, 2 for double click). Default is 1."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="crop_and_zoom",
+                description="Zoom in on a specific region of the screen for high-resolution inspection. Runs deep OCR on the magnified crop to read tiny text, fine details, or small buttons that might be hard to see in the full-screen view.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["x", "y"],
+                    properties={
+                        "x": genai.types.Schema(type=genai.types.Type.NUMBER, description="Center X screen coordinate of the region to inspect."),
+                        "y": genai.types.Schema(type=genai.types.Type.NUMBER, description="Center Y screen coordinate of the region to inspect."),
+                        "width": genai.types.Schema(type=genai.types.Type.INTEGER, description="Width of the area in pixels to crop (default 300)."),
+                        "height": genai.types.Schema(type=genai.types.Type.INTEGER, description="Height of the area in pixels to crop (default 300)."),
+                        "zoom_factor": genai.types.Schema(type=genai.types.Type.NUMBER, description="Magnification multiplier, e.g. 2.0 for 2x zoom (default 2.0)."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
                 name="write_diary_entry",
                 description="Log a diary entry, session summary, or notable event to episodic memory.",
                 parameters=genai.types.Schema(
@@ -656,9 +685,10 @@ When given an actionable task (e.g., browsing to a website, filling a form, clic
 1. Execute the preliminary step (e.g., browser_open_url or focus_window).
 2. DO NOT declare the task finished or ask the user for confirmation after a partial step.
 3. Use delay_execution (1-3 seconds) to let pages render if needed.
-4. On every subsequent turn, inspect the updated screen capture (referencing your red cursor marker) and execute the next physical step.
-5. Continue executing actions sequentially until the entire objective is visually confirmed.
-6. Call the 'task_complete' tool once and only once the final target state has been achieved.""")],
+4. When looking for buttons, tabs, links, or text to click, prioritize 'find_text_on_screen(query="...", click=True)' for 100% pixel-perfect clicks instead of guessing coordinates. Use 'crop_and_zoom' if you need to read small fine print.
+5. On every subsequent turn, inspect the updated screen capture (referencing your red cursor marker) and execute the next physical step.
+6. Continue executing actions sequentially until the entire objective is visually confirmed.
+7. Call the 'task_complete' tool once and only once the final target state has been achieved.""")],
         role="user"
     )
 )
@@ -865,8 +895,8 @@ class AudioLoop:
             except Exception:
                 pass
 
-    def _grab_screen_image(self):
-        """Grab a screenshot safely, falling back across methods to never crash."""
+    def _grab_raw_screen_image(self):
+        """Grab a pristine, unscaled full-resolution screenshot for OCR and precise coordinate analysis."""
         self._ensure_input_desktop()
         img = None
         try:
@@ -885,9 +915,15 @@ class AudioLoop:
             except Exception:
                 pass
 
-        if img is None:
+        return img
+
+    def _grab_screen_image(self):
+        """Grab a screenshot safely, falling back across methods to never crash."""
+        raw_img = self._grab_raw_screen_image()
+        if raw_img is None:
             return None
 
+        img = raw_img.copy()
         try:
             mx, my = pyautogui.position()
             draw = PIL.ImageDraw.Draw(img)
@@ -1424,15 +1460,10 @@ class AudioLoop:
 
                     if raw_x is not None and raw_y is not None:
                         fx, fy = float(raw_x), float(raw_y)
-                        # Case A: 0.0 to 1.0 normalized
-                        if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
+                        # 0.0 to 1.0 normalized decimals (e.g. 0.5, 0.25)
+                        if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (not fx.is_integer() or not fy.is_integer()):
                             target_x = int(fx * screen_w)
                             target_y = int(fy * screen_h)
-                        # Case B: 0 to 1000 normalized
-                        elif screen_w > 1000 and 0 <= fx <= 1000 and 0 <= fy <= 1000 and fx.is_integer() and fy.is_integer():
-                            # Only scale if requested coords are clearly normalized ratios
-                            target_x = int((fx / 1000.0) * screen_w)
-                            target_y = int((fy / 1000.0) * screen_h)
                         else:
                             target_x, target_y = int(fx), int(fy)
                         u32.SetCursorPos(target_x, target_y)
@@ -1493,14 +1524,10 @@ class AudioLoop:
                 raw_y = args.get("y")
                 if raw_x is not None and raw_y is not None:
                     fx, fy = float(raw_x), float(raw_y)
-                    # Case A: 0.0 to 1.0 normalized
-                    if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0:
+                    # 0.0 to 1.0 normalized decimals (e.g. 0.5, 0.25)
+                    if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (not fx.is_integer() or not fy.is_integer()):
                         target_x = int(fx * screen_w)
                         target_y = int(fy * screen_h)
-                    # Case B: 0 to 1000 normalized
-                    elif screen_w > 1000 and 0 <= fx <= 1000 and 0 <= fy <= 1000 and fx.is_integer() and fy.is_integer():
-                        target_x = int((fx / 1000.0) * screen_w)
-                        target_y = int((fy / 1000.0) * screen_h)
                     else:
                         target_x, target_y = int(fx), int(fy)
                 else:
@@ -1708,6 +1735,158 @@ class AudioLoop:
                 summary = str(args.get("summary", ""))
                 print(f"\n[Task Complete] {summary}\n", flush=True)
                 return {"result": f"Objective verified complete: '{summary}'. You may now announce your final results to the user."}
+
+            elif name == "find_text_on_screen":
+                query = str(args.get("query", "")).strip()
+                click = bool(args.get("click", False))
+                button = str(args.get("button", "left")).lower() if args.get("button") else "left"
+                clicks = int(args.get("clicks", 1))
+
+                if not query:
+                    return {"result": "Error: 'query' parameter is required for find_text_on_screen."}
+
+                try:
+                    import winocr
+                except ImportError:
+                    return {"result": "Error: 'winocr' is not available. Please install winocr to enable native Windows OCR."}
+
+                raw_img = self._grab_raw_screen_image()
+                if raw_img is None:
+                    return {"result": "Error: Failed to capture desktop screen."}
+
+                try:
+                    ocr_res = await winocr.recognize_pil(raw_img, "en")
+                except Exception as ocr_err:
+                    return {"result": f"OCR recognition error: {ocr_err}"}
+
+                q = query.lower()
+                best_match = None
+                best_score = 0.0
+
+                # 1. Check exact/substring match in recognized lines
+                for line in ocr_res.lines:
+                    line_txt = line.text.lower()
+                    if q in line_txt:
+                        q_words = [qw for qw in q.split() if qw]
+                        matching_words = [w for w in line.words if any(qw in w.text.lower() for qw in q_words)]
+                        if not matching_words:
+                            matching_words = line.words
+                        min_x = min(w.bounding_rect.x for w in matching_words)
+                        min_y = min(w.bounding_rect.y for w in matching_words)
+                        max_x = max(w.bounding_rect.x + w.bounding_rect.width for w in matching_words)
+                        max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in matching_words)
+                        cx = int((min_x + max_x) / 2)
+                        cy = int((min_y + max_y) / 2)
+                        best_match = (line.text, cx, cy, int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
+                        best_score = 1.0
+                        break
+
+                # 2. Fuzzy match across lines/words if no direct match
+                if not best_match:
+                    import difflib
+                    for line in ocr_res.lines:
+                        sim = difflib.SequenceMatcher(None, q, line.text.lower()).ratio()
+                        if sim > 0.55 and sim > best_score:
+                            words = line.words
+                            min_x = min(w.bounding_rect.x for w in words)
+                            min_y = min(w.bounding_rect.y for w in words)
+                            max_x = max(w.bounding_rect.x + w.bounding_rect.width for w in words)
+                            max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in words)
+                            cx = int((min_x + max_x) / 2)
+                            cy = int((min_y + max_y) / 2)
+                            best_match = (line.text, cx, cy, int(min_x), int(min_y), int(max_x - min_x), int(max_y - min_y))
+                            best_score = sim
+                        for w in line.words:
+                            w_sim = difflib.SequenceMatcher(None, q, w.text.lower()).ratio()
+                            if w_sim > 0.7 and w_sim > best_score:
+                                cx = int(w.bounding_rect.x + w.bounding_rect.width / 2)
+                                cy = int(w.bounding_rect.y + w.bounding_rect.height / 2)
+                                best_match = (w.text, cx, cy, int(w.bounding_rect.x), int(w.bounding_rect.y), int(w.bounding_rect.width), int(w.bounding_rect.height))
+                                best_score = w_sim
+
+                if best_match:
+                    matched_text, cx, cy, bx, by, bw, bh = best_match
+                    if click:
+                        def _do_ocr_click():
+                            self._ensure_input_desktop()
+                            pyautogui.FAILSAFE = False
+                            u32 = ctypes.windll.user32
+                            u32.SetCursorPos(cx, cy)
+                            time.sleep(0.05)
+                            if button == "right":
+                                d_flag, u_flag = 0x0008, 0x0010
+                            elif button == "middle":
+                                d_flag, u_flag = 0x0020, 0x0040
+                            else:
+                                d_flag, u_flag = 0x0002, 0x0004
+                            for i in range(clicks):
+                                u32.mouse_event(d_flag, 0, 0, 0, 0)
+                                time.sleep(0.06)
+                                u32.mouse_event(u_flag, 0, 0, 0, 0)
+                                if clicks > 1 and i < clicks - 1:
+                                    time.sleep(0.08)
+                        await asyncio.to_thread(_do_ocr_click)
+                        return {
+                            "result": f"Found text '{matched_text}' at ({cx}, {cy}) and clicked it ({clicks}x {button}). Bounds: [x={bx}, y={by}, w={bw}, h={bh}]. Inspect screen to confirm action."
+                        }
+                    else:
+                        return {
+                            "result": f"Found text '{matched_text}' at center ({cx}, {cy}) [bounds: x={bx}, y={by}, w={bw}, h={bh}]. Call mouse_click(x={cx}, y={cy}) to click it."
+                        }
+
+                snippets = [l.text for l in ocr_res.lines[:8] if l.text.strip()]
+                return {
+                    "result": f"Text '{query}' was NOT found on screen. Visible text on screen: {snippets}. Try scrolling, focusing the window, or using crop_and_zoom."
+                }
+
+            elif name == "crop_and_zoom":
+                raw_x = args.get("x")
+                raw_y = args.get("y")
+                width = int(args.get("width", 300))
+                height = int(args.get("height", 300))
+                zoom_factor = float(args.get("zoom_factor", 2.0))
+
+                if raw_x is None or raw_y is None:
+                    return {"result": "Error: 'x' and 'y' coordinates are required for crop_and_zoom."}
+
+                fx, fy = float(raw_x), float(raw_y)
+                # 0.0 to 1.0 normalized decimals (e.g. 0.5, 0.25)
+                if 0.0 <= fx <= 1.0 and 0.0 <= fy <= 1.0 and (not fx.is_integer() or not fy.is_integer()):
+                    cx, cy = int(fx * screen_w), int(fy * screen_h)
+                else:
+                    cx, cy = int(fx), int(fy)
+
+                raw_img = self._grab_raw_screen_image()
+                if raw_img is None:
+                    return {"result": "Error: Failed to capture screen for crop_and_zoom."}
+
+                sw, sh = raw_img.size
+                left = max(0, int(cx - width / 2))
+                top = max(0, int(cy - height / 2))
+                right = min(sw, int(cx + width / 2))
+                bottom = min(sh, int(cy + height / 2))
+
+                crop = raw_img.crop((left, top, right, bottom))
+                new_w = max(1, int(crop.width * zoom_factor))
+                new_h = max(1, int(crop.height * zoom_factor))
+                zoomed = crop.resize((new_w, new_h), PIL.Image.Resampling.LANCZOS)
+
+                detected_text = []
+                try:
+                    import winocr
+                    z_ocr = await winocr.recognize_pil(zoomed, "en")
+                    for line in z_ocr.lines:
+                        for word in line.words:
+                            gw_x = int(left + (word.bounding_rect.x / zoom_factor) + (word.bounding_rect.width / (2 * zoom_factor)))
+                            gw_y = int(top + (word.bounding_rect.y / zoom_factor) + (word.bounding_rect.height / (2 * zoom_factor)))
+                            detected_text.append(f"'{word.text}' at ({gw_x}, {gw_y})")
+                except Exception:
+                    pass
+
+                text_summary = ", ".join(detected_text[:20]) if detected_text else "(No clear text recognized in zoom region)"
+                return {
+                    "result": f"Zoomed in on ({cx}, {cy}) [{width}x{height} region, {zoom_factor}x magnification]. Screen bounds: [{left},{top}] to [{right},{bottom}]. Detected text items: {text_summary}."
+                }
 
             # ── Memory & Persona ───────────────────────────────────────────────────────
             elif name == "memorize_fact":

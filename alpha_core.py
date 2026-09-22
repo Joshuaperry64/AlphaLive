@@ -1608,8 +1608,7 @@ class AudioLoop:
                     self._vllm_history.append({"role": "user",      "content": user_text})
                     self._vllm_history.append({"role": "assistant",  "content": clean_response})
 
-                    with open(self.log_file, "a", encoding="utf-8") as f:
-                        f.write(f"\n[You (vLLM)]: {user_text}\n[Alpha (vLLM)]: {clean_response}\n")
+                    await self._async_log(f"\n[You (vLLM)]: {user_text}\n[Alpha (vLLM)]: {clean_response}\n")
 
                     if self.session is not None:
                         await self.session.send_realtime_input(text=f"[RELAY] {clean_response}")

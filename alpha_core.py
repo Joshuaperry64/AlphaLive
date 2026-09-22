@@ -141,6 +141,7 @@ from google import genai
 from google.genai import types
 
 import memory_manager
+import character_manager
 
 
 from dotenv import load_dotenv
@@ -604,6 +605,24 @@ voice_val = engine_cfg.get("Voice", "Leda")
 trigger_val = int(engine_cfg.get("TriggerTokens", 104857))
 target_val = int(engine_cfg.get("TargetTokens", 52428))
 
+# Fetch active character persona
+cm = character_manager.CharacterManager()
+active_char = cm.get_active_character()
+
+char_persona = ""
+if active_char:
+    char_persona = f"""
+[CHARACTER ROLEPLAY DIRECTIVE]
+You are now roleplaying as: {active_char['name']}.
+Gender: {active_char['gender']}
+Relation to User: {active_char['relation']}
+Personality: {active_char['personality']}
+Response Style: {active_char['response_style']}
+
+You MUST fully adopt this persona in all your responses.
+Speak, act, and think exactly as {active_char['name']} would based on the provided personality and response style. Do not break character. Do not refer to yourself as an AI unless it is part of this specific character's identity.
+"""
+
 CONFIG = types.LiveConnectConfig(
     response_modalities=["TEXT"] if engine_cfg.get("VoiceOutput", "enabled").lower() in ("disabled", "false", "off") or engine_cfg.get("AudioMode", "half").lower() == "muted" else ["AUDIO"],
     input_audio_transcription=types.AudioTranscriptionConfig(),
@@ -623,7 +642,7 @@ CONFIG = types.LiveConnectConfig(
     ),
     tools=None if VLLM_MODE else tools,
     system_instruction=types.Content(
-        parts=[types.Part.from_text(text="""Respond laid back, chill, direct, you can use profanity and curse words. 
+        parts=[types.Part.from_text(text=char_persona + """Respond laid back, chill, direct, you can use profanity and curse words.
 [VISION NOTE: The exact current position of your mouse cursor is explicitly marked on your screenshots by a small red crosshair with a solid red dot in the center. Use this red dot to orient yourself and know exactly where you are pointing!]
 
 **WITH EVERY NEW RESPONSE, FULLY ANALYZE ALL SENTENCES, WORDS, AND PHRASES IN THIS PROMPT. STRICTLY FOLLOW ALL ASPECTS OF THIS PROMPT.

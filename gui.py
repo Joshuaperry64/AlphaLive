@@ -2406,7 +2406,165 @@ class ModalTab(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TAB: CHARACTERS
+# ─────────────────────────────────────────────────────────────────────────────
+import character_manager
+
+class CharactersTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.cm = character_manager.CharacterManager()
+        self.current_char = None
+
+        root = QHBoxLayout(self)
+        root.setContentsMargins(15, 15, 15, 15)
+        root.setSpacing(15)
+
+        # Left Panel: List of Characters
+        left_panel = QFrame()
+        left_panel.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 8px;")
+        left_layout = QVBoxLayout(left_panel)
+
+        title = QLabel("CHARACTERS")
+        title.setStyleSheet(f"color: {C['text_bright']}; font-weight: bold; font-size: 14px;")
+        left_layout.addWidget(title)
+
+        self.char_list = QListWidget()
+        self.char_list.setStyleSheet(f"""
+            QListWidget {{ background: {C['bg_base']}; border: 1px solid {C['border']}; color: {C['text_bright']}; border-radius: 4px; }}
+            QListWidget::item {{ padding: 8px; border-bottom: 1px solid {C['bg_dark']}; }}
+            QListWidget::item:selected {{ background: {C['neon_blue']}33; border-left: 3px solid {C['neon_blue']}; }}
+        """)
+        self.char_list.itemClicked.connect(self._on_char_selected)
+        left_layout.addWidget(self.char_list)
+
+        btn_layout = QHBoxLayout()
+        self.btn_new = QPushButton("NEW")
+        self.btn_new.setStyleSheet(f"background: {C['bg_base']}; color: {C['neon_blue']}; border: 1px solid {C['neon_blue']}; padding: 6px;")
+        self.btn_new.clicked.connect(self._on_new_clicked)
+        self.btn_delete = QPushButton("DELETE")
+        self.btn_delete.setStyleSheet(f"background: {C['bg_base']}; color: {C['neon_pink']}; border: 1px solid {C['neon_pink']}; padding: 6px;")
+        self.btn_delete.clicked.connect(self._on_delete_clicked)
+        btn_layout.addWidget(self.btn_new)
+        btn_layout.addWidget(self.btn_delete)
+        left_layout.addLayout(btn_layout)
+
+        root.addWidget(left_panel, 1)
+
+        # Right Panel: Edit form
+        right_panel = QFrame()
+        right_panel.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 8px;")
+        right_layout = QVBoxLayout(right_panel)
+
+        form_layout = QFormLayout()
+        form_layout.setSpacing(10)
+
+        self.f_name = QLineEdit()
+        self.f_gender = QLineEdit()
+        self.f_relation = QLineEdit()
+        self.f_personality = QTextEdit()
+        self.f_personality.setMaximumHeight(80)
+        self.f_response = QTextEdit()
+        self.f_response.setMaximumHeight(80)
+
+        self.f_avatar = QLineEdit()
+
+        for w in (self.f_name, self.f_gender, self.f_relation, self.f_avatar):
+            w.setStyleSheet(f"background: {C['bg_base']}; color: {C['text_bright']}; border: 1px solid {C['border']}; padding: 4px;")
+
+        for w in (self.f_personality, self.f_response):
+            w.setStyleSheet(f"background: {C['bg_base']}; color: {C['text_bright']}; border: 1px solid {C['border']};")
+
+        form_layout.addRow("Name:", self.f_name)
+        form_layout.addRow("Gender:", self.f_gender)
+        form_layout.addRow("Relation:", self.f_relation)
+        form_layout.addRow("Personality:", self.f_personality)
+        form_layout.addRow("Response Style:", self.f_response)
+
+        avatar_layout = QHBoxLayout()
+        avatar_layout.addWidget(self.f_avatar)
+        self.btn_browse = QPushButton("...")
+        self.btn_browse.setStyleSheet(f"background: {C['bg_base']}; color: {C['neon_blue']}; border: 1px solid {C['neon_blue']};")
+        self.btn_browse.clicked.connect(self._on_browse_avatar)
+        avatar_layout.addWidget(self.btn_browse)
+        form_layout.addRow("Avatar path:", avatar_layout)
+
+        right_layout.addLayout(form_layout)
+
+        self.btn_save = QPushButton("SAVE CHARACTER")
+        self.btn_save.setStyleSheet(f"background: {C['neon_blue']}33; color: {C['neon_blue']}; border: 1px solid {C['neon_blue']}; padding: 10px; font-weight:bold;")
+        self.btn_save.clicked.connect(self._on_save_clicked)
+        right_layout.addStretch()
+        right_layout.addWidget(self.btn_save)
+
+        root.addWidget(right_panel, 2)
+
+        self._load_list()
+
+    def _load_list(self):
+        self.char_list.clear()
+        for c in self.cm.get_all_characters():
+            item = QListWidgetItem(c['name'])
+            item.setData(Qt.ItemDataRole.UserRole, c)
+            self.char_list.addItem(item)
+
+    def _on_char_selected(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        self.current_char = data['name']
+        self.f_name.setText(data['name'])
+        self.f_gender.setText(data.get('gender', ''))
+        self.f_relation.setText(data.get('relation', ''))
+        self.f_personality.setPlainText(data.get('personality', ''))
+        self.f_response.setPlainText(data.get('response_style', ''))
+        self.f_avatar.setText(data.get('avatar_path', ''))
+
+    def _on_new_clicked(self):
+        self.current_char = None
+        self.char_list.clearSelection()
+        self.f_name.clear()
+        self.f_gender.clear()
+        self.f_relation.clear()
+        self.f_personality.clear()
+        self.f_response.clear()
+        self.f_avatar.clear()
+
+    def _on_delete_clicked(self):
+        if self.current_char:
+            self.cm.delete_character(self.current_char)
+            self._load_list()
+            self._on_new_clicked()
+            # notify main window to refresh header
+            win = self.window()
+            if hasattr(win, '_hdr') and hasattr(win._hdr, 'refresh_chars'):
+                win._hdr.refresh_chars()
+
+    def _on_save_clicked(self):
+        name = self.f_name.text().strip()
+        if not name: return
+        self.cm.add_character(
+            name=name,
+            gender=self.f_gender.text().strip(),
+            relation=self.f_relation.text().strip(),
+            personality=self.f_personality.toPlainText().strip(),
+            response_style=self.f_response.toPlainText().strip(),
+            avatar_path=self.f_avatar.text().strip()
+        )
+        self._load_list()
+        # notify main window to refresh header
+        win = self.window()
+        if hasattr(win, '_hdr') and hasattr(win._hdr, 'refresh_chars'):
+            win._hdr.refresh_chars()
+
+    def _on_browse_avatar(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Select Avatar", "", "Images (*.png *.jpg *.jpeg)")
+        if path:
+            self.f_avatar.setText(path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TAB 7: MEMORY
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MemoryTab(QWidget):
@@ -2926,6 +3084,24 @@ class Header(QWidget):
         tr.addWidget(self._eng_lbl)
         tr.addSpacing(20)
 
+        import character_manager
+        self.cm = character_manager.CharacterManager()
+
+        char_layout = QHBoxLayout()
+        self.lbl_char = QLabel("Persona:")
+        self.lbl_char.setStyleSheet(f"color: {C['text_dim']}; font-size: 11px; font-weight: bold; background:transparent;")
+        self.char_combo = QComboBox()
+        self.char_combo.setStyleSheet(f"""
+            QComboBox {{ background: {C['bg_dark']}; color: {C['neon_blue']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px; font-weight: bold; font-size:10px;}}
+            QComboBox::drop-down {{ border: none; }}
+        """)
+        self.char_combo.currentTextChanged.connect(self._on_char_changed)
+
+        char_layout.addWidget(self.lbl_char)
+        char_layout.addWidget(self.char_combo)
+        tr.addLayout(char_layout)
+        tr.addSpacing(20)
+
         # Window controls
         self.btn_min = QPushButton("―")
         self.btn_min.setFixedSize(32, 24)
@@ -2974,6 +3150,29 @@ class Header(QWidget):
         ct.timeout.connect(self._tick_clock)
         ct.start(1000)
         self._tick_clock()
+        self.refresh_chars()
+
+    def refresh_chars(self):
+        self.char_combo.blockSignals(True)
+        self.char_combo.clear()
+        self.char_combo.addItem("None (Default)")
+
+        chars = self.cm.get_all_characters()
+        for c in chars:
+            self.char_combo.addItem(c['name'])
+
+        active = self.cm.get_active_character_name()
+        if active:
+            idx = self.char_combo.findText(active)
+            if idx >= 0:
+                self.char_combo.setCurrentIndex(idx)
+        self.char_combo.blockSignals(False)
+
+    def _on_char_changed(self, text):
+        if text == "None (Default)":
+            self.cm.set_active_character_name("")
+        else:
+            self.cm.set_active_character_name(text)
 
     def _tick_clock(self):
         self._clock.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
@@ -3070,11 +3269,13 @@ class MainWindow(QMainWindow):
         self._modal_db = ModalTab()
         self._memory   = MemoryTab()
         self._logs     = LogsTab()
+        self._characters = CharactersTab()
 
         self._tabs.addTab(self._dashboard, " OVERVIEW ")
         self._tabs.addTab(self._terminal, " TERMINAL ")
         self._tabs.addTab(self._monitor,  " MONITOR ")
         self._tabs.addTab(self._history,  " HISTORY ")
+        self._tabs.addTab(self._characters, " CHARACTERS ")
         self._tabs.addTab(self._config,   " CONFIG ")
         self._tabs.addTab(self._memory,   " MEMORY ")
         self._tabs.addTab(self._modal_db, " MODAL ")

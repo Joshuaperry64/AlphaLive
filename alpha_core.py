@@ -25,6 +25,59 @@ import keyboard
 
 import argparse
 
+
+def win32_get_clipboard() -> str:
+    """Safely get clipboard text using native Win32 API to avoid OLE locks."""
+    try:
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        CF_UNICODETEXT = 13
+        
+        u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        u32.OpenClipboard.restype = ctypes.c_bool
+        u32.GetClipboardData.argtypes = [ctypes.c_uint]
+        u32.GetClipboardData.restype = ctypes.c_void_p
+        u32.CloseClipboard.restype = ctypes.c_bool
+        k32.GlobalLock.argtypes = [ctypes.c_void_p]
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        k32.GlobalSize.argtypes = [ctypes.c_void_p]
+        k32.GlobalSize.restype = ctypes.c_size_t
+
+        import time
+        opened = False
+        for _ in range(8):
+            if u32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.05)
+        
+        if not opened:
+            return ""
+            
+        try:
+            handle = u32.GetClipboardData(CF_UNICODETEXT)
+            if not handle:
+                return ""
+                
+            locked = k32.GlobalLock(handle)
+            if not locked:
+                return ""
+                
+            try:
+                size = k32.GlobalSize(handle)
+                if size <= 0: return ""
+                buffer = ctypes.create_string_buffer(size)
+                ctypes.memmove(buffer, locked, size)
+                return buffer.raw.decode('utf-16-le').rstrip('\0')
+            finally:
+                k32.GlobalUnlock(handle)
+        finally:
+            u32.CloseClipboard()
+    except Exception:
+        pass
+    return ""
+
 def win32_set_clipboard(text: str) -> bool:
     """Safely set clipboard text using native Win32 API to completely avoid OLE 0x800401d0 locks."""
     if not text: return False
@@ -381,6 +434,34 @@ tools = [
                     required=["title_query"],
                     properties={
                         "title_query": genai.types.Schema(type=genai.types.Type.STRING, description="Partial title or process name of the window to bring to the front."),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="set_task_plan",
+                description="Initialize a multi-step task plan to display to the user in the GUI.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["goal", "steps"],
+                    properties={
+                        "goal": genai.types.Schema(type=genai.types.Type.STRING, description="The overall goal."),
+                        "steps": genai.types.Schema(
+                            type=genai.types.Type.ARRAY,
+                            items=genai.types.Schema(type=genai.types.Type.STRING),
+                            description="List of text descriptions for each step."
+                        ),
+                    },
+                ),
+            ),
+            types.FunctionDeclaration(
+                name="update_task_step",
+                description="Update the status of a specific step in the task plan.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    required=["step_index", "status"],
+                    properties={
+                        "step_index": genai.types.Schema(type=genai.types.Type.INTEGER, description="0-based index of the step to update."),
+                        "status": genai.types.Schema(type=genai.types.Type.STRING, description="Status string: 'pending', 'in_progress', 'completed', or 'failed'."),
                     },
                 ),
             ),
@@ -996,6 +1077,23 @@ class AudioLoop:
             with open(self.log_file, mode, encoding="utf-8") as f:
                 f.write(text)
         await asyncio.to_thread(_write)
+
+    def _get_memory_context(self, text: str) -> str:
+        if not text or not text.strip():
+            return ""
+        words = [w.strip(".,!?\"'") for w in text.split() if len(w.strip(".,!?\"'")) > 3]
+        words = sorted(words, key=len, reverse=True)[:3]
+        found_facts = []
+        for w in words:
+            facts = self.mm.search_knowledge(w)
+            for f in facts:
+                fact_str = f"({f['subject']} {f['predicate']} {f['object']})"
+                if fact_str not in found_facts:
+                    found_facts.append(fact_str)
+        if found_facts:
+            return f"[System Note: Recalled Memories: {', '.join(found_facts[:5])}]\n"
+        return ""
+
     async def send_text(self):
         while not self.stop_event.is_set():
             try:
@@ -1013,12 +1111,16 @@ class AudioLoop:
             if text.lower() == "q":
                 self.stop_event.set()
                 break
+                
+            mem_ctx = self._get_memory_context(text)
+            full_text = mem_ctx + text if text else text
+            
             if VLLM_MODE and text and text.strip():
                 print(f"\n[You]: {text}\n[Processing...]", flush=True)
-                asyncio.create_task(self._relay_to_vllm(text))
+                asyncio.create_task(self._relay_to_vllm(full_text))
             elif self.session is not None:
                 try:
-                    await self.session.send_realtime_input(text=text or ".")
+                    await self.session.send_realtime_input(text=full_text or ".")
                     await self._async_log(f"\n[You]: {text}\n[Alpha]: ")
                 except Exception:
                     pass
@@ -1546,9 +1648,17 @@ class AudioLoop:
                             
                             await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
 
+                            mem_ctx = self._get_memory_context(user_text)
+                            if mem_ctx and not VLLM_MODE:
+                                try:
+                                    await self.session.send_realtime_input(text=mem_ctx)
+                                except Exception:
+                                    pass
+
                             # ✨ vLLM hybrid: intercept and relay ✨
                             if VLLM_MODE and user_text and user_text.strip():
-                                asyncio.create_task(self._relay_to_vllm(user_text))
+                                full_text = mem_ctx + user_text if mem_ctx else user_text
+                                asyncio.create_task(self._relay_to_vllm(full_text))
                             
                         if output_transcript := getattr(sc, "output_transcription", None):
                             if text := output_transcript.text:
@@ -1796,17 +1906,21 @@ class AudioLoop:
 
             elif name == "get_clipboard":
                 def _do_get():
-                    for _ in range(3):
+                    res = win32_get_clipboard()
+                    if not res:
                         try:
-                            return pyperclip.paste()
+                            res = pyperclip.paste()
                         except Exception:
-                            time.sleep(0.05)
-                    try:
-                        p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
-                                           capture_output=True, text=True, timeout=5)
-                        return p.stdout.strip()
-                    except Exception:
-                        return ""
+                            pass
+                    if not res:
+                        try:
+                            import subprocess
+                            p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
+                                               capture_output=True, text=True, timeout=5)
+                            res = p.stdout.strip()
+                        except Exception:
+                            pass
+                    return res
                 content = await asyncio.to_thread(_do_get)
                 return {"result": content or "(clipboard is empty)"}
 
@@ -1921,6 +2035,22 @@ class AudioLoop:
                 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
                 ctypes.windll.user32.EnumWindows(WNDENUMPROC(enum_windows_cb), 0)
                 return {"result": f"Focused window matching '{query}'" if found else f"No visible window found matching '{query}'"}
+
+            elif name == "set_task_plan":
+                goal = args.get("goal", "")
+                steps = args.get("steps", [])
+                plan_data = {"goal": goal, "steps": list(steps)}
+                import json
+                print(f"\n[TASK_PLAN] {json.dumps(plan_data)}\n", flush=True)
+                return {"status": "Task plan initialized in GUI."}
+
+            elif name == "update_task_step":
+                step_index = int(args.get("step_index", 0))
+                status = str(args.get("status", "pending"))
+                update_data = {"index": step_index, "status": status}
+                import json
+                print(f"\n[TASK_UPDATE] {json.dumps(update_data)}\n", flush=True)
+                return {"status": f"Step {step_index} updated to {status}."}
 
             elif name == "task_complete":
                 summary = str(args.get("summary", ""))
@@ -2262,12 +2392,16 @@ class AudioLoop:
             if text.lower() == "q":
                 self.stop_event.set()
                 break
+                
+            mem_ctx = self._get_memory_context(text)
+            full_text = mem_ctx + text if text else text
+            
             if VLLM_MODE and text and text.strip():
                 print(f"\n[You]: {text}\n[Processing...]", flush=True)
-                asyncio.create_task(self._relay_to_vllm(text))
+                asyncio.create_task(self._relay_to_vllm(full_text))
             elif self.websocket is not None:
                 try:
-                    await self.send_ws_json({"type": "text", "data": text or "."})
+                    await self.send_ws_json({"type": "text", "data": full_text or "."})
                     await self._async_log(f"\n[You]: {text}\n[Alpha]: ")
                 except Exception:
                     pass
@@ -2459,8 +2593,17 @@ class AudioLoop:
                         user_text = data["data"]
                         print(f"\n\n[You]: {user_text}\n[Processing...]", flush=True)
                         await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
+                        
+                        mem_ctx = self._get_memory_context(user_text)
+                        if mem_ctx and not VLLM_MODE:
+                            try:
+                                await self.send_ws_json({"type": "text", "data": mem_ctx})
+                            except Exception:
+                                pass
+                                
                         if VLLM_MODE and user_text and user_text.strip():
-                            asyncio.create_task(self._relay_to_vllm(user_text))
+                            full_text = mem_ctx + user_text if mem_ctx else user_text
+                            asyncio.create_task(self._relay_to_vllm(full_text))
 
                     elif data["type"] == "output_transcription":
                         text = data.get("data", "")

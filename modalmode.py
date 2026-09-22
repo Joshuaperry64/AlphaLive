@@ -37,15 +37,17 @@ async def websocket_endpoint(websocket: WebSocket):
             model_name = model_name[len("models/"):]
         config_dict = setup.get("config", {})
         
-        # Properly deserialize the nested LiveConnectConfig using Pydantic
+        # Properly deserialize the config dict into LiveConnectConfig
         try:
             if config_dict:
-                if hasattr(types.LiveConnectConfig, "model_validate"):
-                    config = types.LiveConnectConfig.model_validate(config_dict)
-                else:
-                    config = types.LiveConnectConfig(**config_dict)
+                config = types.LiveConnectConfig.model_validate(config_dict)
             else:
-                config = types.LiveConnectConfig(response_modalities=["AUDIO"])
+                config = None
+        except Exception as e:
+            print(f"[Warning] Failed to deserialize config: {e}. Defaulting to basic Audio.")
+            config = types.LiveConnectConfig(
+                response_modalities=[types.LiveConnectConfig.Modality.AUDIO]
+            )
         except Exception as cfg_err:
             print(f"[Proxy] Config parse error: {cfg_err}")
             traceback.print_exc()

@@ -25,6 +25,65 @@ import keyboard
 
 import argparse
 
+def win32_set_clipboard(text: str) -> bool:
+    """Safely set clipboard text using native Win32 API to completely avoid OLE 0x800401d0 locks."""
+    if not text: return False
+    try:
+        u32 = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        GMEM_MOVEABLE = 0x0002
+        CF_UNICODETEXT = 13
+        k32.GlobalAlloc.restype = ctypes.c_void_p
+        k32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        k32.GlobalLock.restype = ctypes.c_void_p
+        k32.GlobalLock.argtypes = [ctypes.c_void_p]
+        k32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        u32.SetClipboardData.restype = ctypes.c_void_p
+        u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        u32.OpenClipboard.restype = ctypes.c_bool
+        u32.EmptyClipboard.restype = ctypes.c_bool
+        u32.CloseClipboard.restype = ctypes.c_bool
+        opened = False
+        for _ in range(8):
+            if u32.OpenClipboard(None):
+                opened = True
+                break
+            time.sleep(0.03)
+        if opened:
+            try:
+                u32.EmptyClipboard()
+                encoded = text.encode("utf-16-le") + b"\x00\x00"
+                h_mem = k32.GlobalAlloc(GMEM_MOVEABLE, len(encoded))
+                if h_mem:
+                    p_mem = k32.GlobalLock(h_mem)
+                    if p_mem:
+                        ctypes.memmove(p_mem, encoded, len(encoded))
+                        k32.GlobalUnlock(h_mem)
+                        if u32.SetClipboardData(CF_UNICODETEXT, h_mem):
+                            return True
+                        else:
+                            k32.GlobalFree(h_mem)
+                    else:
+                        k32.GlobalFree(h_mem)
+            finally:
+                u32.CloseClipboard()
+    except Exception:
+        pass
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Set-Clipboard -Value $input"],
+                       input=text, text=True, timeout=4, creationflags=flags)
+        return True
+    except Exception:
+        pass
+    try:
+        pyperclip.copy(text)
+        return True
+    except Exception:
+        pass
+    return False
+
 from google import genai
 from google.genai import types
 
@@ -1695,12 +1754,7 @@ class AudioLoop:
                     self._ensure_input_desktop()
                     use_paste = len(text) > 15 or "\n" in text or "\t" in text or any(ord(c) > 127 for c in text)
                     if use_paste:
-                        for _ in range(5):
-                            try:
-                                pyperclip.copy(text)
-                                break
-                            except Exception:
-                                time.sleep(0.04)
+                        win32_set_clipboard(text)
                         time.sleep(0.08)  # Let Windows OLE release clipboard lock before firing paste shortcut
                         pyautogui.hotkey("ctrl", "v")
                         time.sleep(0.05)
@@ -1759,18 +1813,7 @@ class AudioLoop:
             elif name == "set_clipboard":
                 text = args.get("text", "")
                 def _do_set():
-                    for _ in range(3):
-                        try:
-                            pyperclip.copy(text)
-                            return True
-                        except Exception:
-                            time.sleep(0.05)
-                    try:
-                        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
-                                        "Set-Clipboard -Value $input"], input=text, text=True, timeout=5)
-                        return True
-                    except Exception:
-                        return False
+                    return win32_set_clipboard(text)
                 await asyncio.to_thread(_do_set)
                 return {"result": f"Clipboard set to: '{text[:80]}{'...' if len(text) > 80 else ''}'"}
 

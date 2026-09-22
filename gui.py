@@ -108,12 +108,13 @@ FONT_UI   = "Segoe UI"
 
 
 def safe_set_clipboard(text: str) -> bool:
-    """Safely set clipboard text using native Win32 API to completely avoid Qt/OLE 0x800401d0 locks."""
+    """Safely set clipboard text using native Win32 API with retry logic to avoid 0x800401d0 locks."""
     if not text:
         return False
     if sys.platform == "win32":
         try:
             import ctypes
+            import time
             u32 = ctypes.windll.user32
             k32 = ctypes.windll.kernel32
 
@@ -128,6 +129,17 @@ def safe_set_clipboard(text: str) -> bool:
             u32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
             u32.SetClipboardData.restype = ctypes.c_void_p
             u32.OpenClipboard.argtypes = [ctypes.c_void_p]
+            
+            # Retry loop for opening clipboard
+            opened = False
+            for _ in range(5):
+                if u32.OpenClipboard(None):
+                    opened = True
+                    break
+                time.sleep(0.05)
+                
+            if not opened:
+                return False
             u32.OpenClipboard.restype = ctypes.c_bool
             u32.EmptyClipboard.restype = ctypes.c_bool
             u32.CloseClipboard.restype = ctypes.c_bool
@@ -893,6 +905,7 @@ class BootScreen(QWidget):
 
 class EngineWorker(QThread):
     line_received     = pyqtSignal(str)
+    chunk_received    = pyqtSignal(str)   # For live streaming
     status_changed    = pyqtSignal(str)   # running | stopped | error
     transcript_update = pyqtSignal(str, str)  # role, text
 
@@ -911,12 +924,10 @@ class EngineWorker(QThread):
             env["ALPHALIVE_CONFIG"] = str(CONFIG_PATH)
             env["ALPHALIVE_ENGINE"] = self._engine
 
-            # Resolve API key: prefer config field, fall back to existing env vars from .env
             cfg_api_key = self._cfg.get("Global", {}).get("ApiKey", "").strip()
             if cfg_api_key:
                 env["GEMINI_API_KEY"] = cfg_api_key
             else:
-                # Load from .env file so the child process gets the key
                 dotenv_path = SCRIPT_DIR / ".env"
                 if dotenv_path.exists():
                     for line in dotenv_path.read_text().splitlines():
@@ -933,28 +944,44 @@ class EngineWorker(QThread):
             else:
                 env["ALPHALIVE_WS_URL"] = "off"
 
+            env["PYTHONUNBUFFERED"] = "1"
+            env["PYTHONIOENCODING"] = "utf-8"
+
             self._proc = subprocess.Popen(
                 [sys.executable, str(SCRIPT_DIR / self._engine)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True, env=env,
-                cwd=str(SCRIPT_DIR), bufsize=1,
+                env=env, cwd=str(SCRIPT_DIR), bufsize=0
             )
-            for raw in iter(self._proc.stdout.readline, ""):
-                if not self._alive:
-                    break
-                line = raw.rstrip("\r\n")
-                if not line:
-                    continue
-                self.line_received.emit(line)
-                lo = line.lower()
-                if "[you]:" in lo or "user:" in lo:
-                    self.transcript_update.emit("user",
-                        line.split(":", 1)[-1].strip())
-                elif "[alpha]:" in lo or "alpha:" in lo or "[gemini]:" in lo or "gemini:" in lo:
-                    self.transcript_update.emit("ai",
-                        line.split(":", 1)[-1].strip())
+
+            # Read chunks unbuffered to support live streaming
+            fd = self._proc.stdout.fileno()
+            buffer = ""
+            while self._alive:
+                import select
+                ready, _, _ = select.select([fd], [], [], 0.1)
+                if fd in ready:
+                    chunk = os.read(fd, 4096)
+                    if not chunk:
+                        break
+                    text_chunk = chunk.decode("utf-8", errors="replace")
+                    
+                    # Also try to parse line-based for transcript and old routing
+                    buffer += text_chunk
+                    while "\n" in buffer:
+                        line, buffer = buffer.split("\n", 1)
+                        line = line.strip()
+                        if line:
+                            self.line_received.emit(line)
+                            lo = line.lower()
+                            if "[you]:" in lo or "user:" in lo:
+                                self.transcript_update.emit("user", line.split(":", 1)[-1].strip())
+                            elif "[alpha]:" in lo or "alpha:" in lo or "[gemini]:" in lo or "gemini:" in lo:
+                                self.transcript_update.emit("ai", line.split(":", 1)[-1].strip())
+                    
+                    self.chunk_received.emit(text_chunk)
+                    
             self._proc.wait()
         except Exception as ex:
             self.line_received.emit(f"[ENGINE ERROR] {ex}")
@@ -965,7 +992,7 @@ class EngineWorker(QThread):
     def write_stdin(self, text: str):
         if self._proc and self._proc.poll() is None and self._proc.stdin:
             try:
-                self._proc.stdin.write(text.rstrip("\r\n") + "\n")
+                self._proc.stdin.write((text.rstrip("\r\n") + "\n").encode("utf-8"))
                 self._proc.stdin.flush()
             except Exception as e:
                 self.line_received.emit(f"[SYSTEM] Failed to write to engine stdin: {e}")
@@ -1045,13 +1072,13 @@ class TerminalTab(QWidget):
         self._out.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self._out.setStyleSheet(f"""
             QTextEdit {{
-                background-color: {C['bg_deep']};
-                color: {C['text_main']};
+                background-color: #080D1A;
+                color: #E2E8F0;
                 border: 1px solid {C['border']};
                 border-radius: 4px;
                 font-family: 'Consolas', 'Fira Code', '{FONT_MONO}', monospace;
-                font-size: 12px;
-                line-height: 1.4;
+                font-size: 13px;
+                line-height: 1.5;
                 padding: 8px;
             }}
         """)
@@ -1125,6 +1152,78 @@ class TerminalTab(QWidget):
             self.append(f"[YOU] {t}", C["neon_cyan"])
             self.send_text_requested.emit(t)
 
+    def _render_inline(self, text: str, color: str, italic: bool = False):
+        if not text:
+            return
+        cur = self._out.textCursor()
+        cur.movePosition(cur.MoveOperation.End)
+        cfmt = QTextCharFormat()
+        cfmt.setForeground(QColor(color))
+        cfmt.setFontWeight(QFont.Weight.Normal)
+        if italic:
+            cfmt.setFontItalic(True)
+        cur.insertText(text, cfmt)
+        self._out.setTextCursor(cur)
+        if self._scroll_btn.isChecked():
+            self._out.ensureCursorVisible()
+            sb = self._out.verticalScrollBar()
+            if sb:
+                sb.setValue(sb.maximum())
+
+    def append_chunk(self, chunk: str):
+        if not chunk: return
+        if not hasattr(self, '_chunk_buf'):
+            self._chunk_buf = ""
+            self._is_streaming = False
+            self._stream_color = C["text_bright"]
+
+        self._chunk_buf += chunk
+        
+        while True:
+            if not self._is_streaming:
+                lo = self._chunk_buf.lower()
+                matched = False
+                for pfx, spk, badge, bgcol, fgcol, bold in [
+                    ("[alpha]: ", "ai", "ALPHA ❯", "#C084FC", "#E2E8F0", True),
+                    ("alpha: ", "ai", "ALPHA ❯", "#C084FC", "#E2E8F0", True),
+                    ("[gemini]: ", "ai", "ALPHA ❯", "#C084FC", "#E2E8F0", True),
+                    ("gemini: ", "ai", "ALPHA ❯", "#C084FC", "#E2E8F0", True),
+                    ("[you]: ", "user", "YOU ❯", "#00E5FF", "#E2E8F0", True),
+                    ("user: ", "user", "YOU ❯", "#00E5FF", "#E2E8F0", True),
+                    ("[thoughts]: ", "thoughts", "🧠 THOUGHTS ❯", "#A78BFA", "#94A3B8", False),
+                    ("thoughts: ", "thoughts", "🧠 THOUGHTS ❯", "#A78BFA", "#94A3B8", False)
+                ]:
+                    if lo.startswith(pfx.lower()):
+                        self._last_speaker = spk
+                        self._is_streaming = True
+                        self._stream_color = fgcol
+                        self._render_entry(badge, bgcol, "", fgcol, bold_badge=bold)
+                        self._chunk_buf = self._chunk_buf[len(pfx):]
+                        matched = True
+                        break
+                
+                if matched:
+                    continue
+                
+                if "\n" in self._chunk_buf:
+                    line, self._chunk_buf = self._chunk_buf.split("\n", 1)
+                    if line.strip():
+                        self.append(line)
+                    continue
+                
+                break
+            
+            else:
+                if "\n" in self._chunk_buf:
+                    line, self._chunk_buf = self._chunk_buf.split("\n", 1)
+                    self._render_inline(line, self._stream_color, italic=(self._last_speaker=="thoughts"))
+                    self._is_streaming = False
+                    continue
+                else:
+                    self._render_inline(self._chunk_buf, self._stream_color, italic=(self._last_speaker=="thoughts"))
+                    self._chunk_buf = ""
+                    break
+
     def append(self, text: str, color: str = None):
         if not text:
             return
@@ -1135,11 +1234,11 @@ class TerminalTab(QWidget):
         lo = raw.lower()
 
         # Suppress console prompt artifacts and noise
-        if raw in ("message >", "ALPHA") or raw.startswith("message >"):
+        if raw in ("message >", "ALPHA", "ALPHA:") or raw.startswith("message >"):
             return
 
         # Check for User input
-        if raw.startswith("[You]:") or raw.startswith("[YOU]") or raw.startswith("User:") or (color == C["neon_cyan"] and "[you]" in lo):
+        if raw.startswith("[You]:") or raw.startswith("[YOU]") or raw.startswith("User:") or (color == "#00E5FF" and "[you]" in lo):
             body = raw
             for pfx in ("[You]:", "[YOU]:", "[YOU]", "[you]:", "User:", "user:"):
                 if body.startswith(pfx):
@@ -1152,7 +1251,7 @@ class TerminalTab(QWidget):
                 return
 
             self._last_speaker = "user"
-            self._render_entry("YOU ❯", C["neon_cyan"], body, C["text_bright"], bold_badge=True)
+            self._render_entry("YOU ❯", "#00E5FF", body, "#E2E8F0", bold_badge=True)
 
         # Check for Alpha AI response
         elif raw.startswith("[Alpha]:") or raw.startswith("[ALPHA]:") or raw.startswith("[Gemini]:") or raw.startswith("Alpha:") or raw.startswith("Gemini:"):
@@ -1162,7 +1261,7 @@ class TerminalTab(QWidget):
                 if body.startswith(pfx):
                     body = body[len(pfx):].strip()
                     break
-            self._render_entry("ALPHA ❯", C["neon_purple"], body, C["text_bright"], bold_badge=True)
+            self._render_entry("ALPHA ❯", "#C084FC", body, "#E2E8F0", bold_badge=True)
 
         # Check for Alpha Thoughts
         elif raw.startswith("[Alpha Thoughts]:") or raw.startswith("[Thoughts]:") or raw.startswith("Thoughts:"):
@@ -1180,7 +1279,7 @@ class TerminalTab(QWidget):
             body = raw
             if "]" in body:
                 body = body.split("]", 1)[-1].strip()
-            self._render_entry("⚙ TOOL ❯", C["neon_blue"], body, C["text_main"], bold_badge=True)
+            self._render_entry("⚙ TOOL ❯", "#38BDF8", body, "#E2E8F0", bold_badge=True)
 
         # Tool finished / result
         elif "[tool finished]" in lo or "[tool result]" in lo or raw.startswith("[Tool Finished]"):
@@ -1188,7 +1287,7 @@ class TerminalTab(QWidget):
             body = raw
             if "]" in body:
                 body = body.split("]", 1)[-1].strip()
-            self._render_entry("✔ RESULT ❯", C["neon_green"], body, C["text_bright"], bold_badge=True)
+            self._render_entry("✔ RESULT ❯", "#10B981", body, "#E2E8F0", bold_badge=True)
 
         # vLLM routing and info
         elif raw.startswith("[vLLM]") or "[vllm]" in lo:
@@ -2801,11 +2900,6 @@ class MainWindow(QMainWindow):
         self.resize(1380, 840)
         self.setStyleSheet(STYLESHEET)
 
-        # Scanline overlay
-        self._scan = ScanlineOverlay(self)
-        self._scan.resize(self.size())
-        self._scan.lower()
-
         # Show boot screen first
         self._boot = BootScreen(self)
         self._boot.resize(self.size())
@@ -2818,7 +2912,6 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, e):
         super().resizeEvent(e)
-        self._scan.resize(self.size())
         if hasattr(self, "_boot") and self._boot.isVisible():
             self._boot.resize(self.size())
 
@@ -3019,6 +3112,7 @@ class MainWindow(QMainWindow):
 
         self._worker = EngineWorker(engine, self._cfg)
         self._worker.line_received.connect(self._on_line)
+        self._worker.chunk_received.connect(self._on_chunk)
         self._worker.status_changed.connect(self._on_status)
         self._worker.transcript_update.connect(self._on_transcript)
         self._worker.start()
@@ -3029,8 +3123,11 @@ class MainWindow(QMainWindow):
         self._set_status("Terminating engine...")
         self._slog("Stop requested.", "system")
 
+    def _on_chunk(self, chunk: str):
+        if hasattr(self._terminal, 'append_chunk'):
+            self._terminal.append_chunk(chunk)
+
     def _on_line(self, line: str):
-        self._terminal.append(line)
         lo = line.lower()
         if   "[system]" in lo:   self._slog(line, "system")
         elif "error"    in lo:   self._slog(line, "error")

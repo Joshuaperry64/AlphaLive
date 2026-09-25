@@ -200,7 +200,7 @@ if ($config.Global.Modal -eq 'enabled' -or $config.Global.Modal -eq 'true') {
         Write-Host '[System] ChromaDB Vector Memory Online.'
     }
     Write-Host '[System] Routing through Modal Cloud Proxy...'
-    $wsUrl = 'wss://alphacoreprogramming-ai--alphalive-proxy-fastapi-app.modal.run/ws'
+    $wsUrl = 'wss://josh64perry--alphalive-proxy-fastapi-app.modal.run/ws'
 } else {
     if ($config.Global.Memory -eq 'enabled') {
         Write-Host '[System] ChromaDB Vector Memory Online.'

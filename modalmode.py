@@ -32,19 +32,31 @@ async def websocket_endpoint(websocket: WebSocket):
         setup = json.loads(init_data)
         
         api_key = setup.get("api_key")
+        model_name = setup.get("model", "gemini-3.1-flash-live-preview")
+        if model_name.startswith("models/"):
+            model_name = model_name[len("models/"):]
         config_dict = setup.get("config", {})
         
-        # We process the configuration mapping directly rather than stripping keys
+        # Properly deserialize the config dict into LiveConnectConfig
         try:
-            config = types.LiveConnectConfig(**config_dict) if config_dict else None
+            if config_dict:
+                config = types.LiveConnectConfig.model_validate(config_dict)
+            else:
+                config = None
+        except Exception as e:
+            print(f"[Warning] Failed to deserialize config: {e}. Defaulting to basic Audio.")
+            config = types.LiveConnectConfig(
+                response_modalities=[types.LiveConnectConfig.Modality.AUDIO]
+            )
         except Exception as cfg_err:
             print(f"[Proxy] Config parse error: {cfg_err}")
+            traceback.print_exc()
             config = types.LiveConnectConfig(response_modalities=["AUDIO"])
         
         client = genai.Client(http_options={"api_version": "v1beta"}, api_key=api_key)
         
         try:
-            async with client.aio.live.connect(model="gemini-3.1-flash-live-preview", config=config) as session:
+            async with client.aio.live.connect(model=model_name, config=config) as session:
                 
                 async def receive_from_google():
                     try:
@@ -55,7 +67,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if response.data:
                                     b64_audio = base64.b64encode(response.data).decode("utf-8")
                                     await send_json({"type": "audio", "data": b64_audio})
-                                    continue
 
                                 sc = getattr(response, "server_content", None)
                                 if sc:
@@ -91,22 +102,6 @@ async def websocket_endpoint(websocket: WebSocket):
                                                     "args": args_dict,
                                                 })
 
-                                    # ── tool_call attribute (alternative SDK path) ──
-                                    tool_call = getattr(response, "tool_call", None)
-                                    if tool_call:
-                                        for fc in tool_call.function_calls:
-                                            args_dict = {}
-                                            try:
-                                                if fc.args:
-                                                    args_dict = dict(fc.args) if isinstance(fc.args, dict) else dict(fc.args.items())
-                                            except Exception:
-                                                pass
-                                            await send_json({
-                                                "type": "function_call",
-                                                "name": fc.name,
-                                                "id": getattr(fc, "id", None),
-                                                "args": args_dict,
-                                            })
 
                                     # ── Transcriptions ────────────────────────
                                     out_tr = getattr(sc, "output_transcription", None)
@@ -149,8 +144,11 @@ async def websocket_endpoint(websocket: WebSocket):
                                 await session.send_realtime_input(text=data["data"])
                             elif message_type == "tool_response":
                                 resp = data["response"]
+                                ret_resp = resp.get("response", {})
+                                if not isinstance(ret_resp, dict):
+                                    ret_resp = {"result": str(ret_resp)}
                                 await session.send_tool_response(function_responses=[
-                                    types.FunctionResponse(name=resp["name"], id=resp.get("id"), response=resp.get("response", {}))
+                                    types.FunctionResponse(name=resp["name"], id=resp.get("id"), response=ret_resp)
                                 ])
                     except WebSocketDisconnect:
                         raise
@@ -172,6 +170,10 @@ async def websocket_endpoint(websocket: WebSocket):
                 
         except Exception as gemini_err:
             print(f"[Proxy] Connection failed: {gemini_err}")
+            try:
+                await send_json({"type": "error", "data": f"Proxy Gemini connection failed: {gemini_err}"})
+            except Exception:
+                pass
 
     except Exception as e:
         print(f"[Proxy] Proxy failure: {e}")

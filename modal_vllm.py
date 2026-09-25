@@ -2,31 +2,31 @@ import modal
 import os
 import subprocess
 
-# We will sync your HuggingFace Bucket into a Modal Volume so vLLM can load it instantly
-BUCKET_ID = "hf://buckets/Joshuaperry64/Gemma"
+MODEL_ID = "DavidAU/Qwen3.5-9B-Claude-4.6-HighIQ-THINKING-HERETIC-UNCENSORED"
 CACHE_DIR = "/models"
-LOCAL_MODEL_PATH = f"{CACHE_DIR}/Gemma"
+LOCAL_MODEL_PATH = f"{CACHE_DIR}/Qwen3.5-9B"
 
-GPU_CONFIG = "A10G"
+GPU_CONFIG = "L40S"
 
-# 1. Create a persistent Volume to store the synced bucket files
-model_volume = modal.Volume.from_name("alphalive-gemma-volume", create_if_missing=True)
+# 1. Create a persistent Volume to store the downloaded model files
+model_volume = modal.Volume.from_name("alphalive-qwen-volume", create_if_missing=True)
 
 vllm_image = (
     modal.Image.debian_slim(python_version="3.10")
     .pip_install(
         "vllm",
         "huggingface_hub",
-        "hf-xet",
         "fastapi",
         "uvicorn"
     )
-    # Install the new Hugging Face CLI (required for hf buckets sync)
-    .apt_install("curl")
-    .run_commands("curl -LsSf https://hf.co/cli/install.sh | bash -s")
+    .run_commands(
+        "ln -s /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc /usr/local/bin/nvcc || true",
+        "mkdir -p /usr/local/cuda/bin && ln -s /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvcc/bin/nvcc /usr/local/cuda/bin/nvcc || true"
+    )
     .env({
-        "HF_XET_HIGH_PERFORMANCE": "1",
-        "HF_HOME": CACHE_DIR
+        "HF_HOME": CACHE_DIR,
+        "VLLM_USE_FLASHINFER_SAMPLER": "0",
+        "CUDA_HOME": "/usr/local/cuda"
     })
 )
 
@@ -35,31 +35,47 @@ app = modal.App("alphalive-vllm-bucket")
 @app.function(
     image=vllm_image,
     gpu=GPU_CONFIG,
-    scaledown_window=300,
+    timeout=1800,
+    scaledown_window=600,
     volumes={CACHE_DIR: model_volume}, 
     secrets=[modal.Secret.from_name("huggingface-secret")] # Ensure your HF token is in this Modal secret!
 )
 @modal.concurrent(max_inputs=100)
-@modal.web_server(8000, startup_timeout=300)
+@modal.web_server(8000, startup_timeout=900)
 def serve():
+    import os
     import subprocess
+    from huggingface_hub import snapshot_download
     
-    # 2. Sync the HF Bucket to the Modal Volume before starting vLLM.
-    #    (This only downloads files that are missing or changed, so it's instant after the first run)
-    print(f"Syncing HF Bucket {BUCKET_ID} to {LOCAL_MODEL_PATH}...")
-    subprocess.run(["hf", "buckets", "sync", BUCKET_ID, LOCAL_MODEL_PATH], check=True)
-    model_volume.commit()
-    print("Sync complete!")
+    # 2. Download / cache the model to the persistent volume if not already present
+    config_path = os.path.join(LOCAL_MODEL_PATH, "config.json")
+    if not os.path.exists(config_path):
+        print(f"Downloading model {MODEL_ID} to {LOCAL_MODEL_PATH}...")
+        snapshot_download(
+            repo_id=MODEL_ID,
+            local_dir=LOCAL_MODEL_PATH,
+            local_dir_use_symlinks=False,
+        )
+        model_volume.commit()
+        print("Model snapshot ready and committed to volume!")
+    else:
+        print(f"Model snapshot already cached in volume at {LOCAL_MODEL_PATH}.")
     
     # 3. Start the vLLM OpenAI-compatible server using the official CLI
     cmd = [
         "vllm", "serve", LOCAL_MODEL_PATH,
+        "--served-model-name", MODEL_ID,
         "--host", "0.0.0.0",
         "--port", "8000",
         "--tensor-parallel-size", "1",
-        "--max-model-len", "4096",
-        "--gpu-memory-utilization", "0.90"
+        "--max-model-len", "16384",
+        "--gpu-memory-utilization", "0.85",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser", "hermes",
+        "--trust-remote-code"
     ]
     
     print("Starting vLLM server...")
-    subprocess.Popen(cmd)
+    proc = subprocess.Popen(cmd)
+    proc.wait()
+

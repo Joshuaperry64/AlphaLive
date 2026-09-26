@@ -2612,6 +2612,14 @@ class MemoryTab(QWidget):
             }}
         """)
 
+        self._setup_facts_tab()
+        self._setup_traits_tab()
+        self._setup_episodes_tab()
+
+        root.addWidget(self._subtabs, 1)
+        self.refresh_all()
+
+    def _setup_facts_tab(self):
         # Sub-tab 1: Knowledge Graph Facts
         self._facts_widget = QWidget()
         fl = QVBoxLayout(self._facts_widget)
@@ -2662,6 +2670,7 @@ class MemoryTab(QWidget):
 
         self._subtabs.addTab(self._facts_widget, " FACTS & KNOWLEDGE GRAPH ")
 
+    def _setup_traits_tab(self):
         # Sub-tab 2: Core Personality Traits
         self._traits_widget = QWidget()
         tl = QVBoxLayout(self._traits_widget)
@@ -2705,6 +2714,7 @@ class MemoryTab(QWidget):
 
         self._subtabs.addTab(self._traits_widget, " CORE PERSONALITY ")
 
+    def _setup_episodes_tab(self):
         # Sub-tab 3: Episodic Memories
         self._episodes_widget = QWidget()
         el = QVBoxLayout(self._episodes_widget)
@@ -2730,9 +2740,6 @@ class MemoryTab(QWidget):
         el.addWidget(self._episodes_table, 1)
 
         self._subtabs.addTab(self._episodes_widget, " EPISODIC LOGS ")
-
-        root.addWidget(self._subtabs, 1)
-        self.refresh_all()
 
     def _table_stylesheet(self):
         return f"""

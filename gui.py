@@ -84,6 +84,7 @@ ENGINE_LABELS = {
 C = {
     "bg_deep":     "#02050A",
     "bg_dark":     "#040A14",
+    "bg_base":     "#040A14",
     "bg_mid":      "#081324",
     "bg_panel":    "#0C1B33",
     "bg_card":     "#102342",

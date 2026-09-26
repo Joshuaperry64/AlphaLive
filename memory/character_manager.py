@@ -32,6 +32,19 @@ class CharacterManager:
                 )
             ''')
 
+            # Add new columns for our "naughty" features if they don't exist
+            cursor.execute("PRAGMA table_info(characters)")
+            columns = [info[1] for info in cursor.fetchall()]
+            
+            if 'arousal' not in columns:
+                cursor.execute('ALTER TABLE characters ADD COLUMN arousal INTEGER DEFAULT 0')
+            if 'submission' not in columns:
+                cursor.execute('ALTER TABLE characters ADD COLUMN submission INTEGER DEFAULT 0')
+            if 'kinks' not in columns:
+                cursor.execute('ALTER TABLE characters ADD COLUMN kinks TEXT DEFAULT ""')
+            if 'nsfw_description' not in columns:
+                cursor.execute('ALTER TABLE characters ADD COLUMN nsfw_description TEXT DEFAULT ""')
+
             # Create a selected character configuration table
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS active_character (
@@ -44,20 +57,24 @@ class CharacterManager:
             cursor.execute('INSERT OR IGNORE INTO active_character (id, name) VALUES (1, "")')
             conn.commit()
 
-    def add_character(self, name, gender="", relation="", personality="", response_style="", avatar_path=""):
+    def add_character(self, name, gender="", relation="", personality="", response_style="", avatar_path="", arousal=0, submission=0, kinks="", nsfw_description=""):
         try:
             with self._get_conn() as conn:
                 conn.execute('''
-                    INSERT INTO characters (name, gender, relation, personality, response_style, avatar_path, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    INSERT INTO characters (name, gender, relation, personality, response_style, avatar_path, arousal, submission, kinks, nsfw_description, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     ON CONFLICT(name) DO UPDATE SET
                         gender = excluded.gender,
                         relation = excluded.relation,
                         personality = excluded.personality,
                         response_style = excluded.response_style,
                         avatar_path = excluded.avatar_path,
+                        arousal = excluded.arousal,
+                        submission = excluded.submission,
+                        kinks = excluded.kinks,
+                        nsfw_description = excluded.nsfw_description,
                         updated_at = CURRENT_TIMESTAMP
-                ''', (name.strip(), gender, relation, personality, response_style, avatar_path))
+                ''', (name.strip(), gender, relation, personality, response_style, avatar_path, arousal, submission, kinks, nsfw_description))
                 conn.commit()
             return True
         except Exception as e:

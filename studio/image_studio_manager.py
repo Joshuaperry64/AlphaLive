@@ -97,7 +97,6 @@ class ImageStudioManager:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-            
             # Seed default starter learnings if table is empty
             count = cursor.execute('SELECT COUNT(*) FROM image_prompt_learnings').fetchone()[0]
             if count == 0:
@@ -115,6 +114,33 @@ class ImageStudioManager:
                     ''', (r_type, tag, r_text, weight))
             
             conn.commit()
+
+    def get_character_details(self, name: str) -> Optional[Dict[str, Any]]:
+        """Fetches detailed character attributes from the database."""
+        try:
+            with self._get_conn() as conn:
+                row = conn.execute('SELECT * FROM characters WHERE name = ?', (name,)).fetchone()
+                return dict(row) if row else None
+        except Exception as e:
+            print(f"[ImageStudioManager] Error getting character details: {e}")
+            return None
+
+    def generate_character_image(self, character_name: str, model_key: str = "freedom", lora_key: str = "none", upscaler_key: str = "realesrgan-x4plus"):
+        """Generates an image for a character using their NSFW description."""
+        character = self.get_character_details(character_name)
+        if not character or not character.get("nsfw_description"):
+            print(f"[ImageStudioManager] No character or NSFW description found for {character_name}")
+            return None
+
+        prompt = character["nsfw_description"]
+        # Here you would call your actual image generation logic
+        # For now, we'll just log it and return a placeholder
+        print(f"Generating image for {character_name} with prompt: {prompt}")
+        
+        # Placeholder for image generation call
+        # image_data = self.generate_image(prompt, model_key, lora_key, upscaler_key)
+        # return image_data
+        return "path/to/placeholder.png"
 
     def get_learnings(self) -> List[Dict[str, Any]]:
         """Fetch all stored prompt learnings ordered by rating weight."""

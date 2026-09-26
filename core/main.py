@@ -2,6 +2,9 @@ import os
 import sys
 import subprocess
 
+# Ensure we can import from sibling packages
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def _excepthook(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):
         sys.exit(0)
@@ -11,7 +14,7 @@ sys.excepthook = _excepthook
 
 def main():
     print("[AlphaLive] Booting through main.py entrypoint...")
-    venv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv")
+    venv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".venv")
     
     if os.name == "nt":
         python_exe = os.path.join(venv_path, "Scripts", "python.exe")
@@ -23,7 +26,7 @@ def main():
     if os.path.exists(python_exe) and os.path.abspath(sys.executable) != os.path.abspath(python_exe):
         print(f"[AlphaLive] Routing through venv: {python_exe}")
         # Relaunch gui.py using the venv
-        gui_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui.py")
+        gui_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui", "gui.py")
         try:
             ret = subprocess.call([python_exe, gui_script])
             sys.exit(ret)
@@ -33,7 +36,7 @@ def main():
         # We are already in the venv (or venv doesn't exist, which will probably crash anyway without deps)
         print("[AlphaLive] Starting GUI...")
         try:
-            import gui
+            from ui import gui
             gui.main()
         except KeyboardInterrupt:
             sys.exit(0)

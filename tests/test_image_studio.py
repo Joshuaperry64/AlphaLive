@@ -3,7 +3,7 @@ import gc
 import tempfile
 import unittest
 from pathlib import Path
-from image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
+from studio.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
 
 class TestImageStudio(unittest.TestCase):
     def setUp(self):

@@ -13,16 +13,16 @@ echo ===================================================
 if exist ".venv\Scripts\python.exe" (
     echo [System] Activating local virtual environment (.venv)...
     call ".venv\Scripts\activate.bat"
-    python main.py %*
+    python core\main.py %*
 ) else (
     echo [System] Local .venv not found. Attempting system Python...
     where python >nul 2>&1
     if %ERRORLEVEL% equ 0 (
-        python main.py %*
+        python core\main.py %*
     ) else (
         where py >nul 2>&1
         if %ERRORLEVEL% equ 0 (
-            py -3 main.py %*
+            py -3 core\main.py %*
         ) else (
             echo [Error] Python was not found in PATH!
             pause

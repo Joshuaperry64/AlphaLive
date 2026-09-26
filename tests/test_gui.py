@@ -25,7 +25,7 @@ class TestLoadConfig(unittest.TestCase):
 
         # Import gui locally to avoid polluting global scope as much as possible
         global gui
-        import gui
+        from ui import gui
 
     @classmethod
     def tearDownClass(cls):

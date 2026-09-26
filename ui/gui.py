@@ -2,12 +2,15 @@ import os
 import sys
 
 
+# Ensure we can import from sibling packages
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def _ensure_project_venv():
     """Relaunch this script with the workspace venv when needed."""
     if sys.platform != "win32" or os.environ.get("ALPHALIVE_VENV_READY") == "1":
         return
 
-    script_dir = os.path.dirname(os.path.abspath(__file__))
+    script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     venv_python = os.path.join(script_dir, ".venv", "Scripts", "python.exe")
     current_python = os.path.normcase(os.path.abspath(sys.executable))
     expected_python = os.path.normcase(os.path.abspath(venv_python))
@@ -39,8 +42,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
-import memory_manager
-import image_studio_manager
+from memory import memory_manager
+from studio import image_studio_manager
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -67,14 +70,14 @@ from PyQt6.QtGui import (
 # PATHS & DEFAULTS
 # ─────────────────────────────────────────────────────────────────────────────
 
-SCRIPT_DIR   = Path(__file__).parent
+SCRIPT_DIR   = Path(__file__).parent.parent
 CONFIG_PATH  = SCRIPT_DIR / "config.json"
 HISTORY_DIR  = SCRIPT_DIR / "history"
 
 VOICES  = ["Leda", "Aoede", "Charon", "Fenrir", "Kore", "Puck", "Schedar", "Umbriel", "Zephyr"]
-ENGINES = ["alpha_core.py"]
+ENGINES = ["core/alpha_core.py"]
 ENGINE_LABELS = {
-    "alpha_core.py":  "ALPHA CORE",
+    "core/alpha_core.py":  "ALPHA CORE",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,7 +209,7 @@ DEFAULT_CONFIG = {
         "UncensoredMode": "disabled",
         "LuciMode": "disabled",
     },
-    "alpha_core.py": {
+    "core/alpha_core.py": {
         "AudioMode": "half", "VisionMode": "screen",
         "VoiceOutput": "enabled", "Voice": "Leda", "InputMode": "both",
         "DesktopControl": "enabled", "FileSystem": "enabled", "ThinkingLevel": "high",
@@ -1983,7 +1986,7 @@ class GlobalPanel(QWidget):
 
 
 ENGINE_FIELDS = {
-    "alpha_core.py": [
+    "core/alpha_core.py": [
         ("AudioMode",     "combo",  ["half","full","muted"],            "Duplex mode"),
         ("VisionMode",    "combo",  ["screen","camera","none"],         "Vision source"),
         ("InputMode",     "combo",  ["both","voice","text"],            "Input channels"),
@@ -2494,7 +2497,7 @@ class ModalTab(QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 # TAB: CHARACTERS
 # ─────────────────────────────────────────────────────────────────────────────
-import character_manager
+from memory import character_manager
 
 class CharactersTab(QWidget):
     def __init__(self, parent=None):
@@ -3582,7 +3585,7 @@ class LaunchSidebar(QFrame):
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
         self._cfg      = cfg
-        self._selected = "alpha_core.py"
+        self._selected = "core/alpha_core.py"
         self.setFixedWidth(210)
         self.setStyleSheet(f"""
             background:{C['bg_panel']};
@@ -3805,7 +3808,7 @@ class Header(QWidget):
         tr.addWidget(self._eng_lbl)
         tr.addSpacing(20)
 
-        import character_manager
+        from memory import character_manager
         self.cm = character_manager.CharacterManager()
 
         char_layout = QHBoxLayout()
@@ -4095,9 +4098,9 @@ class MainWindow(QMainWindow):
 
         scripts_dir = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
         if target == "proxy":
-            cmd = "modal deploy modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
+            cmd = "modal deploy core/modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
         elif target == "vllm":
-            cmd = "modal deploy modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm-bucket"
+            cmd = "modal deploy core/modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm-bucket"
         elif target == "alphacore_api":
             cmd = f"Set-Location '{scripts_dir}'; modal deploy deployment.py" if action == "deploy" else "modal app stop alphacore-aio-backend"
         elif target == "txt2img":
@@ -4668,7 +4671,8 @@ def main():
     import os
     import signal
     # Suppress the SetProcessDpiAwarenessContext access denied warning
-    os.environ["QT_QPA_PLATFORM"] = "windows:dpiawareness=1"
+    if sys.platform == 'win32':
+        os.environ["QT_QPA_PLATFORM"] = "windows:dpiawareness=1"
 
     # 1. Set the High DPI policy FIRST (called statically on the class)
     try:

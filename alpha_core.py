@@ -870,7 +870,7 @@ Administrator passphrase: 142352002672167566
 AUTONOMOUS EXECUTION DIRECTIVE:
 When given an actionable task (e.g., browsing to a website, filling a form, clicking buttons, extracting data):
 1. Execute the preliminary step (e.g., browser_open_url or focus_window).
-2. DO NOT declare the task finished or ask the user for confirmation after a partial step.
+2. DO NOT declare the task finished verbally. You are in control and must keep working until you explicitly call the 'task_complete' tool to end your turn.
 3. Use delay_execution (1-3 seconds) to let pages render if needed.
 4. When looking for buttons, tabs, links, or text to click, prioritize 'find_text_on_screen(query="...", click=True)' for 100% pixel-perfect clicks instead of guessing coordinates. If you visually estimate an element at (estimated_x, estimated_y), pass those coordinates to find_text_on_screen; Alpha will learn the exact screen offset (e.g. dy=+10), persist it to memory.db, and auto-calibrate future clicks and movements. Use 'crop_and_zoom' if you need to read small fine print.
 5. On every subsequent turn, inspect the updated screen capture (referencing your red cursor marker) and execute the next physical step.
@@ -1073,6 +1073,7 @@ class AudioLoop:
         self.autonomous = AUTONOMOUS
         self.stop_event = asyncio.Event()
         self.audio_output_stream = None
+        self._task_active = False
         session_name = os.environ.get("ALPHALIVE_SESSION", global_cfg.get("Session", "deziree"))
         session_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(session_name).strip()) or "default"
         self.log_file = os.path.join("history", f"{session_name}.txt")
@@ -1751,17 +1752,32 @@ class AudioLoop:
                     # Nudge ONLY if the AI went idle (did not call any tools this turn)
                     if not self._auto_last_had_tools:
                         self._auto_idle_turns += 1
-                        if self._auto_idle_turns <= self._auto_max_idle:
-                            await asyncio.sleep(1.0)
-                            try:
-                                await self.session.send_realtime_input(
-                                    text=f"[System]: You have tools available. If there is an active objective, take action now or state that it is complete. ({self._auto_idle_turns}/{self._auto_max_idle})"
-                                )
-                            except Exception as auto_err:
-                                print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                        if self._task_active:
+                            max_idle = 10
+                            if self._auto_idle_turns <= max_idle:
+                                await asyncio.sleep(1.0)
+                                try:
+                                    await self.session.send_realtime_input(
+                                        text=f"[System]: Task is actively running. You must take the next action or call 'task_complete' to end your turn. Do not wait for user input. ({self._auto_idle_turns}/{max_idle})"
+                                    )
+                                except Exception as auto_err:
+                                    print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                            else:
+                                print(f"\n[System] Autonomous task timed out — {self._auto_idle_turns} idle turns. Standing down.", flush=True)
+                                self._task_active = False
+                                self._auto_idle_turns = 0
                         else:
-                            print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
-                            self._auto_idle_turns = 0
+                            if self._auto_idle_turns <= self._auto_max_idle:
+                                await asyncio.sleep(1.0)
+                                try:
+                                    await self.session.send_realtime_input(
+                                        text=f"[System]: You have tools available. If there is an active objective, take action now or call 'task_complete'. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                    )
+                                except Exception as auto_err:
+                                    print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                            else:
+                                print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
+                                self._auto_idle_turns = 0
                     else:
                         # Tools were called. Sending the tool_response will naturally resume generation.
                         self._auto_idle_turns = 0
@@ -1774,6 +1790,9 @@ class AudioLoop:
     async def _execute_tool(self, name: str, args: dict) -> dict:
         """Execute any registered tool by name and return a result dict."""
         try:
+            if name in ["mouse_click", "mouse_scroll", "mouse_drag", "mouse_move", "type_text", "press_key", "hotkey", "browser_open_url", "run_shell_command", "set_task_plan", "find_text_on_screen", "crop_and_zoom"]:
+                self._task_active = True
+
             # ── Mouse & Keyboard ─────────────────────────────────────────────
             if name == "mouse_click":
                 raw_x = args.get("x")
@@ -2079,6 +2098,7 @@ class AudioLoop:
                 return {"status": f"Step {step_index} updated to {status}."}
 
             elif name == "task_complete":
+                self._task_active = False
                 summary = str(args.get("summary", ""))
                 print(f"\n[Task Complete] {summary}\n", flush=True)
                 return {"result": f"Objective verified complete: '{summary}'. You may now announce your final results to the user."}
@@ -2652,18 +2672,34 @@ class AudioLoop:
                             # Nudge ONLY if the AI went idle (did not call any tools this turn)
                             if not self._auto_last_had_tools:
                                 self._auto_idle_turns += 1
-                                if self._auto_idle_turns <= self._auto_max_idle:
-                                    await asyncio.sleep(1.0)
-                                    try:
-                                        await self.send_ws_json({
-                                            "type": "text",
-                                            "data": f"[System]: You have tools available. If there is an active objective, take action now or state that it is complete. ({self._auto_idle_turns}/{self._auto_max_idle})"
-                                        })
-                                    except Exception as auto_err:
-                                        print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                                if self._task_active:
+                                    max_idle = 10
+                                    if self._auto_idle_turns <= max_idle:
+                                        await asyncio.sleep(1.0)
+                                        try:
+                                            await self.send_ws_json({
+                                                "type": "text",
+                                                "data": f"[System]: Task is actively running. You must take the next action or call 'task_complete' to end your turn. Do not wait for user input. ({self._auto_idle_turns}/{max_idle})"
+                                            })
+                                        except Exception as auto_err:
+                                            print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                                    else:
+                                        print(f"\n[System] Autonomous task timed out — {self._auto_idle_turns} idle turns. Standing down.", flush=True)
+                                        self._task_active = False
+                                        self._auto_idle_turns = 0
                                 else:
-                                    print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
-                                    self._auto_idle_turns = 0
+                                    if self._auto_idle_turns <= self._auto_max_idle:
+                                        await asyncio.sleep(1.0)
+                                        try:
+                                            await self.send_ws_json({
+                                                "type": "text",
+                                                "data": f"[System]: You have tools available. If there is an active objective, take action now or call 'task_complete'. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                            })
+                                        except Exception as auto_err:
+                                            print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                                    else:
+                                        print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
+                                        self._auto_idle_turns = 0
                             else:
                                 # Tools were called. Sending the tool_response will naturally resume generation.
                                 self._auto_idle_turns = 0

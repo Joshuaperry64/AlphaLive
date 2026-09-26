@@ -26,6 +26,10 @@ import keyboard
 import argparse
 
 
+def _read_history_sync(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read().strip()
+
 def win32_get_clipboard() -> str:
     """Safely get clipboard text using native Win32 API to avoid OLE locks."""
     try:
@@ -2754,8 +2758,7 @@ class AudioLoop:
 
                         prior_history = ""
                         if os.path.exists(self.log_file):
-                            with open(self.log_file, "r", encoding="utf-8") as f:
-                                prior_history = f.read().strip()
+                            prior_history = await asyncio.to_thread(_read_history_sync, self.log_file)
 
                         # Retrieve evolving memory state
                         traits = self.mm.get_personality()
@@ -2862,8 +2865,7 @@ class AudioLoop:
 
                         prior_history = ""
                         if os.path.exists(self.log_file):
-                            with open(self.log_file, "r", encoding="utf-8") as f:
-                                prior_history = f.read().strip()
+                            prior_history = await asyncio.to_thread(_read_history_sync, self.log_file)
 
                         # Retrieve evolving memory state
                         traits = self.mm.get_personality()

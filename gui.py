@@ -44,7 +44,7 @@ import image_studio_manager
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QLabel, QPushButton, QTabWidget, QTextEdit,
+    QGridLayout, QFormLayout, QFileDialog, QLabel, QPushButton, QTabWidget, QTextEdit,
     QLineEdit, QSlider, QComboBox, QCheckBox, QGroupBox,
     QScrollArea, QFrame, QSplitter, QProgressBar, QSpinBox,
     QListWidget, QListWidgetItem, QSizePolicy, QDialog,

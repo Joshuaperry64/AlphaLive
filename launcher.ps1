@@ -64,7 +64,7 @@ Write-Host '========================================' -ForegroundColor Cyan
 Write-Host ''
 
 # --- Select Script to Run ---
-$selectedScript = 'gui.py'
+$selectedScript = 'ui/gui.py'
 $scriptDone = $false
 while (-not $scriptDone) {
     Write-Host 'Select Boot Mode:' -ForegroundColor Green
@@ -74,8 +74,8 @@ while (-not $scriptDone) {
     Write-Host 'Press 0 or 1 (Enter = GUI): ' -ForegroundColor Yellow -NoNewline
     
     $key = [console]::ReadKey($true)
-    if ($key.KeyChar -eq '0' -or $key.Key -eq 'Enter') { $selectedScript = 'gui.py'; $scriptDone = $true }
-    elseif ($key.KeyChar -eq '1') { $selectedScript = 'main.py'; $scriptDone = $true }
+    if ($key.KeyChar -eq '0' -or $key.Key -eq 'Enter') { $selectedScript = 'ui/gui.py'; $scriptDone = $true }
+    elseif ($key.KeyChar -eq '1') { $selectedScript = 'core/main.py'; $scriptDone = $true }
     Clear-Host
     Write-Host '========================================' -ForegroundColor Cyan
     Write-Host '             AlphaLive                  ' -ForegroundColor Cyan

@@ -4,7 +4,7 @@ import tempfile
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
-from memory_manager import MemoryManager
+from memory.memory_manager import MemoryManager
 
 class TestMemoryManager(unittest.TestCase):
     def setUp(self):

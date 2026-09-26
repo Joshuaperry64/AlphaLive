@@ -4,6 +4,10 @@ import asyncio
 import io
 import traceback
 import json
+import sys
+
+# Ensure we can import from sibling packages
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import base64
 import re
 import ctypes
@@ -154,9 +158,9 @@ def win32_set_clipboard(text: str) -> bool:
 from google import genai
 from google.genai import types
 
-import memory_manager
-import character_manager
-import image_studio_manager
+from memory import memory_manager
+from memory import character_manager
+from studio import image_studio_manager
 
 
 from dotenv import load_dotenv

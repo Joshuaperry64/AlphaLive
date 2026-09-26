@@ -8,8 +8,8 @@ import datetime
 from pathlib import Path
 from typing import Optional, Callable, Dict, Any, List, Tuple
 
-DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent / "memory.db"))
-IMAGES_DIR = Path(__file__).parent / "history" / "images"
+DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent.parent / "memory" / "memory.db"))
+IMAGES_DIR = Path(__file__).parent.parent / "history" / "images"
 SCRIPTS_DIR = Path(r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts")
 
 # Model catalog mapping to AlphaCoreTech safetensors

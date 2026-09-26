@@ -2398,8 +2398,10 @@ class ModalTab(QWidget):
         root.addWidget(lbl("Manage serverless deployments on Modal infrastructure.", 9, C["text_dim"]))
         root.addWidget(hsep())
 
-        ctrl_layout = QHBoxLayout()
+        ctrl_layout = QGridLayout()
+        ctrl_layout.setSpacing(10)
         
+        # 1. Gemini Live Proxy
         proxy_group = QFrame()
         proxy_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
         pl = QVBoxLayout(proxy_group)
@@ -2415,6 +2417,7 @@ class ModalTab(QWidget):
         pb_row.addWidget(b_stp_prox)
         pl.addLayout(pb_row)
         
+        # 2. vLLM Engine
         vllm_group = QFrame()
         vllm_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
         vl = QVBoxLayout(vllm_group)
@@ -2430,8 +2433,42 @@ class ModalTab(QWidget):
         vb_row.addWidget(b_stp_vllm)
         vl.addLayout(vb_row)
 
-        ctrl_layout.addWidget(proxy_group)
-        ctrl_layout.addWidget(vllm_group)
+        # 3. AlphaCore AIO API
+        aio_group = QFrame()
+        aio_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
+        al = QVBoxLayout(aio_group)
+        al.addWidget(lbl("AlphaCore AIO Backend", 10, C["neon_yellow"], bold=True))
+        al.addWidget(lbl("Deploys unified deployment.py API endpoints on Modal.", 8, C["text_dim"]))
+        ab_row = QHBoxLayout()
+        b_dep_aio = QPushButton("Deploy AIO API")
+        b_dep_aio.clicked.connect(lambda: self.deploy_requested.emit("alphacore_api", "deploy"))
+        b_stp_aio = QPushButton("Stop AIO API")
+        b_stp_aio.setObjectName("btn_danger")
+        b_stp_aio.clicked.connect(lambda: self.deploy_requested.emit("alphacore_api", "stop"))
+        ab_row.addWidget(b_dep_aio)
+        ab_row.addWidget(b_stp_aio)
+        al.addLayout(ab_row)
+
+        # 4. Neural Studio Engines
+        studio_group = QFrame()
+        studio_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
+        sl = QVBoxLayout(studio_group)
+        sl.addWidget(lbl("Neural Studio Engines", 10, C["neon_purple"], bold=True))
+        sl.addWidget(lbl("Deploys txt2img & upscaler workers on Modal H100 cluster.", 8, C["text_dim"]))
+        sb_row = QHBoxLayout()
+        b_dep_std = QPushButton("Deploy Studio")
+        b_dep_std.clicked.connect(lambda: self.deploy_requested.emit("txt2img", "deploy"))
+        b_stp_std = QPushButton("Stop Studio")
+        b_stp_std.setObjectName("btn_danger")
+        b_stp_std.clicked.connect(lambda: self.deploy_requested.emit("txt2img", "stop"))
+        sb_row.addWidget(b_dep_std)
+        sb_row.addWidget(b_stp_std)
+        sl.addLayout(sb_row)
+
+        ctrl_layout.addWidget(proxy_group, 0, 0)
+        ctrl_layout.addWidget(vllm_group, 0, 1)
+        ctrl_layout.addWidget(aio_group, 1, 0)
+        ctrl_layout.addWidget(studio_group, 1, 1)
         root.addLayout(ctrl_layout)
 
         root.addWidget(hsep())
@@ -2910,7 +2947,7 @@ class ImageGenWorker(QThread):
     finished = pyqtSignal(dict)
     failed   = pyqtSignal(str)
 
-    def __init__(self, prompt: str, model_name: str = "jugg", negative_prompt: str = "", steps: int = 25, guidance: float = 7.0, seed: int = -1):
+    def __init__(self, prompt: str, model_name: str = "jugg", negative_prompt: str = "", steps: int = 25, guidance: float = 7.0, seed: int = -1, lora: str = "none"):
         super().__init__()
         self.prompt = prompt
         self.model_name = model_name
@@ -2918,6 +2955,7 @@ class ImageGenWorker(QThread):
         self.steps = steps
         self.guidance = guidance
         self.seed = seed
+        self.lora = lora
         self.ism = image_studio_manager.ImageStudioManager()
 
     def run(self):
@@ -2932,9 +2970,43 @@ class ImageGenWorker(QThread):
                 steps=self.steps,
                 guidance=self.guidance,
                 seed=self.seed,
+                lora=self.lora,
                 progress_callback=_cb
             )
             self.finished.emit(res)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class ImageUpscaleWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(dict)
+    failed   = pyqtSignal(str)
+
+    def __init__(self, image_path: str, scale: int = 4, model_name: str = "realesrgan-x4plus", generation_id: int = None):
+        super().__init__()
+        self.image_path = image_path
+        self.scale = scale
+        self.model_name = model_name
+        self.generation_id = generation_id
+        self.ism = image_studio_manager.ImageStudioManager()
+
+    def run(self):
+        try:
+            def _cb(cur, total, msg):
+                self.progress.emit(cur, total, msg)
+
+            res = self.ism.upscale_image(
+                image_path=self.image_path,
+                scale=self.scale,
+                model_name=self.model_name,
+                generation_id=self.generation_id,
+                progress_callback=_cb
+            )
+            if res.get("error"):
+                self.failed.emit(res["error"])
+            else:
+                self.finished.emit(res)
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -2944,8 +3016,10 @@ class ImageStudioTab(QWidget):
         super().__init__(parent)
         self.ism = image_studio_manager.ImageStudioManager()
         self.current_gen_id = None
+        self.current_img_path = None
         self.current_rating = 0
         self._worker = None
+        self._upscale_worker = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(15, 15, 15, 15)
@@ -2985,6 +3059,20 @@ class ImageStudioTab(QWidget):
         for k, v in image_studio_manager.MODEL_CATALOG.items():
             self.cb_model.addItem(f"{v['name']} ({v['style']})", k)
         ll.addWidget(self.cb_model)
+
+        # LoRA Selector
+        ll.addWidget(lbl("LORA ENHANCEMENT", 9, C["text_dim"], bold=True))
+        self.cb_lora = QComboBox()
+        self.cb_lora.setStyleSheet(f"""
+            QComboBox {{
+                background: {C['bg_deep']}; color: {C['neon_yellow']};
+                border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
+                font-family: '{FONT_MONO}'; font-size: 10px;
+            }}
+        """)
+        for k, v in getattr(image_studio_manager, "LORA_CATALOG", {}).items():
+            self.cb_lora.addItem(v, k)
+        ll.addWidget(self.cb_lora)
 
         # Prompt Input
         ll.addWidget(lbl("CREATIVE PROMPT", 9, C["text_dim"], bold=True))
@@ -3113,6 +3201,31 @@ class ImageStudioTab(QWidget):
         vp_hdr.addStretch()
         self.lbl_meta_badge = lbl("Dimensions: —", 9, C["text_dim"])
         vp_hdr.addWidget(self.lbl_meta_badge)
+
+        self.cb_upscaler = QComboBox()
+        self.cb_upscaler.setStyleSheet(f"""
+            QComboBox {{
+                background: {C['bg_deep']}; color: {C['neon_cyan']};
+                border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px;
+                font-size: 9px;
+            }}
+        """)
+        for k, v in getattr(image_studio_manager, "UPSCALER_CATALOG", {}).items():
+            self.cb_upscaler.addItem(v, k)
+        vp_hdr.addWidget(self.cb_upscaler)
+
+        self.btn_upscale = QPushButton("🔍 Upscale 4x")
+        self.btn_upscale.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_purple']}22; color: {C['neon_purple']};
+                border: 1px solid {C['neon_purple']}; border-radius: 4px; padding: 3px 8px;
+                font-weight: bold; font-size: 9px;
+            }}
+            QPushButton:hover {{ background: {C['neon_purple']}44; }}
+            QPushButton:disabled {{ background: {C['bg_deep']}; color: {C['text_dim']}; border-color: {C['border']}; }}
+        """)
+        self.btn_upscale.clicked.connect(self._on_upscale_clicked)
+        vp_hdr.addWidget(self.btn_upscale)
         rl.addLayout(vp_hdr)
 
         # Image display container
@@ -3268,6 +3381,7 @@ class ImageStudioTab(QWidget):
             return
 
         model_name = self.cb_model.currentData() or "jugg"
+        lora = self.cb_lora.currentData() or "none" if hasattr(self, "cb_lora") else "none"
         neg = self.in_neg_prompt.toPlainText().strip()
         steps = self.slider_steps.value()
         guidance = self.slider_guidance.value() / 10.0
@@ -3280,7 +3394,7 @@ class ImageStudioTab(QWidget):
         self.progress_bar.setValue(0)
         self.lbl_progress_status.setText("Spinning up generation worker...")
 
-        self._worker = ImageGenWorker(prompt, model_name, neg, steps, guidance, seed)
+        self._worker = ImageGenWorker(prompt, model_name, neg, steps, guidance, seed, lora)
         self._worker.progress.connect(self._on_gen_progress)
         self._worker.finished.connect(self._on_gen_finished)
         self._worker.failed.connect(self._on_gen_failed)
@@ -3300,6 +3414,7 @@ class ImageStudioTab(QWidget):
         self.current_rating = 0
         img_path = res.get("image_path")
         if img_path and os.path.exists(img_path):
+            self.current_img_path = img_path
             pixmap = QPixmap(img_path)
             scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.img_viewport.setPixmap(scaled)
@@ -3317,6 +3432,58 @@ class ImageStudioTab(QWidget):
         self.btn_generate.setEnabled(True)
         self.progress_bar.setValue(0)
         self.lbl_progress_status.setText(f"Generation error: {err_msg}")
+
+    def _on_upscale_clicked(self):
+        if not self.current_img_path or not os.path.exists(self.current_img_path):
+            self.lbl_progress_status.setText("Error: No image loaded to upscale.")
+            return
+
+        model_name = self.cb_upscaler.currentData() if hasattr(self, "cb_upscaler") else "realesrgan-x4plus"
+        if not model_name:
+            model_name = "realesrgan-x4plus"
+
+        self.btn_upscale.setEnabled(False)
+        self.progress_bar.setValue(10)
+        self.lbl_progress_status.setText(f"Initializing {model_name} 4x super-resolution...")
+
+        self._upscale_worker = ImageUpscaleWorker(
+            image_path=self.current_img_path,
+            scale=4,
+            model_name=model_name,
+            generation_id=self.current_gen_id
+        )
+        self._upscale_worker.progress.connect(self._on_upscale_progress)
+        self._upscale_worker.finished.connect(self._on_upscale_finished)
+        self._upscale_worker.failed.connect(self._on_upscale_failed)
+        self._upscale_worker.start()
+
+    def _on_upscale_progress(self, cur: int, total: int, msg: str):
+        pct = int((cur / max(1, total)) * 100)
+        self.progress_bar.setValue(pct)
+        self.lbl_progress_status.setText(f"{msg} ({pct}%)")
+
+    def _on_upscale_finished(self, res: dict):
+        self.btn_upscale.setEnabled(True)
+        self.progress_bar.setValue(100)
+        self.lbl_progress_status.setText(f"Super-resolution complete! Enhanced to {res.get('dimensions', '4096x4096')}.")
+
+        up_path = res.get("upscaled_path")
+        if up_path and os.path.exists(up_path):
+            self.current_img_path = up_path
+            pixmap = QPixmap(up_path)
+            scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.img_viewport.setPixmap(scaled)
+            self.lbl_image_title.setText(f"VIEWPORT — {res.get('file_name', 'Upscaled')}")
+            self.lbl_meta_badge.setText(f"{res.get('dimensions', '4096x4096')} · {res.get('model_name')} · {res.get('size_kb', 0)} KB")
+
+        critique = res.get("critique") or "Super-resolution textures sharpened."
+        self.lbl_critique_text.setText(critique)
+        self._refresh_history()
+
+    def _on_upscale_failed(self, err_msg: str):
+        self.btn_upscale.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.lbl_progress_status.setText(f"Upscaling error: {err_msg}")
 
     def _set_rating(self, rating: int):
         self.current_rating = rating
@@ -3381,6 +3548,7 @@ class ImageStudioTab(QWidget):
         self.current_gen_id = gen.get("id")
         img_path = gen.get("image_path")
         if img_path and os.path.exists(img_path):
+            self.current_img_path = img_path
             pixmap = QPixmap(img_path)
             scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.img_viewport.setPixmap(scaled)
@@ -3924,10 +4092,15 @@ class MainWindow(QMainWindow):
                 self._modal_db.append(f"[{target}] Deployment already running...", C["neon_yellow"])
                 return
 
+        scripts_dir = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
         if target == "proxy":
             cmd = "modal deploy modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
         elif target == "vllm":
             cmd = "modal deploy modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm-bucket"
+        elif target == "alphacore_api":
+            cmd = f"Set-Location '{scripts_dir}'; modal deploy deployment.py" if action == "deploy" else "modal app stop alphacore-aio-backend"
+        elif target == "txt2img":
+            cmd = f"Set-Location '{scripts_dir}'; modal deploy txt2img.py" if action == "deploy" else "modal app stop alphacore-txt2img"
         else:
             return
 
@@ -4051,6 +4224,16 @@ class MainWindow(QMainWindow):
                 
             if "error" in lo and not "engine error" in lo:
                 self._status_overlay.update_status("err", "ERROR", C["neon_red"])
+
+        # Handle remote overlay requests from AI engine
+        if "[overlay_set:show]" in lo:
+            if self._cursor_overlay is None:
+                self._toggle_overlay()
+        elif "[overlay_set:hide]" in lo:
+            if self._cursor_overlay is not None:
+                self._toggle_overlay()
+        elif "[overlay_toggle]" in lo:
+            self._toggle_overlay()
 
     def _on_status(self, status: str):
         if status == "running":
@@ -4310,23 +4493,49 @@ class CoordinateOverlay(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Draw Crosshair
-        pen = QPen(QColor(255, 0, 0, 255))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        
-        painter.drawLine(x - 20, y, x + 20, y)
-        painter.drawLine(x, y - 20, x, y + 20)
-        
+        w, h = self.width(), self.height()
+
+        # 1. Coordinate Grid Lines every 200px
+        grid_pen = QPen(QColor(0, 200, 255, 35))
+        grid_pen.setStyle(Qt.PenStyle.DashLine)
+        grid_pen.setWidth(1)
+
+        axis_pen = QPen(QColor(0, 255, 200, 110))
+        painter.setFont(QFont("Consolas", 8))
+
+        # Vertical grid ticks
+        for gx in range(200, w, 200):
+            painter.setPen(grid_pen)
+            painter.drawLine(gx, 0, gx, h)
+            painter.setPen(axis_pen)
+            painter.drawText(gx + 3, 14, f"X:{gx}")
+
+        # Horizontal grid ticks
+        for gy in range(200, h, 200):
+            painter.setPen(grid_pen)
+            painter.drawLine(0, gy, w, gy)
+            painter.setPen(axis_pen)
+            painter.drawText(6, gy - 3, f"Y:{gy}")
+
+        # 2. Dynamic Crosshair
+        cross_pen = QPen(QColor(255, 0, 80, 220))
+        cross_pen.setWidth(2)
+        painter.setPen(cross_pen)
+        painter.drawLine(x - 24, y, x + 24, y)
+        painter.drawLine(x, y - 24, x, y + 24)
+
         # Center dot
-        painter.setBrush(QBrush(QColor(255, 0, 0)))
+        painter.setBrush(QBrush(QColor(0, 255, 220)))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QPoint(x, y), 3, 3)
-        
-        # Coordinate Text
-        painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-        painter.setPen(QColor(255, 0, 0))
-        painter.drawText(x + 15, y + 25, f"X: {x}, Y: {y}")
+
+        # 3. Floating Coordinate Badge beside cursor
+        badge_text = f"X: {x}, Y: {y}"
+        painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        painter.setBrush(QBrush(QColor(10, 15, 25, 210)))
+        painter.setPen(QPen(QColor(0, 255, 220, 180)))
+        painter.drawRoundedRect(x + 12, y + 12, 108, 22, 4, 4)
+        painter.drawText(x + 18, y + 27, badge_text)
 
 class CalibrationOverlay(QWidget):
     finished = pyqtSignal()

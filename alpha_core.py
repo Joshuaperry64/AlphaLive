@@ -2000,9 +2000,10 @@ class AudioLoop:
             elif name == "system_notification":
                 message = args.get("message", "")
                 # Fire and forget a PowerShell msgbox so it doesn't block
-                clean_msg = message.replace("'", "''")
-                ps_cmd = f"Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show('{clean_msg}', 'Alpha Notification')"
-                subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+                env = os.environ.copy()
+                env["ALPHA_MSG"] = str(message)
+                ps_cmd = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show($env:ALPHA_MSG, 'Alpha Notification')"
+                subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd], env=env)
                 return {"result": f"Displayed notification: {message}"}
 
             elif name == "get_active_window":

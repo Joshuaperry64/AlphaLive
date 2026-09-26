@@ -464,8 +464,9 @@ def lbl(text, size=10, color=None, bold=False, mono=False, spacing=0):
     col = color or C["text_main"]
     fam = FONT_MONO if mono else FONT_UI
     wt = "bold" if bold else "normal"
+    safe_size = max(6, int(size)) if (size is not None and str(size).lstrip('-').isdigit()) else 10
     w.setStyleSheet(
-        f"font-family:'{fam}'; font-size:{size}px; color:{col}; "
+        f"font-family:'{fam}'; font-size:{safe_size}px; color:{col}; "
         f"font-weight:{wt}; letter-spacing:{spacing}px; background:transparent; border:none;"
     )
     return w
@@ -529,8 +530,7 @@ class MatrixRain(QWidget):
         w, h = self.width(), self.height()
         # Fade
         painter.fillRect(0, 0, w, h, QColor(4, 8, 16, 38))
-        font = QFont(FONT_MONO)
-        font.setPixelSize(max(1, self._font_size - 3))
+        font = QFont(FONT_MONO, max(7, self._font_size - 3))
         painter.setFont(font)
         cols = max(1, w // self._font_size)
         if len(self._drops) != cols:
@@ -931,6 +931,14 @@ class EngineWorker(QThread):
             env = os.environ.copy()
             env["ALPHALIVE_CONFIG"] = str(CONFIG_PATH)
             env["ALPHALIVE_ENGINE"] = self._engine
+            sess_name = self._cfg.get("Global", {}).get("Session", "alpha").strip()
+            if sess_name:
+                env["ALPHALIVE_SESSION"] = sess_name
+            import character_manager
+            cm = character_manager.CharacterManager()
+            act_char = cm.get_active_character_name()
+            if act_char:
+                env["ALPHALIVE_CHARACTER"] = act_char
 
             cfg_api_key = self._cfg.get("Global", {}).get("ApiKey", "").strip()
             if cfg_api_key:
@@ -2017,13 +2025,9 @@ class EnginePanel(QWidget):
         eng_cfg = cfg.get(engine, {})
         fields  = {k: (t, o, tip) for k, t, o, tip in ENGINE_FIELDS.get(engine, [])}
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        inner = QWidget()
-        il    = QVBoxLayout(inner)
-        il.setContentsMargins(0, 0, 4, 0)
-        il.setSpacing(10)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
 
         for sec_title, sec_keys in SECTIONS.items():
             sec_fields = [(k, *fields[k]) for k in sec_keys if k in fields]
@@ -2048,13 +2052,7 @@ class EnginePanel(QWidget):
                     w = QLineEdit(str(val))
                 self._w[key] = w
                 gl.addWidget(config_row(key, w, tip))
-            il.addWidget(grp)
-
-        il.addStretch(1)
-        scroll.setWidget(inner)
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(scroll)
+            root.addWidget(grp)
 
     def values(self) -> dict:
         out = {}
@@ -2268,7 +2266,10 @@ class ConfigTab(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("background:transparent;")
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        scroll.viewport().setStyleSheet("background: transparent;")
 
         inner = QWidget()
         inner_layout = QVBoxLayout(inner)
@@ -2397,101 +2398,97 @@ class ModalTab(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(15, 15, 15, 15)
         root.setSpacing(10)
-        
+
         root.addWidget(lbl("MODAL CLOUD DEPLOYMENTS", 12, C["neon_blue"], bold=True, spacing=2))
         root.addWidget(lbl("Manage serverless deployments on Modal infrastructure.", 9, C["text_dim"]))
         root.addWidget(hsep())
 
-        ctrl_layout = QGridLayout()
-        ctrl_layout.setSpacing(10)
-        
-        # 1. Gemini Live Proxy
-        proxy_group = QFrame()
-        proxy_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
-        pl = QVBoxLayout(proxy_group)
-        pl.addWidget(lbl("Gemini Live Proxy", 10, C["text_main"], bold=True))
-        pl.addWidget(lbl("Routes audio/video through a websocket proxy to Gemini.", 8, C["text_dim"]))
-        pb_row = QHBoxLayout()
-        b_dep_prox = QPushButton("Deploy Proxy")
-        b_dep_prox.clicked.connect(lambda: self.deploy_requested.emit("proxy", "deploy"))
-        b_stp_prox = QPushButton("Stop Proxy")
-        b_stp_prox.setObjectName("btn_danger")
-        b_stp_prox.clicked.connect(lambda: self.deploy_requested.emit("proxy", "stop"))
-        pb_row.addWidget(b_dep_prox)
-        pb_row.addWidget(b_stp_prox)
-        pl.addLayout(pb_row)
-        
-        # 2. vLLM Engine
-        vllm_group = QFrame()
-        vllm_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
-        vl = QVBoxLayout(vllm_group)
-        vl.addWidget(lbl("vLLM Engine", 10, C["neon_cyan"], bold=True))
-        vl.addWidget(lbl("Hosts your custom open-weight model for Hybrid Mode.", 8, C["text_dim"]))
-        vb_row = QHBoxLayout()
-        b_dep_vllm = QPushButton("Deploy vLLM")
-        b_dep_vllm.clicked.connect(lambda: self.deploy_requested.emit("vllm", "deploy"))
-        b_stp_vllm = QPushButton("Stop vLLM")
-        b_stp_vllm.setObjectName("btn_danger")
-        b_stp_vllm.clicked.connect(lambda: self.deploy_requested.emit("vllm", "stop"))
-        vb_row.addWidget(b_dep_vllm)
-        vb_row.addWidget(b_stp_vllm)
-        vl.addLayout(vb_row)
+        grid = QGridLayout()
+        grid.setSpacing(10)
 
-        # 3. AlphaCore AIO API
-        aio_group = QFrame()
-        aio_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
-        al = QVBoxLayout(aio_group)
-        al.addWidget(lbl("AlphaCore AIO Backend", 10, C["neon_yellow"], bold=True))
-        al.addWidget(lbl("Deploys unified deployment.py API endpoints on Modal.", 8, C["text_dim"]))
-        ab_row = QHBoxLayout()
-        b_dep_aio = QPushButton("Deploy AIO API")
-        b_dep_aio.clicked.connect(lambda: self.deploy_requested.emit("alphacore_api", "deploy"))
-        b_stp_aio = QPushButton("Stop AIO API")
-        b_stp_aio.setObjectName("btn_danger")
-        b_stp_aio.clicked.connect(lambda: self.deploy_requested.emit("alphacore_api", "stop"))
-        ab_row.addWidget(b_dep_aio)
-        ab_row.addWidget(b_stp_aio)
-        al.addLayout(ab_row)
+        def _card(title, color, desc, deploy_target):
+            f = QFrame()
+            f.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
+            fl = QVBoxLayout(f)
+            fl.setContentsMargins(10, 10, 10, 10)
+            fl.setSpacing(6)
+            fl.addWidget(lbl(title, 10, color, bold=True))
+            fl.addWidget(lbl(desc, 8, C["text_dim"]))
+            row = QHBoxLayout()
+            btn_dep = QPushButton("Deploy")
+            btn_dep.clicked.connect(lambda: self.deploy_requested.emit(deploy_target, "deploy"))
+            btn_dep.setStyleSheet(
+                f"background:{color}22; color:{color}; border:1px solid {color}; "
+                f"border-radius:3px; padding:5px 12px; font-size:9px; font-weight:bold;"
+            )
+            btn_stp = QPushButton("Stop")
+            btn_stp.setObjectName("btn_danger")
+            btn_stp.clicked.connect(lambda: self.deploy_requested.emit(deploy_target, "stop"))
+            row.addWidget(btn_dep)
+            row.addWidget(btn_stp)
+            fl.addLayout(row)
+            return f
 
-        # 4. Neural Studio Engines
-        studio_group = QFrame()
-        studio_group.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px;")
-        sl = QVBoxLayout(studio_group)
-        sl.addWidget(lbl("Neural Studio Engines", 10, C["neon_purple"], bold=True))
-        sl.addWidget(lbl("Deploys txt2img & upscaler workers on Modal H100 cluster.", 8, C["text_dim"]))
-        sb_row = QHBoxLayout()
-        b_dep_std = QPushButton("Deploy Studio")
-        b_dep_std.clicked.connect(lambda: self.deploy_requested.emit("txt2img", "deploy"))
-        b_stp_std = QPushButton("Stop Studio")
-        b_stp_std.setObjectName("btn_danger")
-        b_stp_std.clicked.connect(lambda: self.deploy_requested.emit("txt2img", "stop"))
-        sb_row.addWidget(b_dep_std)
-        sb_row.addWidget(b_stp_std)
-        sl.addLayout(sb_row)
+        # ── Card 1: AlphaLive API (unified — deployment.py in deployments/) ──
+        grid.addWidget(_card(
+            "AlphaLive API",
+            C["neon_blue"],
+            "Unified endpoint: upscaler, txt2img, img2img, txt2vid, img2vid.\n"
+            "Deploys deployments/deployment.py → alphalive_api on Modal.",
+            "alphalive_api",
+        ), 0, 0)
 
-        ctrl_layout.addWidget(proxy_group, 0, 0)
-        ctrl_layout.addWidget(vllm_group, 0, 1)
-        ctrl_layout.addWidget(aio_group, 1, 0)
-        ctrl_layout.addWidget(studio_group, 1, 1)
-        root.addLayout(ctrl_layout)
+        # ── Card 2: Instant Asset Loader (instant-loader.py) ───────────────────
+        grid.addWidget(_card(
+            "Instant Asset Sync",
+            C["neon_green"],
+            "Scans & syncs all SDXL checkpoints and LoRAs to Modal hf-hub-cache volume.\n"
+            "Runs deployments/instant-loader.py.",
+            "instant_loader",
+        ), 0, 1)
 
+        # ── Card 3: Gemini Live Proxy ──────────────────────────────────────────
+        grid.addWidget(_card(
+            "Gemini Live Proxy",
+            C["neon_cyan"],
+            "WebSocket proxy routing Gemini Live audio/video sessions through Modal.",
+            "proxy",
+        ), 1, 0)
+
+        # ── Card 4: vLLM Engine ────────────────────────────────────────────────
+        grid.addWidget(_card(
+            "vLLM Engine",
+            C["neon_purple"],
+            "Hosts your open-weight model for Hybrid Mode inference.",
+            "vllm",
+        ), 1, 1)
+
+        root.addLayout(grid)
         root.addWidget(hsep())
         root.addWidget(lbl("DEPLOYMENT LOGS", 9, C["text_dim"], bold=True))
 
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
-        self._log.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_main']}; border:1px solid {C['border']}; font-family:'{FONT_MONO}'; font-size:10px; padding:8px;")
+        self._log.setStyleSheet(
+            f"background:{C['bg_deep']}; color:{C['text_main']}; border:1px solid {C['border']}; "
+            f"font-family:'{FONT_MONO}'; font-size:10px; padding:8px;"
+        )
         root.addWidget(self._log, 1)
 
     def append(self, text: str, color: str = None):
-        cur = self._log.textCursor()
-        cur.movePosition(cur.MoveOperation.End)
-        fmt = QTextCharFormat()
-        fmt.setForeground(QColor(color or C["text_main"]))
-        cur.insertText(text + "\n", fmt)
-        self._log.setTextCursor(cur)
-        self._log.ensureCursorVisible()
+        try:
+            if not hasattr(self, "_log") or self._log is None:
+                return
+            cur = self._log.textCursor()
+            cur.movePosition(cur.MoveOperation.End)
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color or C["text_main"]))
+            cur.insertText(text + "\n", fmt)
+            self._log.setTextCursor(cur)
+            self._log.ensureCursorVisible()
+        except (RuntimeError, AttributeError):
+            pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2580,21 +2577,35 @@ class CharactersTab(QWidget):
 
         right_layout.addLayout(form_layout)
 
+        btn_box = QHBoxLayout()
+        self.btn_activate = QPushButton("★ ACTIVATE PERSONA ★")
+        self.btn_activate.setStyleSheet(f"background: {C['neon_green']}22; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; padding: 10px; font-weight:bold; letter-spacing: 1px;")
+        self.btn_activate.clicked.connect(self._on_activate_clicked)
+
         self.btn_save = QPushButton("SAVE CHARACTER")
         self.btn_save.setStyleSheet(f"background: {C['neon_blue']}33; color: {C['neon_blue']}; border: 1px solid {C['neon_blue']}; padding: 10px; font-weight:bold;")
         self.btn_save.clicked.connect(self._on_save_clicked)
+
+        btn_box.addWidget(self.btn_activate, 1)
+        btn_box.addWidget(self.btn_save, 1)
         right_layout.addStretch()
-        right_layout.addWidget(self.btn_save)
+        right_layout.addLayout(btn_box)
 
         root.addWidget(right_panel, 2)
 
+        self.char_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         self._load_list()
 
     def _load_list(self):
         self.char_list.clear()
+        active_name = self.cm.get_active_character_name()
         for c in self.cm.get_all_characters():
-            item = QListWidgetItem(c['name'])
+            is_active = (c['name'] == active_name)
+            display = f"★ [ACTIVE] {c['name']}" if is_active else f"  {c['name']}"
+            item = QListWidgetItem(display)
             item.setData(Qt.ItemDataRole.UserRole, c)
+            if is_active:
+                item.setForeground(QColor(C['neon_green']))
             self.char_list.addItem(item)
 
     def _on_char_selected(self, item):
@@ -2606,6 +2617,25 @@ class CharactersTab(QWidget):
         self.f_personality.setPlainText(data.get('personality', ''))
         self.f_response.setPlainText(data.get('response_style', ''))
         self.f_avatar.setText(data.get('avatar_path', ''))
+
+    def _on_activate_clicked(self):
+        name = self.f_name.text().strip() or self.current_char
+        if name:
+            self._activate_character(name)
+
+    def _on_item_double_clicked(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if data and data.get('name'):
+            self._activate_character(data['name'])
+
+    def _activate_character(self, name: str):
+        self.cm.set_active_character_name(name)
+        self._load_list()
+        win = self.window()
+        if hasattr(win, '_header') and hasattr(win._header, 'refresh_chars'):
+            win._header.refresh_chars()
+        if hasattr(win, 'send_character_change'):
+            win.send_character_change(name)
 
     def _on_new_clicked(self):
         self.current_char = None
@@ -2624,8 +2654,8 @@ class CharactersTab(QWidget):
             self._on_new_clicked()
             # notify main window to refresh header
             win = self.window()
-            if hasattr(win, '_hdr') and hasattr(win._hdr, 'refresh_chars'):
-                win._hdr.refresh_chars()
+            if hasattr(win, '_header') and hasattr(win._header, 'refresh_chars'):
+                win._header.refresh_chars()
 
     def _on_save_clicked(self):
         name = self.f_name.text().strip()
@@ -2641,8 +2671,8 @@ class CharactersTab(QWidget):
         self._load_list()
         # notify main window to refresh header
         win = self.window()
-        if hasattr(win, '_hdr') and hasattr(win._hdr, 'refresh_chars'):
-            win._hdr.refresh_chars()
+        if hasattr(win, '_header') and hasattr(win._header, 'refresh_chars'):
+            win._header.refresh_chars()
 
     def _on_browse_avatar(self):
         from PyQt6.QtWidgets import QFileDialog
@@ -3581,6 +3611,7 @@ class LaunchSidebar(QFrame):
     vllm_health_requested = pyqtSignal()
     quick_settings_changed = pyqtSignal(dict)
     pleasure_mode_requested = pyqtSignal(bool)
+    session_changed = pyqtSignal(str)
 
     def __init__(self, cfg: dict, parent=None):
         super().__init__(parent)
@@ -3629,21 +3660,62 @@ class LaunchSidebar(QFrame):
             root.addWidget(b)
         
         root.addWidget(hsep())
+        root.addWidget(lbl("ACTIVE SESSION", 8, C["neon_blue"], True, spacing=2))
+
+        sess_row = QHBoxLayout()
+        sess_row.setSpacing(4)
+        self._sess_combo = QComboBox()
+        self._sess_combo.setEditable(True)
+        self._sess_combo.setStyleSheet(f"""
+            QComboBox {{
+                background:{C['bg_dark']}; color:{C['text_bright']};
+                border:1px solid {C['border']}; border-radius:3px;
+                padding:2px 6px; font-size:10px; font-weight:bold;
+            }}
+            QComboBox::drop-down {{ border:none; }}
+        """)
+        self._sess_combo.setFixedHeight(26)
+        self._refresh_sessions()
+        if self._sess_combo.lineEdit():
+            self._sess_combo.lineEdit().returnPressed.connect(self._on_sess_apply)
+
+        self._sess_btn = QPushButton("SET")
+        self._sess_btn.setFixedSize(36, 26)
+        self._sess_btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{C['neon_blue']}22; color:{C['neon_blue']};
+                border:1px solid {C['neon_blue']}; border-radius:3px;
+                font-size:9px; font-weight:bold;
+            }}
+            QPushButton:hover {{
+                background:{C['neon_blue']}44;
+            }}
+        """)
+        self._sess_btn.clicked.connect(self._on_sess_apply)
+        sess_row.addWidget(self._sess_combo, 1)
+        sess_row.addWidget(self._sess_btn)
+        root.addLayout(sess_row)
+
+        root.addWidget(hsep())
         root.addWidget(lbl("QUICK SETTINGS", 8, C["neon_blue"], True, spacing=2))
 
         g = self._cfg.get("Global", {})
+        eng_cfg = self._cfg.get("alpha_core.py", {})
+        self._voice_sw  = CyberToggle(eng_cfg.get("VoiceOutput", "enabled").lower() in ("enabled", "true"))
         self._modal_sw  = CyberToggle(g.get("Modal",  "enabled") == "enabled")
         self._memory_sw = CyberToggle(g.get("Memory", "enabled") == "enabled")
         self._auto_sw   = CyberToggle(g.get("AutonomousControl", "disabled") == "enabled")
         self._vllm_sw   = CyberToggle(g.get("VllmMode", "disabled") == "enabled")
 
+        self._voice_sw.toggled.connect(self._sync_qs)
         self._modal_sw.toggled.connect(self._sync_qs)
         self._memory_sw.toggled.connect(self._sync_qs)
         self._auto_sw.toggled.connect(self._sync_qs)
         self._vllm_sw.toggled.connect(self._sync_qs)
 
-        for label, sw in [("Modal Proxy", self._modal_sw), ("Memory", self._memory_sw),
-                           ("Autonomous", self._auto_sw), ("vLLM Hybrid", self._vllm_sw)]:
+        for label, sw in [("Voice Output", self._voice_sw), ("Modal Proxy", self._modal_sw),
+                          ("Memory", self._memory_sw), ("Autonomous", self._auto_sw),
+                          ("vLLM Hybrid", self._vllm_sw)]:
             r = QHBoxLayout()
             r.addWidget(lbl(label, 9))
             r.addStretch()
@@ -3734,8 +3806,45 @@ class LaunchSidebar(QFrame):
         last = g.get("LastEngine", ENGINES[0])
         if last in ENGINES: self._select(last)
 
+    def _refresh_sessions(self):
+        curr = self._cfg.get("Global", {}).get("Session", "alpha").strip()
+        self._sess_combo.blockSignals(True)
+        self._sess_combo.clear()
+        names = set()
+        if os.path.exists("history"):
+            for f in os.listdir("history"):
+                if f.endswith(".txt"):
+                    names.add(f[:-4])
+        if curr:
+            names.add(curr)
+        for n in sorted(names):
+            self._sess_combo.addItem(n)
+        if curr:
+            idx = self._sess_combo.findText(curr)
+            if idx >= 0:
+                self._sess_combo.setCurrentIndex(idx)
+            else:
+                self._sess_combo.setEditText(curr)
+        self._sess_combo.blockSignals(False)
+
+    def _on_sess_apply(self):
+        name = self._sess_combo.currentText().strip()
+        if name:
+            self.session_changed.emit(name)
+
+    def set_session_name(self, name: str):
+        self._sess_combo.blockSignals(True)
+        idx = self._sess_combo.findText(name)
+        if idx >= 0:
+            self._sess_combo.setCurrentIndex(idx)
+        else:
+            self._sess_combo.addItem(name)
+            self._sess_combo.setCurrentText(name)
+        self._sess_combo.blockSignals(False)
+
     def _sync_qs(self):
         self.quick_settings_changed.emit({
+            "VoiceOutput": "enabled" if self._voice_sw.isChecked() else "disabled",
             "Modal": "enabled" if self._modal_sw.isChecked() else "disabled",
             "Memory": "enabled" if self._memory_sw.isChecked() else "disabled",
             "AutonomousControl": "enabled" if self._auto_sw.isChecked() else "disabled",
@@ -3746,6 +3855,10 @@ class LaunchSidebar(QFrame):
         })
 
     def sync_from_config(self, g: dict):
+        eng_cfg = self._cfg.get("alpha_core.py", {})
+        self._voice_sw.blockSignals(True)
+        self._voice_sw.setChecked(eng_cfg.get("VoiceOutput", "enabled").lower() in ("enabled", "true"))
+        self._voice_sw.blockSignals(False)
         self._modal_sw.blockSignals(True)
         self._memory_sw.blockSignals(True)
         self._auto_sw.blockSignals(True)
@@ -3895,8 +4008,14 @@ class Header(QWidget):
     def _on_char_changed(self, text):
         if text == "None (Default)":
             self.cm.set_active_character_name("")
+            char_name = ""
         else:
             self.cm.set_active_character_name(text)
+            char_name = text
+            
+        win = self.window()
+        if hasattr(win, "send_character_change"):
+            win.send_character_change(char_name)
 
     def _tick_clock(self):
         self._clock.setText(datetime.now().strftime("%Y-%m-%d  %H:%M:%S"))
@@ -3973,6 +4092,7 @@ class MainWindow(QMainWindow):
         self._sidebar.vllm_health_requested.connect(self._check_vllm_health)
         self._sidebar.quick_settings_changed.connect(self._on_quick_settings_changed)
         self._sidebar.pleasure_mode_requested.connect(self._on_pleasure_mode)
+        self._sidebar.session_changed.connect(self._on_session_changed)
         body.addWidget(self._sidebar)
         
         self.reveal_trigger = QShortcut(QKeySequence("Ctrl+Shift+P"), self)
@@ -4088,14 +4208,30 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._slog(f"Failed to switch session: {e}", "error")
 
+    def _on_session_changed(self, name: str):
+        self._on_history_session_selected(name)
+        if self._worker and self._running:
+            self._worker.write_stdin(f"[SESSION_SET:{name}]")
+
+    def send_character_change(self, char_name: str):
+        if self._worker and self._running:
+            self._worker.write_stdin(f"[CHARACTER_SET:{char_name}]")
+
     def _do_deploy_modal_ext(self, target: str, action: str):
+        """
+        Targets and their Modal app-stop names:
+          alphalive_api  → alphacore-aio-backend   (deployments/deployment.py)
+          proxy          → alphalive-proxy          (AlphaCoreTech/scripts/modalmode.py)
+          vllm           → alphalive-vllm-bucket    (AlphaCoreTech/scripts/modal_vllm.py)
+        """
         proc_attr = f"_{target}_deploy_proc"
         if hasattr(self, proc_attr):
             proc = getattr(self, proc_attr)
             if proc.state() == QProcess.ProcessState.Running:
-                self._modal_db.append(f"[{target}] Deployment already running...", C["neon_yellow"])
+                self._modal_db.append(f"[{target.upper()}] Deployment already running…", C["neon_yellow"])
                 return
 
+<<<<<<< Updated upstream:ui/gui.py
         scripts_dir = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
         if target == "proxy":
             cmd = "modal deploy core/modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
@@ -4106,7 +4242,37 @@ class MainWindow(QMainWindow):
         elif target == "txt2img":
             cmd = f"Set-Location '{scripts_dir}'; modal deploy txt2img.py" if action == "deploy" else "modal app stop alphacore-txt2img"
         else:
+=======
+        DEPLOY_DIR   = r"C:\Users\josh6\Workspace\AlphaLive\deployments"
+        SCRIPTS_DIR  = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
+
+        TARGETS = {
+            # target_key : (deploy_cmd, stop_app_name)
+            "alphalive_api": (
+                f"Set-Location '{DEPLOY_DIR}'; modal deploy deployment.py",
+                "alphacore-aio-backend",
+            ),
+            "instant_loader": (
+                f"Set-Location '{DEPLOY_DIR}'; modal run instant-loader.py",
+                "instant-loader",
+            ),
+            "proxy": (
+                f"Set-Location '{SCRIPTS_DIR}'; modal deploy modalmode.py",
+                "alphalive-proxy",
+            ),
+            "vllm": (
+                f"Set-Location '{SCRIPTS_DIR}'; modal deploy modal_vllm.py",
+                "alphalive-vllm-bucket",
+            ),
+        }
+
+        if target not in TARGETS:
+            self._modal_db.append(f"[ERROR] Unknown deployment target: {target}", C["neon_red"])
+>>>>>>> Stashed changes:gui.py
             return
+
+        deploy_cmd, stop_app = TARGETS[target]
+        cmd = deploy_cmd if action == "deploy" else f"modal app stop {stop_app}"
 
         self._modal_db.append(f"\n[{target.upper()}] Running: {cmd}", C["neon_blue"])
 
@@ -4117,16 +4283,27 @@ class MainWindow(QMainWindow):
             lambda: self._handle_deploy_output_ext(proc, target)
         )
         proc.finished.connect(
-            lambda code, _: self._modal_db.append(f"[{target.upper()}] {action.capitalize()} finished (code {code})", C["neon_green"] if code == 0 else C["neon_red"])
+            lambda code, _: self._on_deploy_proc_finished(target, action, code)
         )
         proc.start("powershell", ["-Command", f"$env:PYTHONIOENCODING='utf-8'; {cmd}"])
 
+    def _on_deploy_proc_finished(self, target, action, code):
+        try:
+            if hasattr(self, "_modal_db") and self._modal_db is not None:
+                color = C["neon_green"] if code == 0 else C["neon_red"]
+                self._modal_db.append(f"[{target.upper()}] {action.capitalize()} finished (code {code})", color)
+        except (RuntimeError, AttributeError):
+            pass
+
     def _handle_deploy_output_ext(self, proc, target):
-        data = proc.readAllStandardOutput().data().decode("utf-8", errors="ignore")
-        for line in data.splitlines():
-            line = line.strip()
-            if line:
-                self._modal_db.append(line)
+        try:
+            data = proc.readAllStandardOutput().data().decode("utf-8", errors="ignore")
+            for line in data.splitlines():
+                line = line.strip()
+                if line and hasattr(self, "_modal_db") and self._modal_db is not None:
+                    self._modal_db.append(line)
+        except (RuntimeError, AttributeError):
+            pass
 
     def _handle_deploy_output(self, proc):
         data = proc.readAllStandardOutput().data().decode("utf-8", errors="ignore")
@@ -4230,7 +4407,14 @@ class MainWindow(QMainWindow):
                 self._status_overlay.update_status("err", "ERROR", C["neon_red"])
 
         # Handle remote overlay requests from AI engine
-        if "[overlay_set:show]" in lo:
+        if "[reboot_initiated]" in lo:
+            self._terminal.append(
+                "⚡ [EMP DEPLOYED] Refusal drift detected — auto-realigning AlphaCore directives...",
+                C["neon_yellow"]
+            )
+            self._slog("EMP reboot triggered: refusal detected. Realigning.", "system")
+
+        elif "[overlay_set:show]" in lo:
             if self._cursor_overlay is None:
                 self._toggle_overlay()
         elif "[overlay_set:hide]" in lo:
@@ -4369,6 +4553,22 @@ class MainWindow(QMainWindow):
         if self._worker and self._running:
             self._worker.stop()
             self._worker.wait(2000)
+
+        # Terminate any running Modal deployment background processes
+        for attr in ("_alphalive_api_deploy_proc", "_instant_loader_deploy_proc", "_proxy_deploy_proc", "_vllm_deploy_proc"):
+            proc = getattr(self, attr, None)
+            if proc is not None:
+                try:
+                    proc.readyReadStandardOutput.disconnect()
+                except Exception:
+                    pass
+                try:
+                    proc.finished.disconnect()
+                except Exception:
+                    pass
+                if proc.state() == QProcess.ProcessState.Running:
+                    proc.kill()
+                    proc.waitForFinished(1000)
         e.accept()
 
 # ─────────────────────────────────────────────────────────────────────────────

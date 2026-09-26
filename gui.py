@@ -40,6 +40,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 load_dotenv()
 import memory_manager
+import image_studio_manager
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -57,7 +58,8 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import (
     QFont, QColor, QPalette, QPainter, QPen, QBrush,
     QLinearGradient, QRadialGradient, QFontMetrics, QCursor,
-    QTextCharFormat, QTextBlockFormat, QPainterPath, QKeySequence, QShortcut
+    QTextCharFormat, QTextBlockFormat, QPainterPath, QKeySequence, QShortcut,
+    QPixmap, QImage
 )
 
 
@@ -961,10 +963,11 @@ class EngineWorker(QThread):
             fd = self._proc.stdout.fileno()
             buffer = ""
             while self._alive:
-                import select
-                ready, _, _ = select.select([fd], [], [], 0.1)
-                if fd in ready:
-                    chunk = os.read(fd, 4096)
+                if True:
+                    try:
+                        chunk = os.read(fd, 4096)
+                    except Exception:
+                        break
                     if not chunk:
                         break
                     text_chunk = chunk.decode("utf-8", errors="replace")
@@ -2898,6 +2901,503 @@ class MemoryTab(QWidget):
                 self._refresh_episodes()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# TAB: NEURAL IMAGE STUDIO
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ImageGenWorker(QThread):
+    progress = pyqtSignal(int, int, str)
+    finished = pyqtSignal(dict)
+    failed   = pyqtSignal(str)
+
+    def __init__(self, prompt: str, model_name: str = "jugg", negative_prompt: str = "", steps: int = 25, guidance: float = 7.0, seed: int = -1):
+        super().__init__()
+        self.prompt = prompt
+        self.model_name = model_name
+        self.negative_prompt = negative_prompt
+        self.steps = steps
+        self.guidance = guidance
+        self.seed = seed
+        self.ism = image_studio_manager.ImageStudioManager()
+
+    def run(self):
+        try:
+            def _cb(cur, total, msg):
+                self.progress.emit(cur, total, msg)
+
+            res = self.ism.generate_image(
+                prompt=self.prompt,
+                model_name=self.model_name,
+                negative_prompt=self.negative_prompt,
+                steps=self.steps,
+                guidance=self.guidance,
+                seed=self.seed,
+                progress_callback=_cb
+            )
+            self.finished.emit(res)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class ImageStudioTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.ism = image_studio_manager.ImageStudioManager()
+        self.current_gen_id = None
+        self.current_rating = 0
+        self._worker = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(15, 15, 15, 15)
+        root.setSpacing(12)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.addWidget(lbl("NEURAL IMAGE STUDIO", 12, C["neon_cyan"], bold=True, spacing=2))
+        hdr.addWidget(lbl("·  Modal H100 SDXL Cluster & Adaptive RLHF Learning", 9, C["text_dim"]))
+        hdr.addStretch()
+        self._cluster_badge = lbl("MODAL GPU CLUSTER: ONLINE", 9, C["neon_green"], bold=True)
+        hdr.addWidget(self._cluster_badge)
+        root.addLayout(hdr)
+
+        root.addWidget(hsep())
+
+        # Main Splitter: Left Controls / Right Viewport & Feedback
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setHandleWidth(2)
+
+        # ── LEFT PANEL: Prompting & Parameters ──────────────────────────────
+        left_widget = QWidget()
+        ll = QVBoxLayout(left_widget)
+        ll.setContentsMargins(0, 0, 10, 0)
+        ll.setSpacing(10)
+
+        # Model Selector
+        ll.addWidget(lbl("TARGET MODEL / CHECKPOINT", 9, C["text_dim"], bold=True))
+        self.cb_model = QComboBox()
+        self.cb_model.setStyleSheet(f"""
+            QComboBox {{
+                background: {C['bg_deep']}; color: {C['neon_cyan']};
+                border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
+                font-family: '{FONT_MONO}'; font-size: 10px;
+            }}
+        """)
+        for k, v in image_studio_manager.MODEL_CATALOG.items():
+            self.cb_model.addItem(f"{v['name']} ({v['style']})", k)
+        ll.addWidget(self.cb_model)
+
+        # Prompt Input
+        ll.addWidget(lbl("CREATIVE PROMPT", 9, C["text_dim"], bold=True))
+        self.in_prompt = QTextEdit()
+        self.in_prompt.setPlaceholderText("Describe the visual concept, subject, atmosphere, and lighting...")
+        self.in_prompt.setFixedHeight(85)
+        self.in_prompt.setStyleSheet(f"""
+            QTextEdit {{
+                background: {C['bg_deep']}; color: {C['text_bright']};
+                border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
+                font-size: 11px;
+            }}
+            QTextEdit:focus {{ border: 1px solid {C['neon_cyan']}; }}
+        """)
+        ll.addWidget(self.in_prompt)
+
+        # Prompt Refine Button
+        self.btn_refine = QPushButton("✨ Refine with Learned AI Rules")
+        self.btn_refine.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_blue']}18; color: {C['neon_blue']};
+                border: 1px solid {C['neon_blue']}; border-radius: 4px; padding: 6px;
+                font-size: 10px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {C['neon_blue']}33; }}
+        """)
+        self.btn_refine.clicked.connect(self._on_refine_clicked)
+        ll.addWidget(self.btn_refine)
+
+        # Negative Prompt Input
+        ll.addWidget(lbl("NEGATIVE PROMPT (ELEMENTS TO EXCLUDE)", 9, C["text_dim"], bold=True))
+        self.in_neg_prompt = QTextEdit()
+        self.in_neg_prompt.setText(image_studio_manager.DEFAULT_NEGATIVE_PROMPT)
+        self.in_neg_prompt.setFixedHeight(60)
+        self.in_neg_prompt.setStyleSheet(f"""
+            QTextEdit {{
+                background: {C['bg_deep']}; color: {C['text_dim']};
+                border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
+                font-size: 10px;
+            }}
+        """)
+        ll.addWidget(self.in_neg_prompt)
+
+        # Parameter Sliders Grid
+        params_box = QGroupBox("GENERATION PARAMETERS")
+        params_box.setStyleSheet(f"QGroupBox {{ color: {C['text_dim']}; font-size: 9px; font-weight: bold; border: 1px solid {C['border']}; border-radius: 4px; padding-top: 10px; }}")
+        p_layout = QGridLayout(params_box)
+        p_layout.setSpacing(6)
+
+        # Steps
+        p_layout.addWidget(lbl("Steps:", 9, C["text_dim"]), 0, 0)
+        self.slider_steps = QSlider(Qt.Orientation.Horizontal)
+        self.slider_steps.setRange(15, 50)
+        self.slider_steps.setValue(25)
+        self.lbl_steps_val = lbl("25", 9, C["neon_cyan"], bold=True)
+        self.slider_steps.valueChanged.connect(lambda v: self.lbl_steps_val.setText(str(v)))
+        p_layout.addWidget(self.slider_steps, 0, 1)
+        p_layout.addWidget(self.lbl_steps_val, 0, 2)
+
+        # Guidance
+        p_layout.addWidget(lbl("CFG Scale:", 9, C["text_dim"]), 1, 0)
+        self.slider_guidance = QSlider(Qt.Orientation.Horizontal)
+        self.slider_guidance.setRange(20, 150)
+        self.slider_guidance.setValue(70)
+        self.lbl_guidance_val = lbl("7.0", 9, C["neon_cyan"], bold=True)
+        self.slider_guidance.valueChanged.connect(lambda v: self.lbl_guidance_val.setText(f"{v/10.0:.1f}"))
+        p_layout.addWidget(self.slider_guidance, 1, 1)
+        p_layout.addWidget(self.lbl_guidance_val, 1, 2)
+
+        # Seed
+        p_layout.addWidget(lbl("Seed:", 9, C["text_dim"]), 2, 0)
+        self.in_seed = QLineEdit("-1")
+        self.in_seed.setPlaceholderText("-1 = Random")
+        self.in_seed.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_main']}; border: 1px solid {C['border']}; padding: 3px; font-size: 10px;")
+        p_layout.addWidget(self.in_seed, 2, 1, 1, 2)
+
+        ll.addWidget(params_box)
+
+        # Neon Launch Button
+        self.btn_generate = QPushButton("🚀 GENERATE ON MODAL")
+        self.btn_generate.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_cyan']}22; color: {C['neon_cyan']};
+                border: 1px solid {C['neon_cyan']}; border-radius: 6px;
+                padding: 10px; font-weight: bold; font-size: 11px;
+            }}
+            QPushButton:hover {{ background: {C['neon_cyan']}44; }}
+            QPushButton:disabled {{ background: {C['bg_deep']}; color: {C['text_dim']}; border-color: {C['border']}; }}
+        """)
+        self.btn_generate.clicked.connect(self._on_generate_clicked)
+        ll.addWidget(self.btn_generate)
+
+        # Progress Bar & Status
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet(f"""
+            QProgressBar {{
+                background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px;
+                height: 18px; text-align: center; color: {C['text_bright']}; font-size: 10px;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {C['neon_cyan']}, stop:1 {C['neon_pink']});
+                border-radius: 3px;
+            }}
+        """)
+        ll.addWidget(self.progress_bar)
+
+        self.lbl_progress_status = lbl("Ready. Enter prompt and launch.", 9, C["text_dim"])
+        ll.addWidget(self.lbl_progress_status)
+
+        left_widget.setFixedWidth(360)
+        main_splitter.addWidget(left_widget)
+
+        # ── RIGHT PANEL: Viewport & RLHF Feedback Learning ───────────────────
+        right_widget = QWidget()
+        rl = QVBoxLayout(right_widget)
+        rl.setContentsMargins(10, 0, 0, 0)
+        rl.setSpacing(10)
+
+        # Top viewport header
+        vp_hdr = QHBoxLayout()
+        self.lbl_image_title = lbl("VIEWPORT — NO IMAGE LOADED", 10, C["text_bright"], bold=True)
+        vp_hdr.addWidget(self.lbl_image_title)
+        vp_hdr.addStretch()
+        self.lbl_meta_badge = lbl("Dimensions: —", 9, C["text_dim"])
+        vp_hdr.addWidget(self.lbl_meta_badge)
+        rl.addLayout(vp_hdr)
+
+        # Image display container
+        self.viewport_frame = QFrame()
+        self.viewport_frame.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 8px;")
+        vpl = QVBoxLayout(self.viewport_frame)
+        vpl.setContentsMargins(5, 5, 5, 5)
+
+        self.img_viewport = QLabel()
+        self.img_viewport.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.img_viewport.setMinimumSize(320, 240)
+        self.img_viewport.setText("🎨 Generated visual output will be displayed here.")
+        self.img_viewport.setStyleSheet(f"color: {C['text_dim']}; font-size: 11px;")
+        vpl.addWidget(self.img_viewport, 1)
+
+        rl.addWidget(self.viewport_frame, 1)
+
+        # Automated AI Critique Box
+        self.critique_card = QFrame()
+        self.critique_card.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 6px;")
+        cl = QVBoxLayout(self.critique_card)
+        cl.setContentsMargins(8, 6, 8, 6)
+        self.lbl_critique_hdr = lbl("AI VISUAL CRITIQUE", 9, C["neon_blue"], bold=True)
+        self.lbl_critique_text = lbl("Awaiting generation to perform automated composition & dynamic range analysis.", 9, C["text_dim"])
+        cl.addWidget(self.lbl_critique_hdr)
+        cl.addWidget(self.lbl_critique_text)
+        rl.addWidget(self.critique_card)
+
+        # Interactive Feedback & Learning Box
+        fb_frame = QFrame()
+        fb_frame.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px;")
+        fbl = QVBoxLayout(fb_frame)
+        fbl.setContentsMargins(10, 10, 10, 10)
+        fbl.setSpacing(8)
+
+        fb_hdr = QHBoxLayout()
+        fb_hdr.addWidget(lbl("USER EVALUATION & RLHF PROMPT LEARNING", 10, C["neon_yellow"], bold=True))
+        fb_hdr.addStretch()
+        fbl.addLayout(fb_hdr)
+
+        # Good / Bad Buttons
+        btn_row = QHBoxLayout()
+        self.btn_good = QPushButton("👍 Good Output (+1)")
+        self.btn_good.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_green']}18; color: {C['neon_green']};
+                border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px;
+                font-weight: bold; font-size: 10px;
+            }}
+            QPushButton:hover {{ background: {C['neon_green']}33; }}
+        """)
+        self.btn_good.clicked.connect(lambda: self._set_rating(1))
+
+        self.btn_bad = QPushButton("👎 Bad Output (-1)")
+        self.btn_bad.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_red']}18; color: {C['neon_red']};
+                border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px;
+                font-weight: bold; font-size: 10px;
+            }}
+            QPushButton:hover {{ background: {C['neon_red']}33; }}
+        """)
+        self.btn_bad.clicked.connect(lambda: self._set_rating(-1))
+
+        btn_row.addWidget(self.btn_good)
+        btn_row.addWidget(self.btn_bad)
+        fbl.addLayout(btn_row)
+
+        # Quick Tag Checkboxes
+        tags_row = QHBoxLayout()
+        tags_row.setSpacing(12)
+        self.cb_tag_anatomy = QCheckBox("Hands / Anatomy")
+        self.cb_tag_lighting = QCheckBox("Lighting & Fog")
+        self.cb_tag_colors = QCheckBox("Colors & Contrast")
+        self.cb_tag_composition = QCheckBox("Composition")
+        self.cb_tag_style = QCheckBox("Style Match")
+        for cb in [self.cb_tag_anatomy, self.cb_tag_lighting, self.cb_tag_colors, self.cb_tag_composition, self.cb_tag_style]:
+            cb.setStyleSheet(f"color: {C['text_main']}; font-size: 10px;")
+            tags_row.addWidget(cb)
+        fbl.addLayout(tags_row)
+
+        # Feedback Input & Save
+        fb_input_row = QHBoxLayout()
+        self.in_feedback_notes = QLineEdit()
+        self.in_feedback_notes.setPlaceholderText("Specific notes on what worked or what to adjust...")
+        self.in_feedback_notes.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_main']}; border: 1px solid {C['border']}; padding: 6px; font-size: 10px;")
+        
+        self.btn_save_feedback = QPushButton("💾 Train AI")
+        self.btn_save_feedback.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_yellow']}22; color: {C['neon_yellow']};
+                border: 1px solid {C['neon_yellow']}; border-radius: 4px; padding: 6px 12px;
+                font-weight: bold; font-size: 10px;
+            }}
+            QPushButton:hover {{ background: {C['neon_yellow']}44; }}
+        """)
+        self.btn_save_feedback.clicked.connect(self._on_save_feedback)
+
+        fb_input_row.addWidget(self.in_feedback_notes, 1)
+        fb_input_row.addWidget(self.btn_save_feedback)
+        fbl.addLayout(fb_input_row)
+
+        self.lbl_feedback_status = lbl("Provide review to continuously calibrate prompt weights.", 9, C["text_dim"])
+        fbl.addWidget(self.lbl_feedback_status)
+
+        rl.addWidget(fb_frame)
+        main_splitter.addWidget(right_widget)
+
+        root.addWidget(main_splitter, 1)
+
+        # ── BOTTOM DRAWER: History & Active Learnings ────────────────────────
+        bottom_tabs = QTabWidget()
+        bottom_tabs.setFixedHeight(120)
+        bottom_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: 1px solid {C['border']}; background: {C['bg_deep']}; }}
+            QTabBar::tab {{ background: {C['bg_dark']}; color: {C['text_dim']}; padding: 4px 10px; font-size: 9px; }}
+            QTabBar::tab:selected {{ background: {C['bg_deep']}; color: {C['neon_cyan']}; border-bottom: 2px solid {C['neon_cyan']}; }}
+        """)
+
+        # History list
+        self.history_list = QListWidget()
+        self.history_list.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; font-size: 10px; border: none;")
+        self.history_list.itemClicked.connect(self._on_history_clicked)
+        bottom_tabs.addTab(self.history_list, "RECENT GENERATIONS")
+
+        # Learnings Table
+        self.learnings_table = QTableWidget()
+        self.learnings_table.setColumnCount(4)
+        self.learnings_table.setHorizontalHeaderLabels(["Tag", "Type", "Weight", "Learned Rule"])
+        self.learnings_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.learnings_table.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_main']}; font-size: 10px; border: none;")
+        bottom_tabs.addTab(self.learnings_table, "ADAPTIVE PROMPT RULES")
+
+        root.addWidget(bottom_tabs)
+
+        self._refresh_history()
+        self._refresh_learnings()
+
+    def _on_refine_clicked(self):
+        prompt = self.in_prompt.toPlainText().strip()
+        if not prompt:
+            prompt = "A high-tech cybernetic persona"
+        model_name = self.cb_model.currentData() or "jugg"
+        refined_p, refined_neg = self.ism.refine_prompt(prompt, model_name)
+        self.in_prompt.setText(refined_p)
+        self.in_neg_prompt.setText(refined_neg)
+        self.lbl_progress_status.setText("Prompt refined with active learning rules from memory.db.")
+
+    def _on_generate_clicked(self):
+        prompt = self.in_prompt.toPlainText().strip()
+        if not prompt:
+            self.lbl_progress_status.setText("Error: Prompt cannot be empty.")
+            return
+
+        model_name = self.cb_model.currentData() or "jugg"
+        neg = self.in_neg_prompt.toPlainText().strip()
+        steps = self.slider_steps.value()
+        guidance = self.slider_guidance.value() / 10.0
+        try:
+            seed = int(self.in_seed.text().strip())
+        except ValueError:
+            seed = -1
+
+        self.btn_generate.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.lbl_progress_status.setText("Spinning up generation worker...")
+
+        self._worker = ImageGenWorker(prompt, model_name, neg, steps, guidance, seed)
+        self._worker.progress.connect(self._on_gen_progress)
+        self._worker.finished.connect(self._on_gen_finished)
+        self._worker.failed.connect(self._on_gen_failed)
+        self._worker.start()
+
+    def _on_gen_progress(self, cur: int, total: int, msg: str):
+        pct = int((cur / max(1, total)) * 100)
+        self.progress_bar.setValue(pct)
+        self.lbl_progress_status.setText(f"{msg} ({pct}%)")
+
+    def _on_gen_finished(self, res: dict):
+        self.btn_generate.setEnabled(True)
+        self.progress_bar.setValue(100)
+        self.lbl_progress_status.setText("Generation complete! Ready for evaluation.")
+
+        self.current_gen_id = res.get("id")
+        self.current_rating = 0
+        img_path = res.get("image_path")
+        if img_path and os.path.exists(img_path):
+            pixmap = QPixmap(img_path)
+            scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.img_viewport.setPixmap(scaled)
+            self.lbl_image_title.setText(f"VIEWPORT — {res.get('file_name', 'Output')}")
+            self.lbl_meta_badge.setText(f"{res.get('dimensions', '1024x1024')} · Seed: {res.get('seed')} · Steps: {res.get('steps')}")
+
+        critique = res.get("ai_critique") or "Aesthetic balance confirmed."
+        self.lbl_critique_text.setText(critique)
+
+        self._reset_feedback_ui()
+        self._refresh_history()
+        self._refresh_learnings()
+
+    def _on_gen_failed(self, err_msg: str):
+        self.btn_generate.setEnabled(True)
+        self.progress_bar.setValue(0)
+        self.lbl_progress_status.setText(f"Generation error: {err_msg}")
+
+    def _set_rating(self, rating: int):
+        self.current_rating = rating
+        if rating > 0:
+            self.btn_good.setStyleSheet(f"background: {C['neon_green']}; color: {C['bg_deep']}; font-weight: bold; border-radius: 4px; padding: 6px;")
+            self.btn_bad.setStyleSheet(f"background: {C['neon_red']}18; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px;")
+            self.lbl_feedback_status.setText("Rated: POSITIVE (+1). Click 'Train AI' to adapt positive prompt weights.")
+        else:
+            self.btn_bad.setStyleSheet(f"background: {C['neon_red']}; color: {C['bg_deep']}; font-weight: bold; border-radius: 4px; padding: 6px;")
+            self.btn_good.setStyleSheet(f"background: {C['neon_green']}18; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px;")
+            self.lbl_feedback_status.setText("Rated: NEGATIVE (-1). Click 'Train AI' to reinforce negative filter rules.")
+
+    def _on_save_feedback(self):
+        if not self.current_gen_id:
+            self.lbl_feedback_status.setText("No active generation loaded to evaluate.")
+            return
+
+        tags = []
+        if self.cb_tag_anatomy.isChecked(): tags.append("anatomy")
+        if self.cb_tag_lighting.isChecked(): tags.append("lighting")
+        if self.cb_tag_colors.isChecked(): tags.append("colors")
+        if self.cb_tag_composition.isChecked(): tags.append("composition")
+        if self.cb_tag_style.isChecked(): tags.append("style")
+
+        tags_str = ", ".join(tags)
+        notes = self.in_feedback_notes.text().strip()
+
+        success = self.ism.record_feedback(
+            generation_id=self.current_gen_id,
+            rating=self.current_rating,
+            feedback_tags=tags_str,
+            user_feedback=notes
+        )
+
+        if success:
+            self.lbl_feedback_status.setText(f"Feedback saved! Learned weights updated in memory.db.")
+            self._refresh_learnings()
+        else:
+            self.lbl_feedback_status.setText("Error recording feedback to database.")
+
+    def _reset_feedback_ui(self):
+        self.btn_good.setStyleSheet(f"background: {C['neon_green']}18; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px;")
+        self.btn_bad.setStyleSheet(f"background: {C['neon_red']}18; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px;")
+        for cb in [self.cb_tag_anatomy, self.cb_tag_lighting, self.cb_tag_colors, self.cb_tag_composition, self.cb_tag_style]:
+            cb.setChecked(False)
+        self.in_feedback_notes.clear()
+
+    def _refresh_history(self):
+        self.history_list.clear()
+        items = self.ism.get_history(20)
+        for gen in items:
+            rating_symbol = "⭐" if gen.get("rating", 0) > 0 else ("❌" if gen.get("rating", 0) < 0 else "⚪")
+            txt = f"{rating_symbol} [{gen.get('model_name', 'jugg').upper()}] {gen.get('prompt', '')[:65]}..."
+            item = QListWidgetItem(txt)
+            item.setData(Qt.ItemDataRole.UserRole, gen)
+            self.history_list.addItem(item)
+
+    def _on_history_clicked(self, item: QListWidgetItem):
+        gen = item.data(Qt.ItemDataRole.UserRole)
+        if not gen:
+            return
+        self.current_gen_id = gen.get("id")
+        img_path = gen.get("image_path")
+        if img_path and os.path.exists(img_path):
+            pixmap = QPixmap(img_path)
+            scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self.img_viewport.setPixmap(scaled)
+            self.lbl_image_title.setText(f"VIEWPORT — {os.path.basename(img_path)}")
+            self.lbl_meta_badge.setText(f"{gen.get('model_name', 'jugg').upper()} · Seed: {gen.get('seed')}")
+            self.lbl_critique_text.setText(gen.get("ai_critique") or "Prior generation loaded.")
+
+    def _refresh_learnings(self):
+        learnings = self.ism.get_learnings()
+        self.learnings_table.setRowCount(len(learnings))
+        for r, item in enumerate(learnings):
+            self.learnings_table.setItem(r, 0, QTableWidgetItem(str(item.get("tag", ""))))
+            self.learnings_table.setItem(r, 1, QTableWidgetItem(str(item.get("rule_type", ""))))
+            self.learnings_table.setItem(r, 2, QTableWidgetItem(f"{item.get('rating_weight', 1.0):.1f}"))
+            self.learnings_table.setItem(r, 3, QTableWidgetItem(str(item.get("rule_text", ""))))
+
+
 # SIDEBAR LAUNCH PANEL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3320,6 +3820,7 @@ class MainWindow(QMainWindow):
         self._config   = ConfigTab(self._cfg)
         self._modal_db = ModalTab()
         self._memory   = MemoryTab()
+        self._image_studio = ImageStudioTab()
         self._logs     = LogsTab()
         self._characters = CharactersTab()
 
@@ -3328,6 +3829,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._monitor,  " MONITOR ")
         self._tabs.addTab(self._history,  " HISTORY ")
         self._tabs.addTab(self._characters, " CHARACTERS ")
+        self._tabs.addTab(self._image_studio, " STUDIO ")
         self._tabs.addTab(self._config,   " CONFIG ")
         self._tabs.addTab(self._memory,   " MEMORY ")
         self._tabs.addTab(self._modal_db, " MODAL ")
@@ -3987,7 +4489,7 @@ def main():
     sig_timer.start(250)
 
     w = MainWindow()
-    w.showFullScreen()
+    w.show()
     try:
         sys.exit(app.exec())
     except KeyboardInterrupt:

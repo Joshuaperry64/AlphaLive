@@ -26,6 +26,19 @@ import keyboard
 import argparse
 
 
+
+# Pre-compile regexes for vLLM processing
+_TOOL_CALL_RE = re.compile(r'<tool_call>.*?</tool_call>', re.DOTALL | re.IGNORECASE)
+_THINK_TAG_RE = re.compile(r'<(think|thought)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
+_ORPHAN_THINK_RE = re.compile(r'^(.*?)</(?:think|thought)>', re.DOTALL | re.IGNORECASE)
+_UNCLOSED_THINK_RE = re.compile(r'<(think|thought)>(.*)', re.DOTALL | re.IGNORECASE)
+_MD_THINK_RE = re.compile(r'```(?:thought|thinking)\s*(.*?)```', re.DOTALL | re.IGNORECASE)
+
+_HERMES_TOOL_CALL_RE = re.compile(r'<tool_call>(.*?)</tool_call>', re.DOTALL | re.IGNORECASE)
+_HERMES_FN_RE = re.compile(r'<function=([a-zA-Z0-9_-]+)>(.*?)</function>', re.DOTALL)
+_HERMES_PARAM_RE = re.compile(r'<parameter=([a-zA-Z0-9_-]+)>\s*(.*?)\s*</parameter>', re.DOTALL)
+
+
 def win32_get_clipboard() -> str:
     """Safely get clipboard text using native Win32 API to avoid OLE locks."""
     try:
@@ -1351,19 +1364,17 @@ class AudioLoop:
                 cleaned = raw_text or ""
 
                 # Strip <tool_call>...</tool_call> from spoken text
-                cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', cleaned, flags=re.DOTALL | re.IGNORECASE).strip()
+                cleaned = _TOOL_CALL_RE.sub('', cleaned).strip()
 
                 # Strip <think>...</think> or <thought>...</thought>
-                pattern = re.compile(r'<(think|thought)>(.*?)</\1>', re.DOTALL | re.IGNORECASE)
-                for match in pattern.finditer(cleaned):
+                for match in _THINK_TAG_RE.finditer(cleaned):
                     t = match.group(2).strip()
                     if t:
                         thoughts.append(t)
-                cleaned = pattern.sub('', cleaned).strip()
+                cleaned = _THINK_TAG_RE.sub('', cleaned).strip()
 
                 # Strip orphaned </think> or </thought> where opening tag was omitted
-                orphan_pattern = re.compile(r'^(.*?)</(?:think|thought)>', re.DOTALL | re.IGNORECASE)
-                orphan_match = orphan_pattern.search(cleaned)
+                orphan_match = _ORPHAN_THINK_RE.search(cleaned)
                 if orphan_match:
                     t = orphan_match.group(1).strip()
                     if t:
@@ -1371,8 +1382,7 @@ class AudioLoop:
                     cleaned = cleaned[orphan_match.end():].strip()
 
                 # Strip unclosed <think> or <thought> (e.g. if cut off by token limit)
-                unclosed = re.compile(r'<(think|thought)>(.*)', re.DOTALL | re.IGNORECASE)
-                unclosed_m = unclosed.search(cleaned)
+                unclosed_m = _UNCLOSED_THINK_RE.search(cleaned)
                 if unclosed_m:
                     t = unclosed_m.group(2).strip()
                     if t:
@@ -1380,18 +1390,17 @@ class AudioLoop:
                     cleaned = cleaned[:unclosed_m.start()].strip()
 
                 # Strip markdown thought code blocks ```thought ... ```
-                md_t = re.compile(r'```(?:thought|thinking)\s*(.*?)```', re.DOTALL | re.IGNORECASE)
-                for match in md_t.finditer(cleaned):
+                for match in _MD_THINK_RE.finditer(cleaned):
                     t = match.group(1).strip()
                     if t:
                         thoughts.append(t)
-                cleaned = md_t.sub('', cleaned).strip()
+                cleaned = _MD_THINK_RE.sub('', cleaned).strip()
 
                 return "\n".join(thoughts).strip(), cleaned
 
             def _extract_hermes_tool_calls(text: str) -> list[dict]:
                 extracted = []
-                tc_blocks = re.findall(r'<tool_call>(.*?)</tool_call>', text or "", re.DOTALL | re.IGNORECASE)
+                tc_blocks = _HERMES_TOOL_CALL_RE.findall(text or "")
                 for idx, block in enumerate(tc_blocks):
                     block_clean = block.strip()
                     if block_clean.startswith("{") and block_clean.endswith("}"):
@@ -1404,12 +1413,12 @@ class AudioLoop:
                             continue
                         except Exception:
                             pass
-                    fn_match = re.search(r'<function=([a-zA-Z0-9_-]+)>(.*?)</function>', block, re.DOTALL)
+                    fn_match = _HERMES_FN_RE.search(block)
                     if fn_match:
                         fn_name = fn_match.group(1).strip()
                         fn_body = fn_match.group(2)
                         args = {}
-                        param_matches = re.finditer(r'<parameter=([a-zA-Z0-9_-]+)>\s*(.*?)\s*</parameter>', fn_body, re.DOTALL)
+                        param_matches = _HERMES_PARAM_RE.finditer(fn_body)
                         for pm in param_matches:
                             p_name = pm.group(1).strip()
                             p_val_str = pm.group(2).strip()

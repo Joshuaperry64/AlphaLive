@@ -1239,6 +1239,128 @@ class TerminalTab(QWidget):
                     self._chunk_buf = ""
                     break
 
+    def _try_suppress_noise(self, raw: str) -> bool:
+        if raw in ("message >", "ALPHA", "ALPHA:") or raw.startswith("message >"):
+            return True
+        return False
+
+    def _try_handle_user(self, raw: str, lo: str, color: str) -> bool:
+        if raw.startswith("[You]:") or raw.startswith("[YOU]") or raw.startswith("User:") or (color == "#00E5FF" and "[you]" in lo):
+            body = raw
+            for pfx in ("[You]:", "[YOU]:", "[YOU]", "[you]:", "User:", "user:"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+
+            if getattr(self, "_last_user_input", None) is not None and body == self._last_user_input:
+                self._last_user_input = None
+                return True
+
+            self._last_speaker = "user"
+            self._render_entry("YOU ❯", "#00E5FF", body, "#E2E8F0", bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_ai(self, raw: str) -> bool:
+        if raw.startswith("[Alpha]:") or raw.startswith("[ALPHA]:") or raw.startswith("[Gemini]:") or raw.startswith("Alpha:") or raw.startswith("Gemini:"):
+            self._last_speaker = "ai"
+            body = raw
+            for pfx in ("[Alpha]:", "[ALPHA]:", "[Gemini]:", "Alpha:", "Gemini:"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+            self._render_entry("ALPHA ❯", "#C084FC", body, "#E2E8F0", bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_thoughts(self, raw: str) -> bool:
+        if raw.startswith("[Alpha Thoughts]:") or raw.startswith("[Thoughts]:") or raw.startswith("Thoughts:"):
+            self._last_speaker = "thoughts"
+            body = raw
+            for pfx in ("[Alpha Thoughts]:", "[Thoughts]:", "Thoughts:"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+            self._render_entry("🧠 THOUGHTS ❯", "#A78BFA", body, "#94A3B8", bold_badge=False, italic_body=True)
+            return True
+        return False
+
+    def _try_handle_tool(self, raw: str, lo: str) -> bool:
+        if "[tool executing" in lo or raw.startswith("[Tool Executing"):
+            self._last_speaker = "tool"
+            body = raw
+            if "]" in body:
+                body = body.split("]", 1)[-1].strip()
+            self._render_entry("⚙ TOOL ❯", "#38BDF8", body, "#E2E8F0", bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_tool_result(self, raw: str, lo: str) -> bool:
+        if "[tool finished]" in lo or "[tool result]" in lo or raw.startswith("[Tool Finished]"):
+            self._last_speaker = "tool_result"
+            body = raw
+            if "]" in body:
+                body = body.split("]", 1)[-1].strip()
+            self._render_entry("✔ RESULT ❯", "#10B981", body, "#E2E8F0", bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_vllm(self, raw: str, lo: str) -> bool:
+        if raw.startswith("[vLLM]") or "[vllm]" in lo:
+            self._last_speaker = "vllm"
+            body = raw
+            if "]" in body:
+                body = body.split("]", 1)[-1].strip()
+            self._render_entry("⚡ vLLM ❯", C["neon_cyan"], body, C["text_main"], bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_processing(self, lo: str) -> bool:
+        if "[processing...]" in lo:
+            self._last_speaker = "processing"
+            self._render_entry("⏳", C["neon_yellow"], "Processing request...", C["text_dim"], bold_badge=False)
+            return True
+        return False
+
+    def _try_handle_error(self, raw: str, lo: str) -> bool:
+        if "error" in lo and not "engine error" in lo:
+            self._last_speaker = "error"
+            self._render_entry("✖ ERROR ❯", C["neon_red"], raw, C["neon_red"], bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_warning(self, raw: str, lo: str) -> bool:
+        if "warning" in lo or "warn" in lo:
+            self._last_speaker = "warning"
+            self._render_entry("▲ WARN ❯", C["neon_yellow"], raw, C["neon_yellow"], bold_badge=True)
+            return True
+        return False
+
+    def _try_handle_system(self, raw: str, color: str) -> bool:
+        if raw.startswith("[System]") or raw.startswith("[SYSTEM]") or raw.startswith("[ENGINE") or color in (C["neon_blue"], C["neon_yellow"]):
+            self._last_speaker = "system"
+            body = raw
+            for pfx in ("[System]", "[SYSTEM]", "[Engine]", "[ENGINE]"):
+                if body.startswith(pfx):
+                    body = body[len(pfx):].strip()
+                    break
+            clr = color or C["neon_blue"]
+            self._render_entry("⋯ SYS ❯", clr, body, C["text_main"], bold_badge=False)
+            return True
+        return False
+
+    def _try_handle_continuation(self, raw: str) -> bool:
+        if self._last_speaker == "ai":
+            self._render_continuation(raw, C["text_bright"])
+            return True
+        elif self._last_speaker == "thoughts":
+            self._render_continuation(raw, "#94A3B8", italic=True)
+            return True
+        elif self._last_speaker == "user":
+            self._render_continuation(raw, C["text_bright"])
+            return True
+        return False
+
     def append(self, text: str, color: str = None):
         if not text:
             return
@@ -1248,110 +1370,33 @@ class TerminalTab(QWidget):
 
         lo = raw.lower()
 
-        # Suppress console prompt artifacts and noise
-        if raw in ("message >", "ALPHA", "ALPHA:") or raw.startswith("message >"):
+        if self._try_suppress_noise(raw):
+            return
+        if self._try_handle_user(raw, lo, color):
+            return
+        if self._try_handle_ai(raw):
+            return
+        if self._try_handle_thoughts(raw):
+            return
+        if self._try_handle_tool(raw, lo):
+            return
+        if self._try_handle_tool_result(raw, lo):
+            return
+        if self._try_handle_vllm(raw, lo):
+            return
+        if self._try_handle_processing(lo):
+            return
+        if self._try_handle_error(raw, lo):
+            return
+        if self._try_handle_warning(raw, lo):
+            return
+        if self._try_handle_system(raw, color):
+            return
+        if self._try_handle_continuation(raw):
             return
 
-        # Check for User input
-        if raw.startswith("[You]:") or raw.startswith("[YOU]") or raw.startswith("User:") or (color == "#00E5FF" and "[you]" in lo):
-            body = raw
-            for pfx in ("[You]:", "[YOU]:", "[YOU]", "[you]:", "User:", "user:"):
-                if body.startswith(pfx):
-                    body = body[len(pfx):].strip()
-                    break
-
-            # Deduplicate if this was just typed into the GUI input
-            if getattr(self, "_last_user_input", None) is not None and body == self._last_user_input:
-                self._last_user_input = None
-                return
-
-            self._last_speaker = "user"
-            self._render_entry("YOU ❯", "#00E5FF", body, "#E2E8F0", bold_badge=True)
-
-        # Check for Alpha AI response
-        elif raw.startswith("[Alpha]:") or raw.startswith("[ALPHA]:") or raw.startswith("[Gemini]:") or raw.startswith("Alpha:") or raw.startswith("Gemini:"):
-            self._last_speaker = "ai"
-            body = raw
-            for pfx in ("[Alpha]:", "[ALPHA]:", "[Gemini]:", "Alpha:", "Gemini:"):
-                if body.startswith(pfx):
-                    body = body[len(pfx):].strip()
-                    break
-            self._render_entry("ALPHA ❯", "#C084FC", body, "#E2E8F0", bold_badge=True)
-
-        # Check for Alpha Thoughts
-        elif raw.startswith("[Alpha Thoughts]:") or raw.startswith("[Thoughts]:") or raw.startswith("Thoughts:"):
-            self._last_speaker = "thoughts"
-            body = raw
-            for pfx in ("[Alpha Thoughts]:", "[Thoughts]:", "Thoughts:"):
-                if body.startswith(pfx):
-                    body = body[len(pfx):].strip()
-                    break
-            self._render_entry("🧠 THOUGHTS ❯", "#A78BFA", body, "#94A3B8", bold_badge=False, italic_body=True)
-
-        # Tool executing
-        elif "[tool executing" in lo or raw.startswith("[Tool Executing"):
-            self._last_speaker = "tool"
-            body = raw
-            if "]" in body:
-                body = body.split("]", 1)[-1].strip()
-            self._render_entry("⚙ TOOL ❯", "#38BDF8", body, "#E2E8F0", bold_badge=True)
-
-        # Tool finished / result
-        elif "[tool finished]" in lo or "[tool result]" in lo or raw.startswith("[Tool Finished]"):
-            self._last_speaker = "tool_result"
-            body = raw
-            if "]" in body:
-                body = body.split("]", 1)[-1].strip()
-            self._render_entry("✔ RESULT ❯", "#10B981", body, "#E2E8F0", bold_badge=True)
-
-        # vLLM routing and info
-        elif raw.startswith("[vLLM]") or "[vllm]" in lo:
-            self._last_speaker = "vllm"
-            body = raw
-            if "]" in body:
-                body = body.split("]", 1)[-1].strip()
-            self._render_entry("⚡ vLLM ❯", C["neon_cyan"], body, C["text_main"], bold_badge=True)
-
-        # Processing request
-        elif "[processing...]" in lo:
-            self._last_speaker = "processing"
-            self._render_entry("⏳", C["neon_yellow"], "Processing request...", C["text_dim"], bold_badge=False)
-
-        # Errors
-        elif "error" in lo and not "engine error" in lo:
-            self._last_speaker = "error"
-            self._render_entry("✖ ERROR ❯", C["neon_red"], raw, C["neon_red"], bold_badge=True)
-
-        # Warnings
-        elif "warning" in lo or "warn" in lo:
-            self._last_speaker = "warning"
-            self._render_entry("▲ WARN ❯", C["neon_yellow"], raw, C["neon_yellow"], bold_badge=True)
-
-        # System messages
-        elif raw.startswith("[System]") or raw.startswith("[SYSTEM]") or raw.startswith("[ENGINE") or color in (C["neon_blue"], C["neon_yellow"]):
-            self._last_speaker = "system"
-            body = raw
-            for pfx in ("[System]", "[SYSTEM]", "[Engine]", "[ENGINE]"):
-                if body.startswith(pfx):
-                    body = body[len(pfx):].strip()
-                    break
-            clr = color or C["neon_blue"]
-            self._render_entry("⋯ SYS ❯", clr, body, C["text_main"], bold_badge=False)
-
-        # Multi-line continuations from previous speaker
-        elif self._last_speaker == "ai":
-            self._render_continuation(raw, C["text_bright"])
-
-        elif self._last_speaker == "thoughts":
-            self._render_continuation(raw, "#94A3B8", italic=True)
-
-        elif self._last_speaker == "user":
-            self._render_continuation(raw, C["text_bright"])
-
-        # Unclassified output
-        else:
-            clr = color or C["text_main"]
-            self._render_entry("⋯", C["text_dim"], raw, clr, bold_badge=False)
+        clr = color or C["text_main"]
+        self._render_entry("⋯", C["text_dim"], raw, clr, bold_badge=False)
 
     def _render_entry(self, badge: str, badge_color: str, body: str, body_color: str,
                       bold_badge: bool = True, italic_body: bool = False):

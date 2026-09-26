@@ -12,6 +12,7 @@ import subprocess
 import pyperclip
 import webbrowser
 import urllib.parse
+import collections
 import math
 
 import websockets
@@ -1089,7 +1090,7 @@ class AudioLoop:
         self.last_ai_speech_time = 0.0
 
         # vLLM hybrid mode state
-        self._vllm_history: list = []          # rolling conversation context
+        self._vllm_history: collections.deque = collections.deque(maxlen=10)          # rolling conversation context
         self._vllm_pending: bool = False       # guard against duplicate relays
 
         # Autonomous mode decision state
@@ -1449,9 +1450,6 @@ class AudioLoop:
                     f"  {k}: {v}" for k, v in traits.items()
                 )
 
-            # Keep rolling history compact (last 10 items max, ~5 turns)
-            while len(self._vllm_history) > 10:
-                self._vllm_history.pop(0)
 
             messages = [{"role": "system", "content": vllm_system}]
             messages.extend(self._vllm_history)

@@ -2754,8 +2754,10 @@ class AudioLoop:
 
                         prior_history = ""
                         if os.path.exists(self.log_file):
-                            with open(self.log_file, "r", encoding="utf-8") as f:
-                                prior_history = f.read().strip()
+                            def _read_log():
+                                with open(self.log_file, "r", encoding="utf-8") as f:
+                                    return f.read().strip()
+                            prior_history = await asyncio.to_thread(_read_log)
 
                         # Retrieve evolving memory state
                         traits = self.mm.get_personality()
@@ -2791,8 +2793,7 @@ class AudioLoop:
                             )
                             await ws.send(json.dumps({"type": "text", "data": context_msg}))
                         else:
-                            with open(self.log_file, "w", encoding="utf-8") as f:
-                                f.write("=== Session Start ===\n")
+                            await self._async_log("=== Session Start ===\n", mode="w")
                             print("[System] Triggering initial greeting via Modal proxy...", flush=True)
                             greet_msg = f"Say what's up, introduce yourself briefly, and let me know you're ready to autonomously control my desktop.{memory_context}"
                             await ws.send(json.dumps({"type": "text", "data": greet_msg}))
@@ -2862,8 +2863,10 @@ class AudioLoop:
 
                         prior_history = ""
                         if os.path.exists(self.log_file):
-                            with open(self.log_file, "r", encoding="utf-8") as f:
-                                prior_history = f.read().strip()
+                            def _read_log():
+                                with open(self.log_file, "r", encoding="utf-8") as f:
+                                    return f.read().strip()
+                            prior_history = await asyncio.to_thread(_read_log)
 
                         # Retrieve evolving memory state
                         traits = self.mm.get_personality()
@@ -2899,8 +2902,7 @@ class AudioLoop:
                             )
                             await self.session.send_realtime_input(text=context_msg)
                         else:
-                            with open(self.log_file, "w", encoding="utf-8") as f:
-                                f.write("=== Session Start ===\n")
+                            await self._async_log("=== Session Start ===\n", mode="w")
                             print("[System] Triggering initial greeting...")
                             greet_msg = f"Say what's up, introduce yourself briefly, and let me know you're ready to autonomously control my desktop.{memory_context}"
                             await self.session.send_realtime_input(

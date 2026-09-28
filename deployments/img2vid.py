@@ -367,6 +367,3 @@ class Img2Vid:
     volumes={CACHE_DIR: cache_volume, OUTPUTS_DIR: outputs_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-class Img2Vid_Eco(Img2Vid._get_user_cls()):
-    """Economy tier endpoint for public/standard users. Cost-optimized on L40S with 60s scaledown."""
-    pass

@@ -805,17 +805,3 @@ class Upscaler:
             "default_tile_size": 1024,
             "default_tile_overlap": 0.25
         }
-
-
-@app.cls(
-    image=image,
-    gpu="L40S",
-    volumes=volumes,
-    secrets=secrets,
-    scaledown_window=60,
-    max_containers=1,
-    timeout=1200
-)
-class Upscaler_Eco(Upscaler._get_user_cls()):
-    """Economy tier endpoint for public/standard users. Cost-optimized on L40S with 60s scaledown."""
-    pass

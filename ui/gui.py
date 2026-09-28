@@ -12,13 +12,16 @@ def _ensure_project_venv():
 
     script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     venv_python = os.path.join(script_dir, ".venv", "Scripts", "python.exe")
+    venv_pythonw = os.path.join(script_dir, ".venv", "Scripts", "pythonw.exe")
     current_python = os.path.normcase(os.path.abspath(sys.executable))
     expected_python = os.path.normcase(os.path.abspath(venv_python))
+    expected_pythonw = os.path.normcase(os.path.abspath(venv_pythonw))
 
-    if os.path.isfile(venv_python) and current_python != expected_python:
+    if os.path.isfile(venv_python) and current_python not in (expected_python, expected_pythonw):
+        relaunch_bin = venv_pythonw if "pythonw" in os.path.basename(current_python).lower() and os.path.isfile(venv_pythonw) else venv_python
         env = os.environ.copy()
         env["ALPHALIVE_VENV_READY"] = "1"
-        os.execve(venv_python, [venv_python, os.path.abspath(__file__), *sys.argv[1:]], env)
+        os.execve(relaunch_bin, [relaunch_bin, os.path.abspath(__file__), *sys.argv[1:]], env)
 
 
 _ensure_project_venv()
@@ -934,7 +937,7 @@ class EngineWorker(QThread):
             sess_name = self._cfg.get("Global", {}).get("Session", "alpha").strip()
             if sess_name:
                 env["ALPHALIVE_SESSION"] = sess_name
-            import character_manager
+            from memory import character_manager
             cm = character_manager.CharacterManager()
             act_char = cm.get_active_character_name()
             if act_char:
@@ -963,8 +966,14 @@ class EngineWorker(QThread):
             env["PYTHONUNBUFFERED"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
 
+            engine_py = sys.executable
+            if "pythonw" in os.path.basename(engine_py).lower():
+                cand = os.path.join(os.path.dirname(engine_py), "python.exe")
+                if os.path.isfile(cand):
+                    engine_py = cand
+
             self._proc = subprocess.Popen(
-                [sys.executable, str(SCRIPT_DIR / self._engine)],
+                [engine_py, str(SCRIPT_DIR / self._engine)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -4231,18 +4240,6 @@ class MainWindow(QMainWindow):
                 self._modal_db.append(f"[{target.upper()}] Deployment already running…", C["neon_yellow"])
                 return
 
-<<<<<<< Updated upstream:ui/gui.py
-        scripts_dir = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
-        if target == "proxy":
-            cmd = "modal deploy core/modalmode.py" if action == "deploy" else "modal app stop alphalive-proxy"
-        elif target == "vllm":
-            cmd = "modal deploy core/modal_vllm.py" if action == "deploy" else "modal app stop alphalive-vllm-bucket"
-        elif target == "alphacore_api":
-            cmd = f"Set-Location '{scripts_dir}'; modal deploy deployment.py" if action == "deploy" else "modal app stop alphacore-aio-backend"
-        elif target == "txt2img":
-            cmd = f"Set-Location '{scripts_dir}'; modal deploy txt2img.py" if action == "deploy" else "modal app stop alphacore-txt2img"
-        else:
-=======
         DEPLOY_DIR   = r"C:\Users\josh6\Workspace\AlphaLive\deployments"
         SCRIPTS_DIR  = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
 
@@ -4268,7 +4265,6 @@ class MainWindow(QMainWindow):
 
         if target not in TARGETS:
             self._modal_db.append(f"[ERROR] Unknown deployment target: {target}", C["neon_red"])
->>>>>>> Stashed changes:gui.py
             return
 
         deploy_cmd, stop_app = TARGETS[target]

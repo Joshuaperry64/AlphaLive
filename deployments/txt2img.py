@@ -512,9 +512,6 @@ class Txt2Img:
     volumes={CACHE_DIR: cache_volume},
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
-class Txt2Img_Eco(Txt2Img._get_user_cls()):
-    """Economy tier endpoint for public/standard users. Cost-optimized on A10G with 60s scaledown."""
-    pass
 
 
 @app.local_entrypoint()

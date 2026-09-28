@@ -945,21 +945,6 @@ class Img2Img:
         return web_app
 
 
-@app.cls(
-    image=image,
-    gpu="L40S",
-    volumes=volumes,
-    secrets=secrets,
-    scaledown_window=60,
-    max_containers=1,
-    timeout=1200,
-    memory=48 * 1024
-)
-class Img2Img_Eco(Img2Img._get_user_cls()):
-    """Economy tier endpoint for public/standard users. Cost-optimized on L40S with 60s scaledown."""
-    pass
-
-
 @app.local_entrypoint()
 def main_img2img(
     image_path=Path(__file__).parent / "demo_images/woman.png",

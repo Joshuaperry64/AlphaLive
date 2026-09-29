@@ -40,11 +40,15 @@ class GoogleWorkspaceManager:
         scopes: Optional[List[str]] = None,
     ):
         base_dir = Path(__file__).parent.parent
-        self.credentials_path = Path(
-            credentials_path
-            or os.environ.get("GOOGLE_CREDENTIALS_FILE")
-            or base_dir / "credentials.json"
-        )
+        if credentials_path:
+            self.credentials_path = Path(credentials_path)
+        elif os.environ.get("GOOGLE_CREDENTIALS_FILE"):
+            self.credentials_path = Path(os.environ["GOOGLE_CREDENTIALS_FILE"])
+        elif (base_dir / "oauth.json").is_file():
+            self.credentials_path = base_dir / "oauth.json"
+        else:
+            self.credentials_path = base_dir / "credentials.json"
+
         self.token_path = Path(
             token_path
             or os.environ.get("GOOGLE_TOKEN_FILE")
@@ -58,8 +62,16 @@ class GoogleWorkspaceManager:
         return GOOGLE_LIBS_AVAILABLE
 
     def has_credentials_file(self) -> bool:
-        """Check if client credentials JSON exists."""
-        return self.credentials_path.is_file()
+        """Check if client credentials JSON exists (either credentials.json or oauth.json)."""
+        if self.credentials_path.is_file():
+            return True
+        base_dir = Path(__file__).parent.parent
+        for candidate in ["oauth.json", "credentials.json"]:
+            p = base_dir / candidate
+            if p.is_file():
+                self.credentials_path = p
+                return True
+        return False
 
     def is_authenticated(self) -> bool:
         """Check if valid, authorized credentials exist."""

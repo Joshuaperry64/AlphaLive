@@ -14,7 +14,7 @@ except AttributeError:
 web_app = FastAPI()
 
 image = modal.Image.debian_slim().pip_install(
-    "google-genai>=0.5.0", "fastapi", "websockets"
+    "google-genai>=2.0.0", "fastapi", "websockets"
 )
 
 @web_app.websocket("/ws")
@@ -38,25 +38,32 @@ async def websocket_endpoint(websocket: WebSocket):
         config_dict = setup.get("config", {})
         
         # Properly deserialize the config dict into LiveConnectConfig
-        try:
-            if config_dict:
+        config = None
+        if config_dict:
+            try:
                 config = types.LiveConnectConfig.model_validate(config_dict)
-            else:
-                config = None
-        except Exception as e:
-            print(f"[Warning] Failed to deserialize config: {e}. Defaulting to basic Audio.")
-            config = types.LiveConnectConfig(
-                response_modalities=[types.LiveConnectConfig.Modality.AUDIO]
-            )
-        except Exception as cfg_err:
-            print(f"[Proxy] Config parse error: {cfg_err}")
-            traceback.print_exc()
-            config = types.LiveConnectConfig(response_modalities=["AUDIO"])
+            except Exception as e:
+                print(f"[Warning] Failed to deserialize config: {e}\n{traceback.format_exc()}", flush=True)
+                try:
+                    tools_raw = config_dict.get("tools") or config_dict.get("functionDeclarations")
+                    sys_inst = config_dict.get("system_instruction") or config_dict.get("systemInstruction")
+                    config = types.LiveConnectConfig(
+                        response_modalities=[types.LiveConnectConfig.Modality.AUDIO],
+                        tools=tools_raw,
+                        system_instruction=sys_inst,
+                    )
+                    print("[Proxy] Reconstructed fallback config with tools and system instruction preserved.", flush=True)
+                except Exception as fb_err:
+                    print(f"[Warning] Fallback config reconstruction failed: {fb_err}. Defaulting to basic Audio.", flush=True)
+                    config = types.LiveConnectConfig(
+                        response_modalities=[types.LiveConnectConfig.Modality.AUDIO]
+                    )
         
         client = genai.Client(http_options={"api_version": "v1beta"}, api_key=api_key)
         
         try:
             async with client.aio.live.connect(model=model_name, config=config) as session:
+                google_send_lock = asyncio.Lock()
                 
                 async def receive_from_google():
                     try:
@@ -67,6 +74,52 @@ async def websocket_endpoint(websocket: WebSocket):
                                 if response.data:
                                     b64_audio = base64.b64encode(response.data).decode("utf-8")
                                     await send_json({"type": "audio", "data": b64_audio})
+
+                                # ── Tool calls (LiveServerToolCall - primary Google GenAI Live path) ──
+                                tc = getattr(response, "tool_call", None)
+                                seen_fc_keys = set()
+                                if tc and getattr(tc, "function_calls", None):
+                                    fcs = []
+                                    for fc in tc.function_calls:
+                                        args_dict = {}
+                                        try:
+                                            if fc.args:
+                                                if isinstance(fc.args, dict):
+                                                    args_dict = dict(fc.args)
+                                                elif hasattr(fc.args, "items"):
+                                                    args_dict = dict(fc.args.items())
+                                                else:
+                                                    args_dict = fc.args
+                                        except Exception:
+                                            pass
+                                        fc_id = getattr(fc, "id", None)
+                                        key = (fc.name, fc_id)
+                                        seen_fc_keys.add(key)
+                                        fcs.append({
+                                            "name": fc.name,
+                                            "id": fc_id,
+                                            "args": args_dict,
+                                        })
+                                    if len(fcs) > 1:
+                                        await send_json({
+                                            "type": "tool_call",
+                                            "function_calls": fcs,
+                                        })
+                                    elif len(fcs) == 1:
+                                        await send_json({
+                                            "type": "function_call",
+                                            "name": fcs[0]["name"],
+                                            "id": fcs[0]["id"],
+                                            "args": fcs[0]["args"],
+                                        })
+
+                                # ── Tool call cancellation ──
+                                tcc = getattr(response, "tool_call_cancellation", None)
+                                if tcc and getattr(tcc, "ids", None):
+                                    await send_json({
+                                        "type": "tool_call_cancellation",
+                                        "ids": list(tcc.ids),
+                                    })
 
                                 sc = getattr(response, "server_content", None)
                                 if sc:
@@ -81,26 +134,30 @@ async def websocket_endpoint(websocket: WebSocket):
                                             # Text
                                             if getattr(part, "text", None):
                                                 await send_json({"type": "text", "data": part.text})
-                                            # Function call
+                                            # Function call fallback (if not already handled via response.tool_call)
                                             fc = getattr(part, "function_call", None)
                                             if fc:
-                                                args_dict = {}
-                                                try:
-                                                    if fc.args:
-                                                        if isinstance(fc.args, dict):
-                                                            args_dict = dict(fc.args)
-                                                        elif hasattr(fc.args, "items"):
-                                                            args_dict = dict(fc.args.items())
-                                                        else:
-                                                            args_dict = fc.args
-                                                except Exception:
-                                                    pass
-                                                await send_json({
-                                                    "type": "function_call",
-                                                    "name": fc.name,
-                                                    "id": getattr(fc, "id", None),
-                                                    "args": args_dict,
-                                                })
+                                                fc_id = getattr(fc, "id", None)
+                                                key = (fc.name, fc_id)
+                                                if key not in seen_fc_keys:
+                                                    seen_fc_keys.add(key)
+                                                    args_dict = {}
+                                                    try:
+                                                        if fc.args:
+                                                            if isinstance(fc.args, dict):
+                                                                args_dict = dict(fc.args)
+                                                            elif hasattr(fc.args, "items"):
+                                                                args_dict = dict(fc.args.items())
+                                                            else:
+                                                                args_dict = fc.args
+                                                    except Exception:
+                                                        pass
+                                                    await send_json({
+                                                        "type": "function_call",
+                                                        "name": fc.name,
+                                                        "id": fc_id,
+                                                        "args": args_dict,
+                                                    })
 
 
                                     # ── Transcriptions ────────────────────────
@@ -136,20 +193,38 @@ async def websocket_endpoint(websocket: WebSocket):
                                 })
                             elif message_type == "audio":
                                 raw_audio = base64.b64decode(data["data"])
-                                await session.send_realtime_input(audio=types.Blob(data=raw_audio, mime_type="audio/pcm"))
+                                async with google_send_lock:
+                                    await session.send_realtime_input(audio=types.Blob(data=raw_audio, mime_type="audio/pcm"))
                             elif message_type == "video":
                                 raw_video = base64.b64decode(data["data"])
-                                await session.send_realtime_input(video=types.Blob(data=raw_video, mime_type="image/jpeg"))
+                                async with google_send_lock:
+                                    await session.send_realtime_input(video=types.Blob(data=raw_video, mime_type="image/jpeg"))
                             elif message_type == "text":
-                                await session.send_realtime_input(text=data["data"])
+                                async with google_send_lock:
+                                    await session.send_realtime_input(text=data["data"])
                             elif message_type == "tool_response":
                                 resp = data["response"]
                                 ret_resp = resp.get("response", {})
                                 if not isinstance(ret_resp, dict):
                                     ret_resp = {"result": str(ret_resp)}
-                                await session.send_tool_response(function_responses=[
-                                    types.FunctionResponse(name=resp["name"], id=resp.get("id"), response=ret_resp)
-                                ])
+                                id_val = resp.get("id") or None
+                                async with google_send_lock:
+                                    await session.send_tool_response(function_responses=[
+                                        types.FunctionResponse(name=resp["name"], id=id_val, response=ret_resp)
+                                    ])
+                            elif message_type == "tool_responses":
+                                f_resps = []
+                                for r in data.get("responses", []):
+                                    ret_resp = r.get("response", {})
+                                    if not isinstance(ret_resp, dict):
+                                        ret_resp = {"result": str(ret_resp)}
+                                    id_val = r.get("id") or None
+                                    f_resps.append(
+                                        types.FunctionResponse(name=r["name"], id=id_val, response=ret_resp)
+                                    )
+                                if f_resps:
+                                    async with google_send_lock:
+                                        await session.send_tool_response(function_responses=f_resps)
                     except WebSocketDisconnect:
                         raise
                     except Exception as e:

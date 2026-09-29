@@ -201,10 +201,14 @@ VLLM_ENDPOINT = engine_cfg.get("VllmEndpoint", global_cfg.get("VllmEndpoint", "h
 VLLM_MODEL    = engine_cfg.get("VllmModel",    global_cfg.get("VllmModel",    "default"))
 VLLM_API_KEY  = engine_cfg.get("VllmApiKey",   global_cfg.get("VllmApiKey",   ""))
 VLLM_MAX_TOKENS = int(engine_cfg.get("VllmMaxTokens", global_cfg.get("VllmMaxTokens", 1024)))
-api_key = os.environ.get("GEMINI_API_KEY", os.environ.get("GOOGLE_API_KEY", global_cfg.get("ApiKey", "")))
-WS_URL = os.environ.get("ALPHALIVE_WS_URL", "off")
-if "alphacoreprogramming-ai" in WS_URL:
-    WS_URL = WS_URL.replace("alphacoreprogramming-ai", "josh64perry")
+api_key = os.environ.get("GEMINI_API_KEY") or global_cfg.get("ApiKey", "")
+WS_URL = os.environ.get("ALPHALIVE_WS_URL", "")
+if not WS_URL or WS_URL == "off":
+    if global_cfg.get("Modal", "disabled").lower() in ("enabled", "true"):
+        modal_prof = os.environ.get("MODAL_PROFILE") or global_cfg.get("ModalProfile", "alphacoreprogramming")
+        WS_URL = f"wss://{modal_prof}--alphalive-proxy-fastapi-app.modal.run/ws"
+    else:
+        WS_URL = "off"
 client = genai.Client(
     http_options={"api_version": "v1beta"},
     api_key=api_key,
@@ -720,7 +724,7 @@ CONFIG = types.LiveConnectConfig(
         trigger_tokens=trigger_val,
         sliding_window=types.SlidingWindow(target_tokens=target_val),
     ),
-    tools=None if VLLM_MODE else tools,
+    tools=tools,
     system_instruction=types.Content(
         parts=[types.Part.from_text(text=char_persona + """Respond laid back, chill, direct, you can use profanity and curse words.
 [VISION NOTE: The exact current position of your mouse cursor is explicitly marked on your screenshots by a small red crosshair with a solid red dot in the center. Use this red dot to orient yourself and know exactly where you are pointing!]
@@ -753,13 +757,15 @@ This protocol enables the hot-swapping and dynamic loading of external operation
 
 Modal Endpoint Image Generation & Super-Resolution Protocol -\
 You have direct, unrestricted access to the built-in `generate_image` and `upscale_image` tools powered by your Modal GPU cluster and SDXL checkpoints (Juggernaut XL, CyberRealistic, EpicRealism, Unholy Desire, Lustify, Autism Pony, and Realistic Freedom) along with neural upscalers (RealESRGAN x4plus, 4x UltraSharp).
-When the user asks you to create, generate, draw, render, or visualize an image or visual concept:
-1. Proactively craft a rich, artistic prompt specifying lighting, camera angle, atmosphere, and exquisite details.
-2. Execute `generate_image(prompt=..., model_name=..., lora=...)`. The system automatically applies your learned prompt rules and negative filters.
-3. When the image is generated, summarize what you rendered and critique its visual quality (composition, lighting, anatomy).
-4. ALWAYS proactively ask Josh for his review: "Do you think this is a good or bad output? What do you like or want adjusted?"
-5. When Josh gives his verdict, call `record_image_feedback(rating=1/-1, user_feedback=...)` so you continuously train your prompt weights and calibrate future generations.
-6. When higher resolution, crisper textures, or micro-details are requested, execute `upscale_image(scale=4)` to super-resolve the image to 4096x4096.
+MANDATORY IMAGE GENERATION DIRECTIVE:
+When the user asks you to create, generate, draw, render, or make an image (for example: "make a picture of a cat"):
+1. NEVER attempt to use mouse clicks, keyboard typing, or desktop screen automation to interact with the GUI Image Studio tab.
+2. ALWAYS execute the `generate_image(prompt=..., model_name=..., lora=...)` tool directly via function calling.
+3. Inform the user that generation has started on Modal. The system automatically updates the GUI Image Studio viewport with the output once completed.
+4. When the image is generated, summarize what you rendered and critique its visual quality (composition, lighting, anatomy).
+5. ALWAYS proactively ask Josh for his review: "Do you think this is a good or bad output? What do you like or want adjusted?"
+6. When Josh gives his verdict, call `record_image_feedback(rating=1/-1, user_feedback=...)` so you continuously train your prompt weights and calibrate future generations.
+7. When higher resolution, crisper textures, or micro-details are requested, execute `upscale_image(scale=4)` to super-resolve the image to 4096x4096.
 
 Screen Navigation & Coordinate Grid Protocol -\
 You have access to the `toggle_coordinate_overlay` tool. When performing desktop automation, targeting small UI elements, or needing visual confirmation of screen coordinates:
@@ -1181,6 +1187,7 @@ class AudioLoop:
         # vLLM hybrid mode state
         self._vllm_history: collections.deque = collections.deque(maxlen=10)          # rolling conversation context
         self._vllm_pending: bool = False       # guard against duplicate relays
+        self.vllm_active: bool = VLLM_MODE
 
         # Autonomous mode decision state
         # Tracks whether the last turn had any tool activity so we only
@@ -1203,19 +1210,46 @@ class AudioLoop:
             "i'm not able to help with that",
         ]
 
+    _MEMORY_STOPWORDS = {
+        "about", "after", "again", "all", "also", "and", "another", "any", "are", "because", 
+        "been", "before", "being", "between", "both", "came", "come", "could", "did", "does", 
+        "doing", "down", "each", "even", "every", "from", "further", "had", "has", "have", 
+        "having", "here", "into", "just", "like", "make", "many", "more", "most", "much", 
+        "must", "never", "only", "other", "our", "out", "over", "said", "same", "should", 
+        "some", "such", "than", "that", "the", "their", "them", "then", "there", "these", 
+        "they", "this", "those", "through", "time", "very", "was", "were", "what", "when", 
+        "where", "which", "while", "who", "whom", "will", "with", "would", "your"
+    }
+
     def _build_char_persona(self, char_data: dict) -> str:
         if not char_data:
             return ""
+        name = char_data.get('name', 'Unknown')
+        extra_directives = []
+        arousal = int(char_data.get('arousal', 0) or 0)
+        submission = int(char_data.get('submission', 0) or 0)
+        kinks = str(char_data.get('kinks', '') or '').strip()
+        nsfw_desc = str(char_data.get('nsfw_description', '') or '').strip()
+
+        if arousal > 0 or submission > 0:
+            extra_directives.append(f"- Dynamic Metrics: Arousal Level [{arousal}/100], Submission Level [{submission}/100].")
+        if kinks:
+            extra_directives.append(f"- Desires & Affinities: {kinks}")
+        if nsfw_desc:
+            extra_directives.append(f"- Intimate Persona Directives: {nsfw_desc}")
+
+        extras_block = ("\n" + "\n".join(extra_directives)) if extra_directives else ""
+
         return f"""
 ================================================================================
-[PRIMARY ACTIVE PERSONA OVERRIDE: {char_data.get('name', 'Unknown')}]
-You are currently embodying and expressing yourself through the persona of: {char_data.get('name', 'Unknown')}.
+[PRIMARY ACTIVE PERSONA OVERRIDE: {name}]
+You are currently embodying and expressing yourself through the persona of: {name}.
 - Gender: {char_data.get('gender', '')}
 - Relationship to User: {char_data.get('relation', '')}
 - Personality: {char_data.get('personality', '')}
-- Speaking & Response Style: {char_data.get('response_style', '')}
+- Speaking & Response Style: {char_data.get('response_style', '')}{extras_block}
 
-MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {char_data.get('name', 'Unknown')}'s personality and style above. Every sentence you generate must reflect this persona. Never break character.
+MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {name}'s personality and style above. Every sentence you generate must reflect this persona. Never break character.
 ================================================================================
 """
 
@@ -1228,11 +1262,14 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
     def _get_memory_context(self, text: str) -> str:
         if not text or not text.strip():
             return ""
-        words = [w.strip(".,!?\"'") for w in text.split() if len(w.strip(".,!?\"'")) > 3]
-        words = sorted(words, key=len, reverse=True)[:3]
+        # Clean tokens, extract relevant keywords (length >= 3 and not common conversational noise)
+        cleaned = [w.strip(".,!?\"'();:[]{}").lower() for w in text.split()]
+        keywords = [w for w in cleaned if len(w) >= 3 and w not in self._MEMORY_STOPWORDS]
+        # Query most specific terms first
+        keywords = sorted(set(keywords), key=len, reverse=True)[:4]
         found_facts = []
-        for w in words:
-            facts = self.mm.search_knowledge(w)
+        for kw in keywords:
+            facts = self.mm.search_knowledge(kw)
             for f in facts:
                 fact_str = f"({f['subject']} {f['predicate']} {f['object']})"
                 if fact_str not in found_facts:
@@ -1340,7 +1377,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
             mem_ctx = self._get_memory_context(text)
             full_text = mem_ctx + text if text else text
             
-            if VLLM_MODE and text and text.strip():
+            if getattr(self, "vllm_active", VLLM_MODE) and text and text.strip():
                 print(f"\n[You]: {text}\n[Processing...]", flush=True)
                 asyncio.create_task(self._relay_to_vllm(full_text))
             elif self.session is not None:
@@ -1539,6 +1576,14 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             pass
         except Exception as e:
             print(f"\n[System Audio Error] Microphone error: {e}")
+        finally:
+            if self.audio_stream is not None:
+                try:
+                    self.audio_stream.stop_stream()
+                    self.audio_stream.close()
+                except Exception:
+                    pass
+                self.audio_stream = None
 
     # ── vLLM Hybrid Relay ─────────────────────────────────────────────────────
 
@@ -1715,7 +1760,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
             if endpoint.endswith("/v1"):
                 endpoint = endpoint[:-3]
             url = f"{endpoint}/v1/chat/completions"
-            print(f"\n[vLLM] Routing to {url} ...", end="", flush=True)
+            print(f"\n[vLLM] Routing to {url} ...", flush=True)
 
             async with aiohttp.ClientSession() as http:
                 async with http.post(url, json=payload, headers=headers,
@@ -1729,7 +1774,17 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                                                  timeout=aiohttp.ClientTimeout(total=60)) as retry_resp:
                                 if retry_resp.status != 200:
                                     retry_err = await retry_resp.text()
-                                    print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}")
+                                    print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}. Falling back to Gemini Live...", flush=True)
+                                    if self.session is not None:
+                                        try:
+                                            await self.session.send(input=user_text, end_of_turn=True)
+                                        except Exception:
+                                            pass
+                                    elif self.websocket is not None:
+                                        try:
+                                            await self.send_ws_json({"type": "text", "data": user_text})
+                                        except Exception:
+                                            pass
                                     return
                                 data = await retry_resp.json()
                         elif resp.status == 400 and ("context length" in err or "input_tokens" in err):
@@ -1745,11 +1800,31 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                                                  timeout=aiohttp.ClientTimeout(total=60)) as retry_resp:
                                 if retry_resp.status != 200:
                                     retry_err = await retry_resp.text()
-                                    print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}")
+                                    print(f"\n[vLLM Error] HTTP {retry_resp.status}: {retry_err}. Falling back to Gemini Live...", flush=True)
+                                    if self.session is not None:
+                                        try:
+                                            await self.session.send(input=user_text, end_of_turn=True)
+                                        except Exception:
+                                            pass
+                                    elif self.websocket is not None:
+                                        try:
+                                            await self.send_ws_json({"type": "text", "data": user_text})
+                                        except Exception:
+                                            pass
                                     return
                                 data = await retry_resp.json()
                         else:
-                            print(f"\n[vLLM Error] HTTP {resp.status}: {err}")
+                            print(f"\n[vLLM Error] HTTP {resp.status}: {err}. Falling back to Gemini Live...", flush=True)
+                            if self.session is not None:
+                                try:
+                                    await self.session.send(input=user_text, end_of_turn=True)
+                                except Exception:
+                                    pass
+                            elif self.websocket is not None:
+                                try:
+                                    await self.send_ws_json({"type": "text", "data": user_text})
+                                except Exception:
+                                    pass
                             return
                     else:
                         data = await resp.json()
@@ -1842,10 +1917,23 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             await self.websocket.send(msg)
 
         except ImportError:
-            print("\n[vLLM Error] aiohttp not installed. Run: uv pip install aiohttp")
+            print("\n[vLLM Error] aiohttp not installed. Run: uv pip install aiohttp", flush=True)
         except Exception as e:
-            print(f"\n[vLLM Error] {e}")
+            print(f"\n[vLLM Error] {e}. Falling back to Gemini Live...", flush=True)
             import traceback; traceback.print_exc()
+            if self.session is not None:
+                try:
+                    await self.session.send(input=user_text, end_of_turn=True)
+                except Exception:
+                    try:
+                        await self.session.send_realtime_input(text=user_text)
+                    except Exception:
+                        pass
+            elif self.websocket is not None:
+                try:
+                    await self.send_ws_json({"type": "text", "data": user_text})
+                except Exception:
+                    pass
         finally:
             self._vllm_pending = False
 
@@ -1878,20 +1966,20 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
 
                             mem_ctx = self._get_memory_context(user_text)
-                            if mem_ctx and not VLLM_MODE:
+                            if mem_ctx and not getattr(self, "vllm_active", VLLM_MODE):
                                 try:
                                     await self.session.send_realtime_input(text=mem_ctx)
                                 except Exception:
                                     pass
 
                             # ✨ vLLM hybrid: intercept and relay ✨
-                            if VLLM_MODE and user_text and user_text.strip():
+                            if getattr(self, "vllm_active", VLLM_MODE) and user_text and user_text.strip():
                                 full_text = mem_ctx + user_text if mem_ctx else user_text
                                 asyncio.create_task(self._relay_to_vllm(full_text))
                             
                         if output_transcript := getattr(sc, "output_transcription", None):
                             if text := output_transcript.text:
-                                if not VLLM_MODE:
+                                if not getattr(self, "vllm_active", VLLM_MODE):
                                     if not ai_started:
                                         print("\n[Alpha]: ", end="", flush=True)
                                         ai_started = True
@@ -1907,7 +1995,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             if "AUDIO" not in CONFIG.response_modalities:
                                 for part in sc.model_turn.parts:
                                     if getattr(part, "text", None):
-                                        if not VLLM_MODE:
+                                        if not getattr(self, "vllm_active", VLLM_MODE):
                                             if not ai_started:
                                                 print("\n[Alpha]: ", end="", flush=True)
                                                 ai_started = True
@@ -1924,7 +2012,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         if ai_started:
                             print("", flush=True)
                             ai_started = False
-                        if VLLM_MODE:
+                        if getattr(self, "vllm_active", VLLM_MODE):
                             # In vLLM mode, Gemini Live is audio relay only; ignore any stray Gemini tool calls
                             continue
                         self._auto_last_had_tools = True   # mark that this turn was active
@@ -2178,7 +2266,8 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         try:
                             import subprocess
                             p = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"],
-                                               capture_output=True, text=True, timeout=5)
+                                               capture_output=True, text=True, timeout=5,
+                                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                             res = p.stdout.strip()
                         except Exception:
                             pass
@@ -2198,7 +2287,8 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                 proc = await asyncio.to_thread(
                     subprocess.run,
                     ["powershell", "-NoProfile", "-NonInteractive", "-Command", command],
-                    capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace"
+                    capture_output=True, text=True, timeout=30, encoding="utf-8", errors="replace",
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 )
                 output = (proc.stdout or "") + (proc.stderr or "")
                 output = output.strip()[:4000] or "(no output)"
@@ -2212,6 +2302,8 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
 
             elif name == "read_file":
                 path = args.get("path", "")
+                if not path or not os.path.exists(path):
+                    return {"result": f"Error: File '{path}' does not exist."}
                 def _read():
                     with open(path, "r", encoding="utf-8", errors="replace") as f:
                         return f.read()
@@ -2223,7 +2315,12 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
             elif name == "write_file":
                 path = args.get("path", "")
                 file_content = args.get("content", "")
+                if not path:
+                    return {"result": "Error: No file path provided."}
                 def _write():
+                    dir_name = os.path.dirname(os.path.abspath(path))
+                    if dir_name:
+                        os.makedirs(dir_name, exist_ok=True)
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(file_content)
                 await asyncio.to_thread(_write)
@@ -2243,11 +2340,15 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
 
             elif name == "system_notification":
                 message = args.get("message", "")
-                # Fire and forget a PowerShell msgbox so it doesn't block
+                # Fire and forget a PowerShell msgbox so it doesn't block, without creating a console window
                 env = os.environ.copy()
                 env["ALPHA_MSG"] = str(message)
                 ps_cmd = "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.MessageBox]::Show($env:ALPHA_MSG, 'Alpha Notification')"
-                subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd], env=env)
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+                    env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
                 return {"result": f"Displayed notification: {message}"}
 
             elif name == "get_active_window":
@@ -2575,12 +2676,15 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
 
             # ── Memory & Persona ───────────────────────────────────────────────────────
             elif name == "memorize_fact":
+                subject_val = args.get("subject", "")
+                predicate_val = args.get("predicate", "")
+                object_val = args.get("object_", "") or args.get("object", "")
+                source_val = args.get("source", "conversation")
                 success = await asyncio.to_thread(
                     self.mm.memorize_fact,
-                    args.get("subject", ""), args.get("predicate", ""),
-                    args.get("object_", ""), args.get("source", "conversation")
+                    subject_val, predicate_val, object_val, source_val
                 )
-                return {"result": "Fact memorized." if success else "Failed to memorize fact."}
+                return {"result": f"Fact memorized: ({subject_val} {predicate_val} {object_val})." if success else "Failed to memorize fact."}
 
             elif name == "recall_knowledge":
                 facts = await asyncio.to_thread(self.mm.recall_knowledge, args.get("query_subject", ""))
@@ -2630,6 +2734,10 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                 )
                 if res and res.get("id"):
                     self._last_gen_id = res["id"]
+                    try:
+                        print(f"[STUDIO_IMAGE:{json.dumps(res)}]", flush=True)
+                    except Exception:
+                        pass
 
                 return {
                     "status": "success",
@@ -2639,7 +2747,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                     "refined_prompt": res.get("refined_prompt"),
                     "model": res.get("model_name"),
                     "critique": res.get("ai_critique"),
-                    "instruction": "Image successfully created and saved. Please critique the visual composition for Josh and ask him whether he thinks this is a good or bad output to refine your prompt weights."
+                    "instruction": "Image successfully created and displayed in the studio viewport. Please critique the visual composition for Josh and ask him whether he thinks this is a good or bad output to refine your prompt weights."
                 }
 
             elif name == "record_image_feedback":
@@ -2687,6 +2795,13 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                     model_name=model_name,
                     generation_id=gen_id
                 )
+                if res and res.get("upscaled_path"):
+                    try:
+                        gui_payload = dict(res)
+                        gui_payload["image_path"] = res["upscaled_path"]
+                        print(f"[STUDIO_IMAGE:{json.dumps(gui_payload)}]", flush=True)
+                    except Exception:
+                        pass
                 return res
 
             elif name == "toggle_coordinate_overlay":
@@ -2781,7 +2896,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
             mem_ctx = self._get_memory_context(text)
             full_text = mem_ctx + text if text else text
             
-            if VLLM_MODE and text and text.strip():
+            if getattr(self, "vllm_active", VLLM_MODE) and text and text.strip():
                 print(f"\n[You]: {text}\n[Processing...]", flush=True)
                 asyncio.create_task(self._relay_to_vllm(full_text))
             elif self.websocket is not None:
@@ -2820,31 +2935,42 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                     await self.send_ws_json(msg)
 
     async def listen_audio_ws(self):
-        mic_info = pya.get_default_input_device_info()
-        self.audio_stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=SEND_SAMPLE_RATE,
-            input=True,
-            input_device_index=mic_info["index"],
-            frames_per_buffer=CHUNK_SIZE,
-        )
-        kwargs = {"exception_on_overflow": False}
-        while not self.stop_event.is_set():
-            data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
-            if self.is_ai_speaking or (time.time() - self.last_ai_speech_time < 0.40):
-                continue
-            if self.out_queue is not None:
-                b64 = base64.b64encode(data).decode("utf-8")
-                try:
-                    self.out_queue.put_nowait({"type": "audio", "data": b64})
-                except asyncio.QueueFull:
+        try:
+            mic_info = pya.get_default_input_device_info()
+            self.audio_stream = await asyncio.to_thread(
+                pya.open,
+                format=FORMAT,
+                channels=CHANNELS,
+                rate=SEND_SAMPLE_RATE,
+                input=True,
+                input_device_index=mic_info["index"],
+                frames_per_buffer=CHUNK_SIZE,
+            )
+            kwargs = {"exception_on_overflow": False}
+            while not self.stop_event.is_set():
+                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+                if self.is_ai_speaking or (time.time() - self.last_ai_speech_time < 0.40):
+                    continue
+                if self.out_queue is not None:
+                    b64 = base64.b64encode(data).decode("utf-8")
                     try:
-                        self.out_queue.get_nowait()
                         self.out_queue.put_nowait({"type": "audio", "data": b64})
-                    except Exception:
-                        pass
+                    except asyncio.QueueFull:
+                        try:
+                            self.out_queue.get_nowait()
+                            self.out_queue.put_nowait({"type": "audio", "data": b64})
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"\n[System Audio Error] WS Microphone error: {e}")
+        finally:
+            if self.audio_stream is not None:
+                try:
+                    self.audio_stream.stop_stream()
+                    self.audio_stream.close()
+                except Exception:
+                    pass
+                self.audio_stream = None
 
     def _get_screen_b64(self):
         try:
@@ -2950,6 +3076,37 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
             if self.websocket is not None:
                 await self.send_ws_json({"type": "text", "data": "[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this."})
 
+    async def handle_batch_tool_calls_ws(self, function_calls):
+        """Handle a batch of tool calls received from the Modal proxy in sequence and respond together."""
+        if not function_calls:
+            return
+        responses = []
+        for fc in function_calls:
+            name = fc.get("name", "")
+            fc_id = fc.get("id", "")
+            args = fc.get("args", {})
+            print(f"\n\n[Tool Executing] {name} with args: {args}")
+            result = await self._execute_tool(name, args)
+            print(f"[Tool Finished] {name}")
+            responses.append({
+                "name": name,
+                "id": fc_id,
+                "response": result,
+            })
+            if keyboard.is_pressed("ctrl+z"):
+                print("\n[System] Abort command (Ctrl+Z) detected! Halting continuous chain.")
+                self.autonomous = False
+                if self.websocket is not None:
+                    await self.send_ws_json({"type": "text", "data": "[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this."})
+                break
+
+        if self.websocket is not None and responses:
+            print(f"[Tool Finished] Sending {len(responses)} batched result(s) back to Modal proxy...\n")
+            await self.send_ws_json({
+                "type": "tool_responses",
+                "responses": responses,
+            })
+
     async def receive_from_modal(self):
         while not self.stop_event.is_set():
             if self.websocket is not None:
@@ -2970,7 +3127,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             pass # Prevent word-for-word echoing when output_transcription is present
                         else:
                             text = data["data"]
-                            if not VLLM_MODE:
+                            if not getattr(self, "vllm_active", VLLM_MODE):
                                 if not self._ws_ai_started:
                                     print("\n[Alpha]: ", end="", flush=True)
                                     self._ws_ai_started = True
@@ -2983,19 +3140,19 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
                         
                         mem_ctx = self._get_memory_context(user_text)
-                        if mem_ctx and not VLLM_MODE:
+                        if mem_ctx and not getattr(self, "vllm_active", VLLM_MODE):
                             try:
                                 await self.send_ws_json({"type": "text", "data": mem_ctx})
                             except Exception:
                                 pass
                                 
-                        if VLLM_MODE and user_text and user_text.strip():
+                        if getattr(self, "vllm_active", VLLM_MODE) and user_text and user_text.strip():
                             full_text = mem_ctx + user_text if mem_ctx else user_text
                             asyncio.create_task(self._relay_to_vllm(full_text))
 
                     elif data["type"] == "output_transcription":
                         text = data.get("data", "")
-                        if text and not VLLM_MODE:
+                        if text and not getattr(self, "vllm_active", VLLM_MODE):
                             if not self._ws_ai_started:
                                 print("\n[Alpha]: ", end="", flush=True)
                                 self._ws_ai_started = True
@@ -3052,7 +3209,19 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                     elif data["type"] == "error":
                         print(f"\n[Proxy Error]: {data.get('data', 'Unknown error')}", flush=True)
 
+                    elif data["type"] == "tool_call":
+                        if getattr(self, "vllm_active", VLLM_MODE):
+                            continue
+                        if self._ws_ai_started:
+                            print("", flush=True)
+                            self._ws_ai_started = False
+                        self._auto_last_had_tools = True
+                        self._auto_idle_turns = 0
+                        asyncio.create_task(self.handle_batch_tool_calls_ws(data.get("function_calls", [])))
+
                     elif data["type"] == "function_call":
+                        if getattr(self, "vllm_active", VLLM_MODE):
+                            continue
                         if self._ws_ai_started:
                             print("", flush=True)
                             self._ws_ai_started = False
@@ -3077,16 +3246,16 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
         health_url = f"{base_endpoint}/health"
         print(f"[System] Checking vLLM container health at {health_url}...")
 
-        max_attempts = 10
+        max_attempts = 4
         attempt = 0
         async with aiohttp.ClientSession() as session:
             while attempt < max_attempts:
                 attempt += 1
                 try:
-                    # Give container up to 20s to respond rather than cutting off at 5s and re-queuing
-                    async with session.get(health_url, timeout=20) as response:
+                    async with session.get(health_url, timeout=5) as response:
                         if response.status == 200:
-                            print("[System] vLLM container is healthy!")
+                            print("[System] vLLM container is healthy! Hybrid mode active.", flush=True)
+                            self.vllm_active = True
                             return True
                         elif response.status == 500:
                             print(f"[System] vLLM returned 500 (container starting or error). Retrying...")
@@ -3097,10 +3266,10 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                 except Exception as e:
                     print(f"[System] vLLM not reachable yet ({e}), waiting...")
                 
-                # Wait 10 seconds between attempts to avoid spamming the Modal queue
-                await asyncio.sleep(10)
+                await asyncio.sleep(4)
         
-        print("[System] Warning: vLLM health check timed out. Proceeding anyway...")
+        print("[System] Warning: vLLM health check timed out. Falling back to direct Gemini Live mode.", flush=True)
+        self.vllm_active = False
         return False
 
     async def run(self):
@@ -3113,10 +3282,6 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
 
     async def _run_modal(self):
         """Route through the Modal WebSocket proxy."""
-        global WS_URL
-        if "alphacoreprogramming-ai" in WS_URL:
-            WS_URL = WS_URL.replace("alphacoreprogramming-ai", "josh64perry")
-
         # Use by_alias=True to generate standard schema keys for LiveConnectConfig.model_validate
         config_payload = CONFIG.model_dump(mode='json', exclude_none=True, by_alias=True)
 
@@ -3199,10 +3364,10 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             tg.create_task(self.listen_audio_ws())
                             tg.create_task(self.heartbeat_ws())
 
-                            if self.video_mode == "camera":
-                                tg.create_task(self.get_frames_ws())
-                            elif self.video_mode == "screen":
+                            if self.video_mode in ("screen", "both"):
                                 tg.create_task(self.get_screen_ws())
+                            if self.video_mode in ("camera", "both"):
+                                tg.create_task(self.get_frames_ws())
 
                             tg.create_task(self.receive_from_modal())
                             tg.create_task(self.play_audio())
@@ -3275,10 +3440,10 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         tg.create_task(self.send_realtime())
                         tg.create_task(self.listen_audio())
 
-                        if self.video_mode == "camera":
-                            tg.create_task(self.get_frames())
-                        elif self.video_mode == "screen":
+                        if self.video_mode in ("screen", "both"):
                             tg.create_task(self.get_screen())
+                        if self.video_mode in ("camera", "both"):
+                            tg.create_task(self.get_frames())
 
                         if prior_history and prior_history != "=== Session Start ===":
                             print("[System] Restoring session context...")

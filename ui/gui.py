@@ -24,15 +24,12 @@ def _ensure_project_venv():
         os.execve(relaunch_bin, [relaunch_bin, os.path.abspath(__file__), *sys.argv[1:]], env)
 
 
-_ensure_project_venv()
+if __name__ == "__main__":
+    _ensure_project_venv()
 
-if sys.platform == 'win32':
-    import ctypes
-    try:
-        # Force DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
-        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
-    except Exception:
-        pass
+# Clean DPI handling — allow Qt6 to manage scaling naturally without artificial overrides
+if "QT_SCALE_FACTOR" in os.environ:
+    del os.environ["QT_SCALE_FACTOR"]
 import json
 import math
 import time
@@ -206,6 +203,7 @@ DEFAULT_CONFIG = {
     "Global": {
         "ApiKey": "", "Session": "deziree",
         "Modal": "enabled", "Memory": "enabled",
+        "ModalProfile": "alphacoreprogramming",
         "AlphaCoreInstruction": "enabled",
         "AutonomousControl": "disabled",
         "NsfwMode": "disabled",
@@ -246,6 +244,37 @@ def save_config(cfg):
         return True
     except Exception:
         return False
+
+
+def get_modal_profiles() -> tuple[list[str], str]:
+    """
+    Returns (profile_names, active_profile) by inspecting ~/.modal.toml and modal.config.
+    """
+    profiles = []
+    p = Path.home() / ".modal.toml"
+    if p.exists():
+        try:
+            import tomllib
+            data = tomllib.loads(p.read_text("utf-8"))
+            profiles = [k for k, v in data.items() if isinstance(v, dict)]
+        except Exception:
+            try:
+                import re
+                text = p.read_text("utf-8")
+                profiles = re.findall(r"^\[([\w\-]+)\]", text, re.MULTILINE)
+            except Exception:
+                pass
+    active = ""
+    try:
+        import modal.config
+        active = getattr(modal.config, "_profile", "") or ""
+    except Exception:
+        pass
+    if not active and profiles:
+        active = profiles[0]
+    if active and active not in profiles:
+        profiles.append(active)
+    return profiles, active
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -955,29 +984,50 @@ class EngineWorker(QThread):
                             k, _, v = line.partition("=")
                             env.setdefault(k.strip(), v.strip())
 
+            selected_profile = self._cfg.get("Global", {}).get("ModalProfile", "").strip()
+            if not selected_profile:
+                _, active_prof = get_modal_profiles()
+                selected_profile = active_prof or "alphacoreprogramming"
+
+            env["MODAL_PROFILE"] = selected_profile
+
             modal = self._cfg.get("Global", {}).get("Modal", "disabled")
             if modal in ("enabled", "true"):
                 env["ALPHALIVE_WS_URL"] = (
-                    "wss://josh64perry--alphalive-proxy-fastapi-app.modal.run/ws"
+                    f"wss://{selected_profile}--alphalive-proxy-fastapi-app.modal.run/ws"
                 )
             else:
                 env["ALPHALIVE_WS_URL"] = "off"
+
+            vllm_ep = self._cfg.get("Global", {}).get("VllmEndpoint", "").strip()
+            if not vllm_ep or "--alphalive-vllm-bucket-serve.modal.run" in vllm_ep:
+                env["VLLM_ENDPOINT"] = f"https://{selected_profile}--alphalive-vllm-bucket-serve.modal.run"
+            elif vllm_ep:
+                env["VLLM_ENDPOINT"] = vllm_ep
 
             env["PYTHONUNBUFFERED"] = "1"
             env["PYTHONIOENCODING"] = "utf-8"
 
             engine_py = sys.executable
-            if "pythonw" in os.path.basename(engine_py).lower():
-                cand = os.path.join(os.path.dirname(engine_py), "python.exe")
-                if os.path.isfile(cand):
-                    engine_py = cand
+            cand_w = os.path.join(os.path.dirname(engine_py), "pythonw.exe")
+            if os.path.isfile(cand_w):
+                engine_py = cand_w
+
+            extra_kwargs = {}
+            if sys.platform == "win32":
+                extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = subprocess.SW_HIDE
+                extra_kwargs["startupinfo"] = si
 
             self._proc = subprocess.Popen(
                 [engine_py, str(SCRIPT_DIR / self._engine)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                env=env, cwd=str(SCRIPT_DIR), bufsize=0
+                env=env, cwd=str(SCRIPT_DIR), bufsize=0,
+                **extra_kwargs
             )
 
             # Read chunks unbuffered to support live streaming
@@ -1959,6 +2009,29 @@ class GlobalPanel(QWidget):
         modal = CyberToggle(g.get("Modal", "enabled").lower() in ("enabled","true"))
         self._w["Modal"] = modal
         nl.addWidget(config_row("Modal Cloud Proxy", modal, "Route through Modal cloud WebSocket proxy"))
+
+        prof_combo = QComboBox()
+        prof_combo.setStyleSheet(f"""
+            QComboBox {{
+                background:{C['bg_deep']}; color:{C['neon_green']}; border:1px solid {C['border']};
+                border-radius:3px; padding:3px 6px; font-family:'{FONT_MONO}'; font-size:10px; font-weight:bold;
+            }}
+            QComboBox QAbstractItemView {{
+                background:{C['bg_deep']}; color:{C['text_main']}; selection-background-color:{C['neon_blue']}33;
+            }}
+        """)
+        profiles, active_prof = get_modal_profiles()
+        for p in profiles:
+            prof_combo.addItem(p)
+        cur_prof = g.get("ModalProfile", "").strip() or active_prof
+        c_idx = prof_combo.findText(cur_prof)
+        if c_idx >= 0:
+            prof_combo.setCurrentIndex(c_idx)
+        elif cur_prof:
+            prof_combo.addItem(cur_prof)
+            prof_combo.setCurrentIndex(prof_combo.count() - 1)
+        self._w["ModalProfile"] = prof_combo
+        nl.addWidget(config_row("Modal Profile Target", prof_combo, "Workspace/profile used for deployments, proxy, and runs"))
         root.addWidget(ng)
 
         # Content Modes (restricted)
@@ -2401,16 +2474,82 @@ class LogsTab(QWidget):
 
 class ModalTab(QWidget):
     deploy_requested = pyqtSignal(str, str)
+    profile_changed = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, initial_profile: str = ""):
         super().__init__()
         root = QVBoxLayout(self)
         root.setContentsMargins(15, 15, 15, 15)
         root.setSpacing(10)
 
-        root.addWidget(lbl("MODAL CLOUD DEPLOYMENTS", 12, C["neon_blue"], bold=True, spacing=2))
-        root.addWidget(lbl("Manage serverless deployments on Modal infrastructure.", 9, C["text_dim"]))
+        # Header
+        hdr = QHBoxLayout()
+        hdr.addWidget(lbl("MODAL CLOUD DEPLOYMENTS", 12, C["neon_blue"], bold=True, spacing=2))
+        hdr.addStretch()
+        hdr.addWidget(lbl("ACTIVE PROFILE:", 8, C["text_dim"]))
+        self.lbl_active_workspace = lbl("", 8, C["neon_green"], bold=True)
+        hdr.addWidget(self.lbl_active_workspace)
+        root.addLayout(hdr)
+
+        root.addWidget(lbl("Manage serverless deployments, proxy routing, and engine endpoints across Modal profiles.", 9, C["text_dim"]))
         root.addWidget(hsep())
+
+        # ── Profile & Dynamic Endpoint Selector Card ──
+        p_card = QFrame()
+        p_card.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:6px;")
+        pcl = QVBoxLayout(p_card)
+        pcl.setContentsMargins(12, 10, 12, 10)
+        pcl.setSpacing(8)
+
+        p_row = QHBoxLayout()
+        p_row.addWidget(lbl("MODAL PROFILE TARGET:", 9, C["neon_cyan"], bold=True))
+
+        self.cb_profile = QComboBox()
+        self.cb_profile.setMinimumWidth(250)
+        self.cb_profile.setStyleSheet(f"""
+            QComboBox {{
+                background:{C['bg_deep']}; color:{C['neon_green']}; border:1px solid {C['border']};
+                border-radius:4px; padding:4px 8px; font-family:'{FONT_MONO}'; font-size:11px; font-weight:bold;
+            }}
+            QComboBox:hover {{ border-color:{C['neon_blue']}; }}
+            QComboBox QAbstractItemView {{
+                background:{C['bg_deep']}; color:{C['text_main']}; selection-background-color:{C['neon_blue']}44;
+            }}
+        """)
+        p_row.addWidget(self.cb_profile)
+
+        btn_refresh = QPushButton("🔄 Refresh Profiles")
+        btn_refresh.setStyleSheet(f"""
+            QPushButton {{
+                background:{C['bg_deep']}; color:{C['text_dim']}; border:1px solid {C['border']};
+                border-radius:4px; padding:4px 10px; font-size:9px; font-weight:bold;
+            }}
+            QPushButton:hover {{ color:{C['neon_cyan']}; border-color:{C['neon_cyan']}; }}
+        """)
+        btn_refresh.clicked.connect(lambda: self.refresh_profiles())
+        p_row.addWidget(btn_refresh)
+        p_row.addStretch()
+        pcl.addLayout(p_row)
+
+        # Dynamic Endpoint Previews
+        ep_box = QFrame()
+        ep_box.setStyleSheet(f"background:{C['bg_deep']}; border:1px solid {C['border']}66; border-radius:4px;")
+        epl = QVBoxLayout(ep_box)
+        epl.setContentsMargins(10, 6, 10, 6)
+        epl.setSpacing(4)
+
+        self.lbl_ep_proxy = lbl("Proxy WS: —", 8, C["text_dim"])
+        self.lbl_ep_proxy.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_ep_vllm = lbl("vLLM URL: —", 8, C["text_dim"])
+        self.lbl_ep_vllm.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.lbl_ep_api = lbl("Studio API App: alphalive-aio-backend", 8, C["text_dim"])
+        self.lbl_ep_api.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        epl.addWidget(self.lbl_ep_proxy)
+        epl.addWidget(self.lbl_ep_vllm)
+        epl.addWidget(self.lbl_ep_api)
+        pcl.addWidget(ep_box)
+
+        root.addWidget(p_card)
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -2443,7 +2582,7 @@ class ModalTab(QWidget):
             "AlphaLive API",
             C["neon_blue"],
             "Unified endpoint: upscaler, txt2img, img2img, txt2vid, img2vid.\n"
-            "Deploys deployments/deployment.py → alphalive_api on Modal.",
+            "Deploys deployments/deployment.py → alphalive-aio-backend on Modal.",
             "alphalive_api",
         ), 0, 0)
 
@@ -2484,6 +2623,53 @@ class ModalTab(QWidget):
             f"font-family:'{FONT_MONO}'; font-size:10px; padding:8px;"
         )
         root.addWidget(self._log, 1)
+
+        self.cb_profile.currentIndexChanged.connect(self._on_profile_changed)
+        self.refresh_profiles(initial_profile)
+
+    def refresh_profiles(self, select_profile: str = ""):
+        profiles, active = get_modal_profiles()
+        current = select_profile or self.cb_profile.currentText().strip() or active
+        self.cb_profile.blockSignals(True)
+        self.cb_profile.clear()
+        for p in profiles:
+            self.cb_profile.addItem(p)
+        idx = self.cb_profile.findText(current)
+        if idx >= 0:
+            self.cb_profile.setCurrentIndex(idx)
+        elif self.cb_profile.count() > 0:
+            self.cb_profile.setCurrentIndex(0)
+        self.cb_profile.blockSignals(False)
+        self._on_profile_changed()
+
+    def get_selected_profile(self) -> str:
+        return self.cb_profile.currentText().strip()
+
+    def set_selected_profile(self, profile: str):
+        if not profile:
+            return
+        idx = self.cb_profile.findText(profile)
+        if idx >= 0:
+            self.cb_profile.blockSignals(True)
+            self.cb_profile.setCurrentIndex(idx)
+            self.cb_profile.blockSignals(False)
+            self._update_endpoint_labels(profile)
+        else:
+            self.cb_profile.addItem(profile)
+            self.cb_profile.setCurrentIndex(self.cb_profile.count() - 1)
+
+    def _update_endpoint_labels(self, profile: str):
+        if profile:
+            self.lbl_active_workspace.setText(profile)
+            self.lbl_ep_proxy.setText(f"Proxy WS: wss://{profile}--alphalive-proxy-fastapi-app.modal.run/ws")
+            self.lbl_ep_vllm.setText(f"vLLM URL: https://{profile}--alphalive-vllm-bucket-serve.modal.run")
+            self.lbl_ep_api.setText(f"Studio API: https://{profile}--alphalive-aio-backend-entrypoint.modal.run")
+
+    def _on_profile_changed(self):
+        p = self.get_selected_profile()
+        if p:
+            self._update_endpoint_labels(p)
+            self.profile_changed.emit(p)
 
     def append(self, text: str, color: str = None):
         try:
@@ -2562,12 +2748,33 @@ class CharactersTab(QWidget):
         self.f_response = QTextEdit()
         self.f_response.setMaximumHeight(80)
 
+        # Metrics & Intimate Attributes
+        metrics_layout = QHBoxLayout()
+        self.f_arousal = QSpinBox()
+        self.f_arousal.setRange(0, 100)
+        self.f_submission = QSpinBox()
+        self.f_submission.setRange(0, 100)
+        for sb in (self.f_arousal, self.f_submission):
+            sb.setStyleSheet(f"background: {C['bg_base']}; color: {C['text_bright']}; border: 1px solid {C['border']}; padding: 3px;")
+        metrics_layout.addWidget(QLabel("Arousal:"))
+        metrics_layout.addWidget(self.f_arousal)
+        metrics_layout.addWidget(QLabel("Submission:"))
+        metrics_layout.addWidget(self.f_submission)
+        metrics_layout.addStretch()
+
+        self.f_kinks = QLineEdit()
+        self.f_kinks.setPlaceholderText("Affinities, kinks, behavioral quirks...")
+
+        self.f_nsfw = QTextEdit()
+        self.f_nsfw.setMaximumHeight(60)
+        self.f_nsfw.setPlaceholderText("Specific uninhibited directives, intimate roleplay dynamics, or boundaries...")
+
         self.f_avatar = QLineEdit()
 
-        for w in (self.f_name, self.f_gender, self.f_relation, self.f_avatar):
+        for w in (self.f_name, self.f_gender, self.f_relation, self.f_avatar, self.f_kinks):
             w.setStyleSheet(f"background: {C['bg_base']}; color: {C['text_bright']}; border: 1px solid {C['border']}; padding: 4px;")
 
-        for w in (self.f_personality, self.f_response):
+        for w in (self.f_personality, self.f_response, self.f_nsfw):
             w.setStyleSheet(f"background: {C['bg_base']}; color: {C['text_bright']}; border: 1px solid {C['border']};")
 
         form_layout.addRow("Name:", self.f_name)
@@ -2575,6 +2782,9 @@ class CharactersTab(QWidget):
         form_layout.addRow("Relation:", self.f_relation)
         form_layout.addRow("Personality:", self.f_personality)
         form_layout.addRow("Response Style:", self.f_response)
+        form_layout.addRow("Metrics (0-100):", metrics_layout)
+        form_layout.addRow("Kinks / Desires:", self.f_kinks)
+        form_layout.addRow("Intimate Directives:", self.f_nsfw)
 
         avatar_layout = QHBoxLayout()
         avatar_layout.addWidget(self.f_avatar)
@@ -2626,6 +2836,10 @@ class CharactersTab(QWidget):
         self.f_personality.setPlainText(data.get('personality', ''))
         self.f_response.setPlainText(data.get('response_style', ''))
         self.f_avatar.setText(data.get('avatar_path', ''))
+        self.f_arousal.setValue(int(data.get('arousal', 0) or 0))
+        self.f_submission.setValue(int(data.get('submission', 0) or 0))
+        self.f_kinks.setText(data.get('kinks', '') or '')
+        self.f_nsfw.setPlainText(data.get('nsfw_description', '') or '')
 
     def _on_activate_clicked(self):
         name = self.f_name.text().strip() or self.current_char
@@ -2655,6 +2869,10 @@ class CharactersTab(QWidget):
         self.f_personality.clear()
         self.f_response.clear()
         self.f_avatar.clear()
+        self.f_arousal.setValue(0)
+        self.f_submission.setValue(0)
+        self.f_kinks.clear()
+        self.f_nsfw.clear()
 
     def _on_delete_clicked(self):
         if self.current_char:
@@ -2675,7 +2893,11 @@ class CharactersTab(QWidget):
             relation=self.f_relation.text().strip(),
             personality=self.f_personality.toPlainText().strip(),
             response_style=self.f_response.toPlainText().strip(),
-            avatar_path=self.f_avatar.text().strip()
+            avatar_path=self.f_avatar.text().strip(),
+            arousal=self.f_arousal.value(),
+            submission=self.f_submission.value(),
+            kinks=self.f_kinks.text().strip(),
+            nsfw_description=self.f_nsfw.toPlainText().strip()
         )
         self._load_list()
         # notify main window to refresh header
@@ -3054,6 +3276,132 @@ class ImageUpscaleWorker(QThread):
             self.failed.emit(str(e))
 
 
+class EnlargedImageViewerDialog(QDialog):
+    """
+    High-fidelity lightbox viewer dialog for generated & upscaled studio imagery.
+    Supports smooth aspect-ratio resizing, live hot-reloading when new images
+    are generated by Alpha in real time, and direct quick-saving.
+    """
+    def __init__(self, image_path: str, title: str = "", meta: str = "", parent=None):
+        super().__init__(parent)
+        self.image_path = image_path
+        self.setWindowTitle("AlphaLive // Neural Image Studio — Enlarged View")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.Window)
+        self.resize(1020, 820)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background: {C['bg_deep']};
+                border: 1px solid {C['border']};
+            }}
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # Header bar
+        header = QHBoxLayout()
+        header.setSpacing(8)
+
+        self.lbl_title = QLabel(title or (os.path.basename(image_path) if image_path else "Output"))
+        self.lbl_title.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-size: 13px; font-family: monospace;")
+        header.addWidget(self.lbl_title)
+
+        self.lbl_meta = QLabel(meta)
+        self.lbl_meta.setStyleSheet(f"color: {C['text_dim']}; font-size: 11px; font-family: monospace;")
+        header.addWidget(self.lbl_meta)
+
+        header.addStretch()
+
+        self.btn_save = QPushButton("💾 Save As...")
+        self.btn_save.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_blue']}22; color: {C['neon_blue']};
+                border: 1px solid {C['neon_blue']}; border-radius: 4px;
+                padding: 4px 10px; font-size: 10px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {C['neon_blue']}44; }}
+        """)
+        self.btn_save.clicked.connect(self._save_image)
+        header.addWidget(self.btn_save)
+
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setFixedSize(28, 28)
+        self.btn_close.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['bg_card']}; color: {C['text_main']};
+                border: 1px solid {C['border']}; border-radius: 4px;
+                font-weight: bold; font-size: 12px;
+            }}
+            QPushButton:hover {{ background: {C['neon_red']}33; color: {C['neon_red']}; border-color: {C['neon_red']}; }}
+        """)
+        self.btn_close.clicked.connect(self.close)
+        header.addWidget(self.btn_close)
+
+        layout.addLayout(header)
+
+        # Main viewport frame
+        self.frame = QFrame()
+        self.frame.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 8px;")
+        fl = QVBoxLayout(self.frame)
+        fl.setContentsMargins(6, 6, 6, 6)
+
+        self.img_label = QLabel()
+        self.img_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.img_label.setStyleSheet("border: none; background: transparent;")
+        fl.addWidget(self.img_label)
+
+        layout.addWidget(self.frame, 1)
+
+        self._pixmap = None
+        self.load_image(image_path, title, meta)
+
+    def load_image(self, image_path: str, title: str = "", meta: str = ""):
+        self.image_path = image_path
+        if title:
+            self.lbl_title.setText(title)
+        elif image_path:
+            self.lbl_title.setText(os.path.basename(image_path))
+        if meta:
+            self.lbl_meta.setText(meta)
+
+        if image_path and os.path.exists(image_path):
+            self._pixmap = QPixmap(image_path)
+            self._render_scaled()
+        else:
+            self._pixmap = None
+            self.img_label.setText("Image not found on disk.")
+
+    def update_image(self, image_path: str, title: str = "", meta: str = ""):
+        """Dynamically update displayed image if a new one is generated while viewer is open."""
+        self.load_image(image_path, title, meta)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._render_scaled()
+
+    def _render_scaled(self):
+        if not self._pixmap or self._pixmap.isNull():
+            return
+        target_size = self.frame.size()
+        w = max(100, target_size.width() - 16)
+        h = max(100, target_size.height() - 16)
+        scaled = self._pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.img_label.setPixmap(scaled)
+
+    def _save_image(self):
+        if not self.image_path or not os.path.exists(self.image_path):
+            return
+        default_name = os.path.basename(self.image_path)
+        dest, _ = QFileDialog.getSaveFileName(self, "Save Image", default_name, "PNG Image (*.png);;All Files (*)")
+        if dest:
+            import shutil
+            try:
+                shutil.copy2(self.image_path, dest)
+            except Exception as e:
+                print(f"[Viewer Save Error] {e}")
+
+
 class ImageStudioTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3063,6 +3411,7 @@ class ImageStudioTab(QWidget):
         self.current_rating = 0
         self._worker = None
         self._upscale_worker = None
+        self._enlarged_viewer = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(15, 15, 15, 15)
@@ -3083,10 +3432,17 @@ class ImageStudioTab(QWidget):
         main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_splitter.setHandleWidth(2)
 
-        # ── LEFT PANEL: Prompting & Parameters ──────────────────────────────
+        # ── LEFT PANEL: Prompting & Parameters (Scrollable) ─────────────────
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
         left_widget = QWidget()
+        left_widget.setStyleSheet("background: transparent;")
         ll = QVBoxLayout(left_widget)
-        ll.setContentsMargins(0, 0, 10, 0)
+        ll.setContentsMargins(0, 0, 10, 10)
         ll.setSpacing(10)
 
         # Model Selector
@@ -3228,8 +3584,10 @@ class ImageStudioTab(QWidget):
         self.lbl_progress_status = lbl("Ready. Enter prompt and launch.", 9, C["text_dim"])
         ll.addWidget(self.lbl_progress_status)
 
-        left_widget.setFixedWidth(360)
-        main_splitter.addWidget(left_widget)
+        ll.addStretch()
+        left_scroll.setWidget(left_widget)
+        left_scroll.setFixedWidth(370)
+        main_splitter.addWidget(left_scroll)
 
         # ── RIGHT PANEL: Viewport & RLHF Feedback Learning ───────────────────
         right_widget = QWidget()
@@ -3279,9 +3637,12 @@ class ImageStudioTab(QWidget):
 
         self.img_viewport = QLabel()
         self.img_viewport.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.img_viewport.setMinimumSize(320, 240)
-        self.img_viewport.setText("🎨 Generated visual output will be displayed here.")
+        self.img_viewport.setMinimumSize(240, 160)
+        self.img_viewport.setText("🎨 Generated visual output will be displayed here.\n(Click viewport anytime to enlarge)")
         self.img_viewport.setStyleSheet(f"color: {C['text_dim']}; font-size: 11px;")
+        self.img_viewport.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.img_viewport.setToolTip("Click to enlarge image in fullscreen lightbox viewer")
+        self.img_viewport.mousePressEvent = self._on_viewport_clicked
         vpl.addWidget(self.img_viewport, 1)
 
         rl.addWidget(self.viewport_frame, 1)
@@ -3301,8 +3662,8 @@ class ImageStudioTab(QWidget):
         fb_frame = QFrame()
         fb_frame.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px;")
         fbl = QVBoxLayout(fb_frame)
-        fbl.setContentsMargins(10, 10, 10, 10)
-        fbl.setSpacing(8)
+        fbl.setContentsMargins(8, 8, 8, 8)
+        fbl.setSpacing(6)
 
         fb_hdr = QHBoxLayout()
         fb_hdr.addWidget(lbl("USER EVALUATION & RLHF PROMPT LEARNING", 10, C["neon_yellow"], bold=True))
@@ -3312,10 +3673,11 @@ class ImageStudioTab(QWidget):
         # Good / Bad Buttons
         btn_row = QHBoxLayout()
         self.btn_good = QPushButton("👍 Good Output (+1)")
+        self.btn_good.setFixedHeight(28)
         self.btn_good.setStyleSheet(f"""
             QPushButton {{
                 background: {C['neon_green']}18; color: {C['neon_green']};
-                border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px;
+                border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 4px 6px;
                 font-weight: bold; font-size: 10px;
             }}
             QPushButton:hover {{ background: {C['neon_green']}33; }}
@@ -3323,10 +3685,11 @@ class ImageStudioTab(QWidget):
         self.btn_good.clicked.connect(lambda: self._set_rating(1))
 
         self.btn_bad = QPushButton("👎 Bad Output (-1)")
+        self.btn_bad.setFixedHeight(28)
         self.btn_bad.setStyleSheet(f"""
             QPushButton {{
                 background: {C['neon_red']}18; color: {C['neon_red']};
-                border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px;
+                border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 4px 6px;
                 font-weight: bold; font-size: 10px;
             }}
             QPushButton:hover {{ background: {C['neon_red']}33; }}
@@ -3381,7 +3744,8 @@ class ImageStudioTab(QWidget):
 
         # ── BOTTOM DRAWER: History & Active Learnings ────────────────────────
         bottom_tabs = QTabWidget()
-        bottom_tabs.setFixedHeight(120)
+        bottom_tabs.setMinimumHeight(85)
+        bottom_tabs.setMaximumHeight(120)
         bottom_tabs.setStyleSheet(f"""
             QTabWidget::pane {{ border: 1px solid {C['border']}; background: {C['bg_deep']}; }}
             QTabBar::tab {{ background: {C['bg_dark']}; color: {C['text_dim']}; padding: 4px 10px; font-size: 9px; }}
@@ -3448,6 +3812,20 @@ class ImageStudioTab(QWidget):
         self.progress_bar.setValue(pct)
         self.lbl_progress_status.setText(f"{msg} ({pct}%)")
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._rescale_viewport()
+
+    def _rescale_viewport(self):
+        if self.current_img_path and os.path.exists(self.current_img_path):
+            pixmap = QPixmap(self.current_img_path)
+            if not pixmap.isNull():
+                target_size = self.viewport_frame.size()
+                w = max(100, target_size.width() - 14)
+                h = max(100, target_size.height() - 14)
+                scaled = pixmap.scaled(w, h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.img_viewport.setPixmap(scaled)
+
     def _on_gen_finished(self, res: dict):
         self.btn_generate.setEnabled(True)
         self.progress_bar.setValue(100)
@@ -3458,11 +3836,15 @@ class ImageStudioTab(QWidget):
         img_path = res.get("image_path")
         if img_path and os.path.exists(img_path):
             self.current_img_path = img_path
-            pixmap = QPixmap(img_path)
-            scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            self.img_viewport.setPixmap(scaled)
+            self._rescale_viewport()
             self.lbl_image_title.setText(f"VIEWPORT — {res.get('file_name', 'Output')}")
             self.lbl_meta_badge.setText(f"{res.get('dimensions', '1024x1024')} · Seed: {res.get('seed')} · Steps: {res.get('steps')}")
+
+            # Update enlarged lightbox viewer in real time if visible
+            if self._enlarged_viewer and self._enlarged_viewer.isVisible():
+                v_title = f"VIEWPORT — {res.get('file_name', 'Output')}"
+                v_meta = f"{res.get('dimensions', '1024x1024')} · Seed: {res.get('seed')} · Steps: {res.get('steps')}"
+                self._enlarged_viewer.update_image(img_path, title=v_title, meta=v_meta)
 
         critique = res.get("ai_critique") or "Aesthetic balance confirmed."
         self.lbl_critique_text.setText(critique)
@@ -3470,6 +3852,42 @@ class ImageStudioTab(QWidget):
         self._reset_feedback_ui()
         self._refresh_history()
         self._refresh_learnings()
+
+    def _on_viewport_clicked(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._show_enlarged_viewer()
+
+    def _show_enlarged_viewer(self):
+        if not self.current_img_path or not os.path.exists(self.current_img_path):
+            return
+        title = self.lbl_image_title.text()
+        meta = self.lbl_meta_badge.text()
+        if self._enlarged_viewer is None or not self._enlarged_viewer.isVisible():
+            self._enlarged_viewer = EnlargedImageViewerDialog(
+                self.current_img_path,
+                title=title,
+                meta=meta,
+                parent=self.window()
+            )
+            self._enlarged_viewer.show()
+        else:
+            self._enlarged_viewer.update_image(self.current_img_path, title=title, meta=meta)
+            self._enlarged_viewer.raise_()
+            self._enlarged_viewer.activateWindow()
+
+    def load_external_image(self, res: dict):
+        """Called automatically when Alpha engine generates an image via function calling."""
+        if not res:
+            return
+        if res.get("prompt"):
+            self.in_prompt.setText(res.get("prompt"))
+        if res.get("negative_prompt"):
+            self.in_neg_prompt.setText(res.get("negative_prompt"))
+        if res.get("model_name"):
+            idx = self.cb_model.findData(res.get("model_name"))
+            if idx >= 0:
+                self.cb_model.setCurrentIndex(idx)
+        self._on_gen_finished(res)
 
     def _on_gen_failed(self, err_msg: str):
         self.btn_generate.setEnabled(True)
@@ -3513,11 +3931,15 @@ class ImageStudioTab(QWidget):
         up_path = res.get("upscaled_path")
         if up_path and os.path.exists(up_path):
             self.current_img_path = up_path
-            pixmap = QPixmap(up_path)
-            scaled = pixmap.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            self.img_viewport.setPixmap(scaled)
+            self._rescale_viewport()
             self.lbl_image_title.setText(f"VIEWPORT — {res.get('file_name', 'Upscaled')}")
             self.lbl_meta_badge.setText(f"{res.get('dimensions', '4096x4096')} · {res.get('model_name')} · {res.get('size_kb', 0)} KB")
+
+            # Update enlarged lightbox viewer in real time if visible
+            if self._enlarged_viewer and self._enlarged_viewer.isVisible():
+                v_title = f"VIEWPORT — {res.get('file_name', 'Upscaled')}"
+                v_meta = f"{res.get('dimensions', '4096x4096')} · Model: {res.get('model_name')}"
+                self._enlarged_viewer.update_image(up_path, title=v_title, meta=v_meta)
 
         critique = res.get("critique") or "Super-resolution textures sharpened."
         self.lbl_critique_text.setText(critique)
@@ -3599,6 +4021,12 @@ class ImageStudioTab(QWidget):
             self.lbl_meta_badge.setText(f"{gen.get('model_name', 'jugg').upper()} · Seed: {gen.get('seed')}")
             self.lbl_critique_text.setText(gen.get("ai_critique") or "Prior generation loaded.")
 
+            # Update enlarged lightbox viewer in real time if visible
+            if self._enlarged_viewer and self._enlarged_viewer.isVisible():
+                v_title = f"VIEWPORT — {os.path.basename(img_path)}"
+                v_meta = f"{gen.get('model_name', 'jugg').upper()} · Seed: {gen.get('seed')}"
+                self._enlarged_viewer.update_image(img_path, title=v_title, meta=v_meta)
+
     def _refresh_learnings(self):
         learnings = self.ism.get_learnings()
         self.learnings_table.setRowCount(len(learnings))
@@ -3650,8 +4078,9 @@ class LaunchSidebar(QFrame):
                     background:{C['bg_card']};
                     color:{C['text_dim']};
                     border:1px solid {C['border']};
-                    border-radius:2px; padding:7px 8px;
-                    text-align:left; font-size:9px;
+                    border-radius:3px; padding:5px 8px;
+                    min-height:22px;
+                    text-align:left; font-size:10px;
                     font-weight:bold; letter-spacing:0.5px;
                 }}
                 QPushButton:checked {{
@@ -3679,11 +4108,12 @@ class LaunchSidebar(QFrame):
             QComboBox {{
                 background:{C['bg_dark']}; color:{C['text_bright']};
                 border:1px solid {C['border']}; border-radius:3px;
-                padding:2px 6px; font-size:10px; font-weight:bold;
+                padding:3px 6px; font-size:10px; font-weight:bold;
+                min-height:22px;
             }}
             QComboBox::drop-down {{ border:none; }}
         """)
-        self._sess_combo.setFixedHeight(26)
+        self._sess_combo.setFixedHeight(28)
         self._refresh_sessions()
         if self._sess_combo.lineEdit():
             self._sess_combo.lineEdit().returnPressed.connect(self._on_sess_apply)
@@ -3730,6 +4160,29 @@ class LaunchSidebar(QFrame):
             r.addStretch()
             r.addWidget(sw)
             root.addLayout(r)
+
+        root.addWidget(hsep())
+
+        # Modal Profile Selector
+        root.addWidget(lbl("MODAL PROFILE", 8, C["neon_blue"], True, spacing=2))
+        self._modal_profile_combo = QComboBox()
+        self._modal_profile_combo.setStyleSheet(f"""
+            QComboBox {{
+                background:{C['bg_dark']}; color:{C['neon_green']};
+                border:1px solid {C['border']}; border-radius:3px;
+                padding:3px 6px; font-size:10px; font-weight:bold;
+                font-family:'{FONT_MONO}';
+                min-height:22px;
+            }}
+            QComboBox::drop-down {{ border:none; }}
+            QComboBox QAbstractItemView {{
+                background:{C['bg_deep']}; color:{C['text_main']}; selection-background-color:{C['neon_blue']}44;
+            }}
+        """)
+        self._modal_profile_combo.setFixedHeight(26)
+        self._refresh_modal_profiles()
+        self._modal_profile_combo.currentIndexChanged.connect(self._on_modal_profile_changed)
+        root.addWidget(self._modal_profile_combo)
 
         root.addWidget(hsep())
 
@@ -3851,6 +4304,54 @@ class LaunchSidebar(QFrame):
             self._sess_combo.setCurrentText(name)
         self._sess_combo.blockSignals(False)
 
+    def _refresh_modal_profiles(self):
+        curr = self._cfg.get("Global", {}).get("ModalProfile", "").strip()
+        profiles, active = get_modal_profiles()
+        target = curr or active
+        self._modal_profile_combo.blockSignals(True)
+        self._modal_profile_combo.clear()
+        for p in profiles:
+            self._modal_profile_combo.addItem(p)
+        idx = self._modal_profile_combo.findText(target)
+        if idx >= 0:
+            self._modal_profile_combo.setCurrentIndex(idx)
+        elif self._modal_profile_combo.count() > 0:
+            self._modal_profile_combo.setCurrentIndex(0)
+        self._modal_profile_combo.blockSignals(False)
+
+    def get_selected_modal_profile(self) -> str:
+        return self._modal_profile_combo.currentText().strip()
+
+    def set_modal_profile(self, profile: str):
+        if not profile:
+            return
+        idx = self._modal_profile_combo.findText(profile)
+        if idx >= 0:
+            if self._modal_profile_combo.currentIndex() != idx:
+                self._modal_profile_combo.blockSignals(True)
+                self._modal_profile_combo.setCurrentIndex(idx)
+                self._modal_profile_combo.blockSignals(False)
+        else:
+            self._modal_profile_combo.blockSignals(True)
+            self._modal_profile_combo.addItem(profile)
+            self._modal_profile_combo.setCurrentIndex(self._modal_profile_combo.count() - 1)
+            self._modal_profile_combo.blockSignals(False)
+        self._update_modal_vllm_endpoint_if_needed(profile)
+
+    def _on_modal_profile_changed(self):
+        profile = self.get_selected_modal_profile()
+        self._update_modal_vllm_endpoint_if_needed(profile)
+        self._sync_qs()
+
+    def _update_modal_vllm_endpoint_if_needed(self, profile: str):
+        if not profile:
+            return
+        curr = self._vllm_ep_input.text().strip()
+        if not curr or "alphalive-vllm-bucket-serve.modal.run" in curr:
+            new_ep = f"https://{profile}--alphalive-vllm-bucket-serve.modal.run"
+            if curr != new_ep:
+                self._vllm_ep_input.setText(new_ep)
+
     def _sync_qs(self):
         self.quick_settings_changed.emit({
             "VoiceOutput": "enabled" if self._voice_sw.isChecked() else "disabled",
@@ -3858,6 +4359,7 @@ class LaunchSidebar(QFrame):
             "Memory": "enabled" if self._memory_sw.isChecked() else "disabled",
             "AutonomousControl": "enabled" if self._auto_sw.isChecked() else "disabled",
             "VllmMode": "enabled" if self._vllm_sw.isChecked() else "disabled",
+            "ModalProfile": self.get_selected_modal_profile(),
             "VllmEndpoint": self._vllm_ep_input.text().strip() or "http://localhost:8000",
             "VllmModel": self._vllm_mdl_input.text().strip() or "default",
             "VllmApiKey": self._vllm_key_input.text().strip(),
@@ -3879,6 +4381,9 @@ class LaunchSidebar(QFrame):
         self._vllm_ep_input.setText(g.get("VllmEndpoint", "http://localhost:8000"))
         self._vllm_mdl_input.setText(g.get("VllmModel", "default"))
         self._vllm_key_input.setText(g.get("VllmApiKey", ""))
+        prof = g.get("ModalProfile", "").strip()
+        if prof:
+            self.set_modal_profile(prof)
         self._modal_sw.blockSignals(False)
         self._memory_sw.blockSignals(False)
         self._auto_sw.blockSignals(False)
@@ -4051,6 +4556,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self._cfg     = load_config()
+        initial_prof = self._cfg.get("Global", {}).get("ModalProfile", "").strip()
+        if initial_prof:
+            os.environ["MODAL_PROFILE"] = initial_prof
         self._worker  = None
         self._running = False
         self.vllm_health_result.connect(self._apply_vllm_health_result)
@@ -4119,7 +4627,7 @@ class MainWindow(QMainWindow):
         self._history  = HistoryTab()
         self._history.session_selected.connect(self._on_history_session_selected)
         self._config   = ConfigTab(self._cfg)
-        self._modal_db = ModalTab()
+        self._modal_db = ModalTab(self._cfg.get("Global", {}).get("ModalProfile", ""))
         self._memory   = MemoryTab()
         self._image_studio = ImageStudioTab()
         self._logs     = LogsTab()
@@ -4137,6 +4645,7 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._logs,     " LOGS ")
         body.addWidget(self._tabs, 1)
         self._modal_db.deploy_requested.connect(self._do_deploy_modal_ext)
+        self._modal_db.profile_changed.connect(self._on_modal_profile_changed)
         root.addLayout(body, 1)
 
         # Status bar
@@ -4201,12 +4710,47 @@ class MainWindow(QMainWindow):
         g.update(updates)
         save_config(self._cfg)
         
+        prof = updates.get("ModalProfile")
+        if prof and hasattr(self, "_modal_db") and self._modal_db is not None:
+            self._modal_db.set_selected_profile(prof)
         try:
             self._config._pnls["Global"]._w["Modal"].setChecked(g.get("Modal") == "enabled")
             self._config._pnls["Global"]._w["Memory"].setChecked(g.get("Memory") == "enabled")
             self._config._pnls["Global"]._w["AutonomousControl"].setChecked(g.get("AutonomousControl") == "enabled")
+            if prof and "ModalProfile" in self._config._pnls["Global"]._w:
+                w = self._config._pnls["Global"]._w["ModalProfile"]
+                if isinstance(w, QComboBox) and w.currentText() != prof:
+                    idx = w.findText(prof)
+                    if idx >= 0:
+                        w.blockSignals(True)
+                        w.setCurrentIndex(idx)
+                        w.blockSignals(False)
         except Exception: pass
         self._slog("Quick settings updated & saved.", "system")
+
+    def _on_modal_profile_changed(self, profile: str):
+        if not profile:
+            return
+        os.environ["MODAL_PROFILE"] = profile
+        g = self._cfg.setdefault("Global", {})
+        if g.get("ModalProfile") != profile:
+            g["ModalProfile"] = profile
+            save_config(self._cfg)
+            self._slog(f"Modal profile active: {profile}", "system")
+        if hasattr(self, "_sidebar") and hasattr(self._sidebar, "set_modal_profile"):
+            self._sidebar.set_modal_profile(profile)
+        try:
+            pnl = self._config._pnls.get("Global")
+            if pnl and "ModalProfile" in pnl._w:
+                w = pnl._w["ModalProfile"]
+                if isinstance(w, QComboBox) and w.currentText() != profile:
+                    idx = w.findText(profile)
+                    if idx >= 0:
+                        w.blockSignals(True)
+                        w.setCurrentIndex(idx)
+                        w.blockSignals(False)
+        except Exception:
+            pass
 
     def _on_history_session_selected(self, session_name: str):
         try:
@@ -4229,9 +4773,10 @@ class MainWindow(QMainWindow):
     def _do_deploy_modal_ext(self, target: str, action: str):
         """
         Targets and their Modal app-stop names:
-          alphalive_api  → alphacore-aio-backend   (deployments/deployment.py)
-          proxy          → alphalive-proxy          (AlphaCoreTech/scripts/modalmode.py)
-          vllm           → alphalive-vllm-bucket    (AlphaCoreTech/scripts/modal_vllm.py)
+          alphalive_api  → alphalive-aio-backend   (deployments/deployment.py)
+          instant_loader → instant-loader          (deployments/instant-loader.py)
+          proxy          → alphalive-proxy          (core/modalmode.py)
+          vllm           → alphalive-vllm-bucket    (core/modal_vllm.py)
         """
         proc_attr = f"_{target}_deploy_proc"
         if hasattr(self, proc_attr):
@@ -4240,25 +4785,34 @@ class MainWindow(QMainWindow):
                 self._modal_db.append(f"[{target.upper()}] Deployment already running…", C["neon_yellow"])
                 return
 
-        DEPLOY_DIR   = r"C:\Users\josh6\Workspace\AlphaLive\deployments"
-        SCRIPTS_DIR  = r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts"
+        profile = ""
+        if hasattr(self, "_modal_db") and self._modal_db is not None:
+            profile = self._modal_db.get_selected_profile()
+        if not profile:
+            profile = self._cfg.get("Global", {}).get("ModalProfile", "")
+
+        prof_arg = f" --profile {profile}" if profile else ""
+        prof_env = f"$env:MODAL_PROFILE='{profile}'; " if profile else ""
+
+        DEPLOY_DIR = SCRIPT_DIR / "deployments"
+        CORE_DIR   = SCRIPT_DIR / "core"
 
         TARGETS = {
             # target_key : (deploy_cmd, stop_app_name)
             "alphalive_api": (
-                f"Set-Location '{DEPLOY_DIR}'; modal deploy deployment.py",
-                "alphacore-aio-backend",
+                f"Set-Location '{DEPLOY_DIR}'; modal deploy{prof_arg} deployment.py",
+                "alphalive-aio-backend",
             ),
             "instant_loader": (
-                f"Set-Location '{DEPLOY_DIR}'; modal run instant-loader.py",
+                f"Set-Location '{DEPLOY_DIR}'; modal run{prof_arg} instant-loader.py",
                 "instant-loader",
             ),
             "proxy": (
-                f"Set-Location '{SCRIPTS_DIR}'; modal deploy modalmode.py",
+                f"Set-Location '{CORE_DIR}'; modal deploy{prof_arg} modalmode.py",
                 "alphalive-proxy",
             ),
             "vllm": (
-                f"Set-Location '{SCRIPTS_DIR}'; modal deploy modal_vllm.py",
+                f"Set-Location '{CORE_DIR}'; modal deploy{prof_arg} modal_vllm.py",
                 "alphalive-vllm-bucket",
             ),
         }
@@ -4268,7 +4822,7 @@ class MainWindow(QMainWindow):
             return
 
         deploy_cmd, stop_app = TARGETS[target]
-        cmd = deploy_cmd if action == "deploy" else f"modal app stop {stop_app}"
+        cmd = deploy_cmd if action == "deploy" else f"modal app stop{prof_arg} {stop_app}"
 
         self._modal_db.append(f"\n[{target.upper()}] Running: {cmd}", C["neon_blue"])
 
@@ -4281,7 +4835,7 @@ class MainWindow(QMainWindow):
         proc.finished.connect(
             lambda code, _: self._on_deploy_proc_finished(target, action, code)
         )
-        proc.start("powershell", ["-Command", f"$env:PYTHONIOENCODING='utf-8'; {cmd}"])
+        proc.start("powershell", ["-Command", f"$env:PYTHONIOENCODING='utf-8'; {prof_env}{cmd}"])
 
     def _on_deploy_proc_finished(self, target, action, code):
         try:
@@ -4419,6 +4973,25 @@ class MainWindow(QMainWindow):
         elif "[overlay_toggle]" in lo:
             self._toggle_overlay()
 
+        elif "[studio_image:" in lo:
+            try:
+                start_marker = "[STUDIO_IMAGE:"
+                idx = line.find(start_marker)
+                if idx != -1:
+                    raw_content = line[idx + len(start_marker):]
+                    end_idx = raw_content.rfind("]")
+                    if end_idx != -1:
+                        payload = json.loads(raw_content[:end_idx].strip())
+                        if hasattr(self, "_image_studio"):
+                            if "upscaled_path" in payload and "image_path" not in payload:
+                                payload["image_path"] = payload["upscaled_path"]
+                            self._image_studio.load_external_image(payload)
+                            self._slog(f"Studio viewport updated: {payload.get('file_name', 'image')}", "tool")
+                            if hasattr(self, "_tabs"):
+                                self._tabs.setCurrentWidget(self._image_studio)
+            except Exception as e:
+                print(f"[GUI Studio Error] Could not load image from engine: {e}")
+
     def _on_status(self, status: str):
         if status == "running":
             self._set_status("Engine running")
@@ -4449,6 +5022,12 @@ class MainWindow(QMainWindow):
 
     def _on_cfg_saved(self, cfg: dict):
         self._cfg = cfg
+        prof = cfg.get("Global", {}).get("ModalProfile", "").strip()
+        if prof:
+            if hasattr(self, "_modal_db") and self._modal_db is not None:
+                self._modal_db.set_selected_profile(prof)
+            if hasattr(self, "_sidebar") and hasattr(self._sidebar, "set_modal_profile"):
+                self._sidebar.set_modal_profile(prof)
         self._slog("Configuration saved.", "system")
         self._terminal.append("[SYSTEM] Configuration saved.", C["neon_blue"])
 
@@ -4584,9 +5163,9 @@ class StatusOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(180, 140)
         
-        # Position in top-right corner
+        # Position in bottom-right corner (above taskbar, clear of tabs and header)
         screen_geo = QApplication.primaryScreen().availableGeometry()
-        self.move(screen_geo.width() - self.width() - 20, 20)
+        self.move(screen_geo.width() - self.width() - 20, screen_geo.height() - self.height() - 50)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10)
@@ -4866,9 +5445,8 @@ sys.excepthook = _excepthook
 def main():
     import os
     import signal
-    # Suppress the SetProcessDpiAwarenessContext access denied warning
-    if sys.platform == 'win32':
-        os.environ["QT_QPA_PLATFORM"] = "windows:dpiawareness=1"
+    if "QT_SCALE_FACTOR" in os.environ:
+        del os.environ["QT_SCALE_FACTOR"]
 
     # 1. Set the High DPI policy FIRST (called statically on the class)
     try:
@@ -4879,7 +5457,6 @@ def main():
         pass
 
     # 2. THEN instantiate the QApplication
-    os.environ["QT_SCALE_FACTOR"] = "1.2"
     app = QApplication(sys.argv)
     app.setApplicationName("AlphaLive")
     app.setApplicationVersion("4.0")
@@ -4899,7 +5476,7 @@ def main():
     sig_timer.start(250)
 
     w = MainWindow()
-    w.show()
+    w.showMaximized()
     try:
         sys.exit(app.exec())
     except KeyboardInterrupt:

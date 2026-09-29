@@ -58,8 +58,23 @@ class GoogleWorkspaceManager:
         self._cached_creds: Optional[Credentials] = None
 
     def is_available(self) -> bool:
-        """Check if google-auth and google-api-python-client are installed."""
-        return GOOGLE_LIBS_AVAILABLE
+        """Check if google-auth and google-api-python-client are installed, dynamically retrying import if needed."""
+        global GOOGLE_LIBS_AVAILABLE, Credentials, Request, InstalledAppFlow, build
+        if GOOGLE_LIBS_AVAILABLE:
+            return True
+        try:
+            from google.oauth2.credentials import Credentials as _Creds
+            from google.auth.transport.requests import Request as _Req
+            from google_auth_oauthlib.flow import InstalledAppFlow as _Flow
+            from googleapiclient.discovery import build as _Build
+            Credentials = _Creds
+            Request = _Req
+            InstalledAppFlow = _Flow
+            build = _Build
+            GOOGLE_LIBS_AVAILABLE = True
+            return True
+        except Exception:
+            return False
 
     def has_credentials_file(self) -> bool:
         """Check if client credentials JSON exists (either credentials.json or oauth.json)."""
@@ -80,7 +95,7 @@ class GoogleWorkspaceManager:
 
     def get_credentials(self) -> Optional[Credentials]:
         """Load and refresh stored OAuth credentials."""
-        if not GOOGLE_LIBS_AVAILABLE:
+        if not self.is_available():
             return None
 
         if self._cached_creds and self._cached_creds.valid:
@@ -111,7 +126,7 @@ class GoogleWorkspaceManager:
         Interactive OAuth 2.0 flow: opens browser for Josh to grant Google Workspace access.
         Saves token to token.json upon approval.
         """
-        if not GOOGLE_LIBS_AVAILABLE:
+        if not self.is_available():
             return {
                 "success": False,
                 "error": "Required libraries missing. Run: pip install google-auth-oauthlib google-api-python-client",

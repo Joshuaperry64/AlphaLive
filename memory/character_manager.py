@@ -3,6 +3,8 @@ import sqlite3
 import datetime
 from pathlib import Path
 
+from contextlib import contextmanager
+
 DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent / "memory.db"))
 
 class CharacterManager:
@@ -10,10 +12,15 @@ class CharacterManager:
         self.db_path = db_path
         self._init_db()
 
+    @contextmanager
     def _get_conn(self, timeout=10.0):
         conn = sqlite3.connect(self.db_path, timeout=timeout)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         with self._get_conn() as conn:
@@ -144,3 +151,56 @@ class CharacterManager:
         if not name:
             return None
         return self.get_character(name)
+
+    def update_metrics(self, name: str, arousal=None, submission=None, kinks=None, nsfw_description=None) -> bool:
+        """Dynamically update uninhibited / persona metrics for a character."""
+        if not name:
+            return False
+        try:
+            updates = []
+            params = []
+            if arousal is not None:
+                updates.append("arousal = ?")
+                params.append(max(0, min(100, int(arousal))))
+            if submission is not None:
+                updates.append("submission = ?")
+                params.append(max(0, min(100, int(submission))))
+            if kinks is not None:
+                updates.append("kinks = ?")
+                params.append(str(kinks).strip())
+            if nsfw_description is not None:
+                updates.append("nsfw_description = ?")
+                params.append(str(nsfw_description).strip())
+
+            if not updates:
+                return True
+
+            updates.append("updated_at = CURRENT_TIMESTAMP")
+            sql = f"UPDATE characters SET {', '.join(updates)} WHERE name = ?"
+            params.append(name.strip())
+
+            with self._get_conn() as conn:
+                conn.execute(sql, tuple(params))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[CharacterManager] Error updating metrics for {name}: {e}")
+            return False
+
+    def adjust_arousal(self, name: str, delta: int) -> int:
+        """Increment or decrement arousal by delta, clamped between 0 and 100."""
+        c = self.get_character(name)
+        if not c:
+            return 0
+        new_val = max(0, min(100, int(c.get("arousal", 0) or 0) + delta))
+        self.update_metrics(name, arousal=new_val)
+        return new_val
+
+    def adjust_submission(self, name: str, delta: int) -> int:
+        """Increment or decrement submission by delta, clamped between 0 and 100."""
+        c = self.get_character(name)
+        if not c:
+            return 0
+        new_val = max(0, min(100, int(c.get("submission", 0) or 0) + delta))
+        self.update_metrics(name, submission=new_val)
+        return new_val

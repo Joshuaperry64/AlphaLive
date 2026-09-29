@@ -73,5 +73,28 @@ class TestLoadConfig(unittest.TestCase):
         }
         self.assertEqual(config, expected)
 
+    @patch('pathlib.Path.exists')
+    @patch('pathlib.Path.read_text')
+    def test_get_modal_profiles_toml(self, mock_read, mock_exists):
+        mock_exists.return_value = True
+        mock_read.return_value = """
+[alphacoreprogramming-ai]
+token_id = "ak-1"
+
+[alphacoreprogramming]
+token_id = "ak-2"
+active = true
+"""
+        profiles, active = gui.get_modal_profiles()
+        self.assertIn("alphacoreprogramming-ai", profiles)
+        self.assertIn("alphacoreprogramming", profiles)
+        self.assertTrue(len(profiles) >= 2)
+
+    @patch('pathlib.Path.exists')
+    def test_get_modal_profiles_no_file(self, mock_exists):
+        mock_exists.return_value = False
+        profiles, active = gui.get_modal_profiles()
+        self.assertIsInstance(profiles, list)
+
 if __name__ == '__main__':
     unittest.main()

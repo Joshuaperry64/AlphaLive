@@ -1,12 +1,18 @@
+import sys
 import os
 import gc
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from studio.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
 
 class TestImageStudio(unittest.TestCase):
     def setUp(self):
+        self._orig_mock = os.getenv("ALPHALIVE_OFFLINE_MOCK")
+        os.environ["ALPHALIVE_OFFLINE_MOCK"] = "1"
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "test_memory.db"
         self.ism = ImageStudioManager(db_path=self.db_path)
@@ -15,6 +21,10 @@ class TestImageStudio(unittest.TestCase):
         del self.ism
         gc.collect()
         self.temp_dir.cleanup()
+        if self._orig_mock is not None:
+            os.environ["ALPHALIVE_OFFLINE_MOCK"] = self._orig_mock
+        else:
+            os.environ.pop("ALPHALIVE_OFFLINE_MOCK", None)
 
     def test_catalogs(self):
         self.assertIn("jugg", MODEL_CATALOG)

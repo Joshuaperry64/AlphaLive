@@ -59,10 +59,6 @@ image = image.add_local_python_source("shared_app")
     secrets=[modal.Secret.from_name("huggingface-secret")],
 )
 class Txt2Img:
-    def __init__(self):
-        self.current_model = None
-        self.pipe = None
-
     @modal.enter()
     def setup(self):
         self.current_model = None
@@ -173,7 +169,7 @@ class Txt2Img:
             model_file = "lustifyNSFWCheckpoint_zenithV9.safetensors"
         elif AutismPony == 1 or model_name.lower().startswith("autism") or model_name.lower().startswith("pony"):
             model_file = "autismmixSDXL_autismmixPony.safetensors"
-        elif model_name.lower().startswith("0x7"):
+        elif model_name.lower().startswith("0x7") or model_name.lower().startswith("freedom"):
             model_file = "0x7RealisticFreedom_omegaSDXL.safetensors"
         else:
             model_file = "juggernautXL_ragnarok.safetensors"
@@ -501,17 +497,6 @@ class Txt2Img:
 
             return StreamingResponse(event_stream(), media_type="text/event-stream")
         return web_app
-
-
-@app.cls(
-    image=image,
-    gpu="A10G",
-    timeout=10 * MINUTES,
-    scaledown_window=60,
-    max_containers=1,
-    volumes={CACHE_DIR: cache_volume},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-)
 
 
 @app.local_entrypoint()

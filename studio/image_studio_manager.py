@@ -6,11 +6,12 @@ import random
 import sqlite3
 import datetime
 from pathlib import Path
+from contextlib import contextmanager
 from typing import Optional, Callable, Dict, Any, List, Tuple
 
 DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent.parent / "memory" / "memory.db"))
 IMAGES_DIR = Path(__file__).parent.parent / "history" / "images"
-SCRIPTS_DIR = Path(r"C:\Users\josh6\Workspace\AlphaCoreTech\scripts")
+SCRIPTS_DIR = Path(__file__).parent.parent / "core"
 
 # Model catalog mapping to AlphaCoreTech safetensors
 MODEL_CATALOG = {
@@ -54,10 +55,15 @@ class ImageStudioManager:
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
-    def _get_conn(self, timeout: float = 10.0) -> sqlite3.Connection:
+    @contextmanager
+    def _get_conn(self, timeout: float = 10.0):
         conn = sqlite3.connect(self.db_path, timeout=timeout)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_db(self):
         """Initializes tables for image generation history and adaptive prompt learning."""
@@ -391,19 +397,28 @@ class ImageStudioManager:
 
         image_bytes: Optional[bytes] = None
 
-        # 1. Attempt generation via Modal Python API
-        try:
-            import modal
-            if progress_callback:
-                progress_callback(5, steps, f"Connecting to Modal H100 GPU ({model_name})...")
-
+        modal_err_msg = ""
+        # 1. Attempt generation via Modal Python API (skip if offline mock mode)
+        if os.getenv("ALPHALIVE_OFFLINE_MOCK", "0") != "1":
             try:
-                lookup_fn = getattr(modal.Cls, "from_name", modal.Cls.lookup)
-                Txt2ImgCls = lookup_fn("alphacore-aio-backend", "Txt2Img")
+                import modal
+                if progress_callback:
+                    progress_callback(5, steps, f"Connecting to Modal H100 GPU ({model_name})...")
+
+                lookup_fn = getattr(modal.Cls, "from_name", None) or getattr(modal.Cls, "lookup", None)
+                if not lookup_fn:
+                    raise RuntimeError("Modal Cls from_name function not available")
+                
+                app_name = os.getenv("MODAL_APP_NAME", "alphalive-aio-backend")
+                Txt2ImgCls = lookup_fn(app_name, "Txt2Img")
                 service = Txt2ImgCls()
+
+                # Map model_name to safe filename if known
+                resolved_model = MODEL_CATALOG.get(model_name, {}).get("file", model_name)
+
                 gen_stream = service.run.remote_gen(
                     prompt=refined_p,
-                    model_name=model_name,
+                    model_name=resolved_model,
                     negative_prompt=refined_neg,
                     batch_size=1,
                     guidance_scale=str(guidance),
@@ -418,49 +433,52 @@ class ImageStudioManager:
                         image_bytes = base64.b64decode(msg["image_b64"][0])
                         break
                     if "error" in msg:
-                        print(f"[ImageStudioManager] Modal return error: {msg['error']}")
+                        modal_err_msg = str(msg["error"])
+                        print(f"[ImageStudioManager] Modal return error: {modal_err_msg}")
                         break
-            except Exception as modal_err:
-                print(f"[ImageStudioManager] Modal lookup: {modal_err}")
+            except Exception as e:
+                modal_err_msg = str(e)
+                print(f"[ImageStudioManager] Modal execution exception: {e}")
 
-        except Exception as e:
-            print(f"[ImageStudioManager] Modal execution exception: {e}")
-
-        # 2. Resilient Fallback / Procedural Canvas Renderer if Modal cluster is currently cold
+        # 2. Resilient Fallback / Procedural Canvas Renderer if explicit mock mode requested
         if not image_bytes:
-            if progress_callback:
-                progress_callback(steps // 2, steps, "Synthesizing visual canvas...")
-            
-            from PIL import Image, ImageDraw
-            img = Image.new("RGB", (1024, 1024), color=(15, 23, 42))
-            draw = ImageDraw.Draw(img)
+            if os.getenv("ALPHALIVE_OFFLINE_MOCK", "0") == "1":
+                if progress_callback:
+                    progress_callback(steps // 2, steps, "Synthesizing visual canvas...")
+                
+                from PIL import Image, ImageDraw
+                img = Image.new("RGB", (1024, 1024), color=(15, 23, 42))
+                draw = ImageDraw.Draw(img)
 
-            # Gradient backdrop
-            for y in range(1024):
-                r = int(15 + (y / 1024.0) * 25)
-                g = int(23 + (y / 1024.0) * 35)
-                b = int(42 + (y / 1024.0) * 60)
-                draw.line([(0, y), (1024, y)], fill=(r, g, b))
+                # Gradient backdrop
+                for y in range(1024):
+                    r = int(15 + (y / 1024.0) * 25)
+                    g = int(23 + (y / 1024.0) * 35)
+                    b = int(42 + (y / 1024.0) * 60)
+                    draw.line([(0, y), (1024, y)], fill=(r, g, b))
 
-            # Decorative grid and targeting lines
-            draw.rectangle([40, 40, 984, 984], outline=(56, 189, 248), width=2)
-            draw.line([(512, 40), (512, 984)], fill=(30, 58, 138), width=1)
-            draw.line([(40, 512), (984, 512)], fill=(30, 58, 138), width=1)
+                # Decorative grid and targeting lines
+                draw.rectangle([40, 40, 984, 984], outline=(56, 189, 248), width=2)
+                draw.line([(512, 40), (512, 984)], fill=(30, 58, 138), width=1)
+                draw.line([(40, 512), (984, 512)], fill=(30, 58, 138), width=1)
 
-            # Center emblem
-            draw.ellipse([362, 362, 662, 662], outline=(16, 185, 129), width=3)
-            draw.ellipse([462, 462, 562, 562], fill=(6, 182, 212))
+                # Center emblem
+                draw.ellipse([362, 362, 662, 662], outline=(16, 185, 129), width=3)
+                draw.ellipse([462, 462, 562, 562], fill=(6, 182, 212))
 
-            # Text overlay
-            draw.text((70, 70), "ALPHA // NEURAL ART STUDIO v4.0", fill=(56, 189, 248))
-            draw.text((70, 105), f"MODEL: {MODEL_CATALOG.get(model_name, {}).get('name', model_name).upper()}", fill=(16, 185, 129))
-            draw.text((70, 135), f"SEED: {seed} | STEPS: {steps}", fill=(148, 163, 184))
-            draw.text((70, 850), f"PROMPT: {prompt[:90]}...", fill=(248, 250, 252))
-            draw.text((70, 885), f"REFINED: {refined_p[:95]}...", fill=(125, 211, 252))
+                # Text overlay
+                draw.text((70, 70), "ALPHA // NEURAL ART STUDIO v4.0", fill=(56, 189, 248))
+                draw.text((70, 105), f"MODEL: {MODEL_CATALOG.get(model_name, {}).get('name', model_name).upper()}", fill=(16, 185, 129))
+                draw.text((70, 135), f"SEED: {seed} | STEPS: {steps}", fill=(148, 163, 184))
+                draw.text((70, 850), f"PROMPT: {prompt[:90]}...", fill=(248, 250, 252))
+                draw.text((70, 885), f"REFINED: {refined_p[:95]}...", fill=(125, 211, 252))
 
-            buf = io.BytesIO()
-            img.save(buf, format="PNG")
-            image_bytes = buf.getvalue()
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                image_bytes = buf.getvalue()
+            else:
+                err_detail = modal_err_msg or "No image returned from Modal backend."
+                raise RuntimeError(f"Modal generation failed: {err_detail}")
 
         # 3. Save to disk
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -529,15 +547,18 @@ class ImageStudioManager:
 
         upscaled_bytes = None
 
-        # 1. Try Modal Upscaler remote call
-        try:
-            import modal
-            if progress_callback:
-                progress_callback(30, 100, f"Connecting to Modal Upscaler ({model_name})...")
-            
+        # 1. Try Modal Upscaler remote call (skip if offline mock mode)
+        if os.getenv("ALPHALIVE_OFFLINE_MOCK", "0") != "1":
             try:
-                lookup_fn = getattr(modal.Cls, "from_name", modal.Cls.lookup)
-                UpscalerCls = lookup_fn("alphacore-aio-backend", "Upscaler")
+                import modal
+                if progress_callback:
+                    progress_callback(30, 100, f"Connecting to Modal Upscaler ({model_name})...")
+                
+                lookup_fn = getattr(modal.Cls, "from_name", None) or getattr(modal.Cls, "lookup", None)
+                if not lookup_fn:
+                    raise RuntimeError("Modal Cls from_name function not available")
+                app_name = os.getenv("MODAL_APP_NAME", "alphalive-aio-backend")
+                UpscalerCls = lookup_fn(app_name, "Upscaler")
                 service = UpscalerCls()
                 res = service.upscale_image.remote(
                     image_b64=img_b64,
@@ -548,10 +569,8 @@ class ImageStudioManager:
                     upscaled_bytes = base64.b64decode(res["image_b64"])
                 elif isinstance(res, (bytes, bytearray)):
                     upscaled_bytes = bytes(res)
-            except Exception as modal_err:
-                print(f"[ImageStudioManager] Modal upscaler lookup note: {modal_err}")
-        except Exception as e:
-            print(f"[ImageStudioManager] Modal upscaler exception: {e}")
+            except Exception as e:
+                print(f"[ImageStudioManager] Modal upscaler exception: {e}")
 
         # 2. Resilient local fallback: high-fidelity Lanczos with unsharp masking and clarity boost
         if not upscaled_bytes:

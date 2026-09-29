@@ -44,6 +44,7 @@ from dotenv import load_dotenv
 load_dotenv()
 from memory import memory_manager
 from studio import image_studio_manager
+from integrations import google_workspace
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -2965,6 +2966,7 @@ class MemoryTab(QWidget):
         self._setup_facts_tab()
         self._setup_traits_tab()
         self._setup_episodes_tab()
+        self._setup_profile_tab()
 
         root.addWidget(self._subtabs, 1)
         self.refresh_all()
@@ -3091,6 +3093,97 @@ class MemoryTab(QWidget):
 
         self._subtabs.addTab(self._episodes_widget, " EPISODIC LOGS ")
 
+    def _setup_profile_tab(self):
+        # Sub-tab 4: Personal Intelligence & Google Workspace
+        self._profile_widget = QWidget()
+        pl = QVBoxLayout(self._profile_widget)
+        pl.setContentsMargins(10, 10, 10, 10)
+        pl.setSpacing(10)
+
+        # ── Card 1: Google Workspace Cloud Integration ──
+        gw_card = QFrame()
+        gw_card.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:6px;")
+        gwl = QVBoxLayout(gw_card)
+        gwl.setContentsMargins(12, 10, 12, 10)
+        gwl.setSpacing(8)
+
+        gw_hdr = QHBoxLayout()
+        gw_hdr.addWidget(lbl("GOOGLE WORKSPACE (CLOUD PERSONAL INTELLIGENCE)", 10, C["neon_cyan"], bold=True))
+        gw_hdr.addStretch()
+        self._gw_status_badge = lbl("DISCONNECTED", 9, C["neon_yellow"], bold=True)
+        gw_hdr.addWidget(self._gw_status_badge)
+        gwl.addLayout(gw_hdr)
+
+        gwl.addWidget(lbl("Connect Gmail, Google Calendar, Google Drive, and Tasks to enable voice-driven personal queries in Gemini Live.", 8, C["text_dim"]))
+
+        gw_action_row = QHBoxLayout()
+        self._gw_info_lbl = lbl("Credentials: credentials.json", 8, C["text_dim"])
+        gw_action_row.addWidget(self._gw_info_lbl, 1)
+
+        self._btn_connect_gw = QPushButton("CONNECT GOOGLE ACCOUNT")
+        self._btn_connect_gw.setStyleSheet(
+            f"background:{C['neon_cyan']}22; color:{C['neon_cyan']}; border:1px solid {C['neon_cyan']}; "
+            f"border-radius:3px; padding:5px 12px; font-size:9px; font-weight:bold;"
+        )
+        self._btn_connect_gw.clicked.connect(self._connect_google_account)
+        gw_action_row.addWidget(self._btn_connect_gw)
+
+        self._btn_sync_gw = QPushButton("TEST SYNC")
+        self._btn_sync_gw.setStyleSheet(
+            f"background:{C['neon_green']}22; color:{C['neon_green']}; border:1px solid {C['neon_green']}; "
+            f"border-radius:3px; padding:5px 12px; font-size:9px; font-weight:bold;"
+        )
+        self._btn_sync_gw.clicked.connect(self._test_google_sync)
+        gw_action_row.addWidget(self._btn_sync_gw)
+
+        gwl.addLayout(gw_action_row)
+        pl.addWidget(gw_card)
+
+        # ── Card 2: Local User Profile Attributes ──
+        p_top = QHBoxLayout()
+        p_top.addWidget(lbl("Josh's Persistent Personal Profile & Preferences", 10, C["neon_blue"], bold=True))
+        p_top.addStretch()
+        self._del_prof_btn = QPushButton("DELETE SELECTED")
+        self._del_prof_btn.setObjectName("btn_danger")
+        self._del_prof_btn.clicked.connect(self._delete_selected_profile)
+        p_top.addWidget(self._del_prof_btn)
+        pl.addLayout(p_top)
+
+        self._profile_table = QTableWidget()
+        self._profile_table.setColumnCount(6)
+        self._profile_table.setHorizontalHeaderLabels(["ID", "Category", "Key", "Value", "Source", "Updated At"])
+        self._profile_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self._profile_table.horizontalHeader().setStretchLastSection(True)
+        self._profile_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._profile_table.setStyleSheet(self._table_stylesheet())
+        pl.addWidget(self._profile_table, 1)
+
+        prof_add_box = QFrame()
+        prof_add_box.setStyleSheet(f"background:{C['bg_card']}; border:1px solid {C['border']}; border-radius:4px; padding:4px;")
+        pabl = QHBoxLayout(prof_add_box)
+        pabl.setContentsMargins(8, 4, 8, 4)
+        pabl.setSpacing(6)
+
+        self._in_prof_cat = QComboBox()
+        self._in_prof_cat.addItems(["identity", "preferences", "environment", "projects", "contacts", "general"])
+        self._in_prof_cat.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_bright']}; border:1px solid {C['border']}; font-size:11px; padding:3px 6px;")
+        self._in_prof_key = QLineEdit(); self._in_prof_key.setPlaceholderText("Key (e.g. timezone)")
+        self._in_prof_val = QLineEdit(); self._in_prof_val.setPlaceholderText("Value (e.g. America/New_York)")
+        for inp in (self._in_prof_key, self._in_prof_val):
+            inp.setStyleSheet(f"background:{C['bg_deep']}; color:{C['text_bright']}; border:1px solid {C['border']}; font-size:11px; padding:3px 6px;")
+
+        b_save_prof = QPushButton("SAVE ATTRIBUTE")
+        b_save_prof.setStyleSheet(f"background:{C['neon_cyan']}33; color:{C['neon_cyan']}; border:1px solid {C['neon_cyan']}; font-weight:bold; font-size:10px; padding:4px 10px;")
+        b_save_prof.clicked.connect(self._upsert_profile)
+
+        pabl.addWidget(self._in_prof_cat)
+        pabl.addWidget(self._in_prof_key)
+        pabl.addWidget(self._in_prof_val)
+        pabl.addWidget(b_save_prof)
+        pl.addWidget(prof_add_box)
+
+        self._subtabs.addTab(self._profile_widget, " PERSONAL INTELLIGENCE ")
+
     def _table_stylesheet(self):
         return f"""
             QTableWidget {{
@@ -3119,6 +3212,88 @@ class MemoryTab(QWidget):
         self._refresh_facts()
         self._refresh_traits()
         self._refresh_episodes()
+        self._refresh_profile()
+        self._refresh_google_status()
+
+    def _refresh_profile(self):
+        details = self._mm.get_user_profile_details()
+        self._profile_table.setRowCount(len(details))
+        for r, item in enumerate(details):
+            self._profile_table.setItem(r, 0, QTableWidgetItem(str(item.get("id", ""))))
+            self._profile_table.setItem(r, 1, QTableWidgetItem(str(item.get("category", ""))))
+            self._profile_table.setItem(r, 2, QTableWidgetItem(str(item.get("key_name", ""))))
+            self._profile_table.setItem(r, 3, QTableWidgetItem(str(item.get("value", ""))))
+            self._profile_table.setItem(r, 4, QTableWidgetItem(str(item.get("source", ""))))
+            self._profile_table.setItem(r, 5, QTableWidgetItem(str(item.get("updated_at", ""))))
+
+    def _upsert_profile(self):
+        cat = self._in_prof_cat.currentText().strip()
+        key = self._in_prof_key.text().strip()
+        val = self._in_prof_val.text().strip()
+        if key and val:
+            self._mm.set_user_attribute(key, val, category=cat, source="manual_gui")
+            self._in_prof_key.clear()
+            self._in_prof_val.clear()
+            self._refresh_profile()
+
+    def _delete_selected_profile(self):
+        row = self._profile_table.currentRow()
+        if row >= 0:
+            key_item = self._profile_table.item(row, 2)
+            if key_item and key_item.text():
+                self._mm.delete_user_attribute(key_item.text())
+                self._refresh_profile()
+
+    def _refresh_google_status(self):
+        if hasattr(self, "_gw_status_badge"):
+            is_auth = google_workspace.is_authenticated()
+            has_creds = google_workspace.has_credentials_file()
+            if is_auth:
+                self._gw_status_badge.setText("CONNECTED")
+                self._gw_status_badge.setStyleSheet(f"color:{C['neon_green']}; font-weight:bold; background:transparent;")
+                self._gw_info_lbl.setText("Authenticated with Google Workspace (Gmail, Calendar, Drive, Tasks)")
+            elif has_creds:
+                self._gw_status_badge.setText("READY TO CONNECT")
+                self._gw_status_badge.setStyleSheet(f"color:{C['neon_cyan']}; font-weight:bold; background:transparent;")
+                self._gw_info_lbl.setText("Credentials found. Click 'CONNECT GOOGLE ACCOUNT' to authenticate.")
+            else:
+                self._gw_status_badge.setText("NOT CONFIGURED")
+                self._gw_status_badge.setStyleSheet(f"color:{C['neon_yellow']}; font-weight:bold; background:transparent;")
+                self._gw_info_lbl.setText("Missing credentials.json in workspace. Click 'CONNECT GOOGLE ACCOUNT' for setup guide.")
+
+    def _connect_google_account(self):
+        if not google_workspace.has_credentials_file():
+            QMessageBox.information(
+                self,
+                "Google Workspace Setup Guide",
+                "To connect your Google account for Personal Intelligence:\n\n"
+                "1. Visit Google Cloud Console (console.cloud.google.com)\n"
+                "2. Enable Google Calendar API, Gmail API, and Google Drive API\n"
+                "3. Create OAuth 2.0 Credentials (Desktop application)\n"
+                "4. Download the JSON file and save it as 'credentials.json' in:\n"
+                f"   {Path('.').resolve() / 'credentials.json'}\n\n"
+                "5. Click 'CONNECT GOOGLE ACCOUNT' again to log in via your browser!"
+            )
+        else:
+            res = google_workspace.start_auth_flow()
+            if res.get("success"):
+                QMessageBox.information(self, "Google Workspace Connected", res.get("message"))
+            else:
+                QMessageBox.warning(self, "Authentication Failed", res.get("error", "Unknown error during authentication."))
+            self._refresh_google_status()
+
+    def _test_google_sync(self):
+        if not google_workspace.is_authenticated():
+            QMessageBox.warning(self, "Google Workspace", "Google Workspace is not connected yet. Please connect your account first.")
+            return
+        cal = google_workspace.get_calendar_events(time_window_hours=48)
+        mails = google_workspace.search_emails(query="is:unread", max_results=3)
+        msg = (
+            f"Calendar: {cal.get('count', 0)} event(s) in next 48h.\n"
+            f"Gmail: {mails.get('count', 0)} unread email(s) found.\n\n"
+            f"Personal Intelligence is fully synced!"
+        )
+        QMessageBox.information(self, "Google Sync Verified", msg)
 
     def _refresh_facts(self, query=None):
         if query and query.strip():

@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 *.pyo
 history/
+credentials.json
+token.json
+*.db-journal

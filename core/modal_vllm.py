@@ -32,13 +32,19 @@ vllm_image = (
 
 app = modal.App("alphalive-vllm-bucket")
 
+secrets = []
+try:
+    secrets.append(modal.Secret.from_name("huggingface-secret"))
+except Exception:
+    pass
+
 @app.function(
     image=vllm_image,
     gpu=GPU_CONFIG,
     timeout=1800,
     scaledown_window=600,
     volumes={CACHE_DIR: model_volume}, 
-    secrets=[modal.Secret.from_name("huggingface-secret")] # Ensure your HF token is in this Modal secret!
+    secrets=secrets
 )
 @modal.concurrent(max_inputs=100)
 @modal.web_server(8000, startup_timeout=900)
@@ -76,6 +82,5 @@ def serve():
     ]
     
     print("Starting vLLM server...")
-    proc = subprocess.Popen(cmd)
-    proc.wait()
+    subprocess.Popen(cmd)
 

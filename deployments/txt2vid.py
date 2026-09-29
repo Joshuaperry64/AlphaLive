@@ -317,16 +317,6 @@ class Txt2Vid:
         return web_app
 
 
-@app.cls(
-    gpu="A10G",
-    timeout=60 * MINUTES,
-    scaledown_window=60,
-    max_containers=1,
-    volumes={CACHE_DIR: cache_volume, OUTPUTS_DIR: outputs_volume},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-)
-
-
 @app.local_entrypoint()
 def main_txt2vid(
     prompt: str = "A highly detailed cinematic scene",

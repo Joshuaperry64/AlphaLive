@@ -357,13 +357,3 @@ class Img2Vid:
             return StreamingResponse(event_stream(), media_type="text/event-stream")
 
         return web_app
-
-
-@app.cls(
-    gpu="L40S",
-    timeout=60 * MINUTES,
-    scaledown_window=60,
-    max_containers=1,
-    volumes={CACHE_DIR: cache_volume, OUTPUTS_DIR: outputs_volume},
-    secrets=[modal.Secret.from_name("huggingface-secret")],
-)

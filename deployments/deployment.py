@@ -287,8 +287,16 @@ def create_api() -> FastAPI:
     @api.post("/api/generate/txt2img")
     async def api_txt2img(body: dict):
         try:
-            images: list[bytes] = await txt2img.Txt2Img().run.remote.aio(**body)
-            return {"images": [base64.b64encode(b).decode() for b in images]}
+            images_b64 = []
+            async for msg in txt2img.Txt2Img().run.remote_gen.aio(**body):
+                if "image_b64" in msg and msg["image_b64"]:
+                    images_b64 = msg["image_b64"]
+                    break
+                if "error" in msg:
+                    raise HTTPException(status_code=500, detail=msg["error"])
+            return {"images": images_b64}
+        except HTTPException:
+            raise
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 

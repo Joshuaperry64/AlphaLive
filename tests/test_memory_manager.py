@@ -1,8 +1,12 @@
 import os
+import sys
 import unittest
 import tempfile
 import sqlite3
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from unittest.mock import patch
 from memory.memory_manager import MemoryManager
 

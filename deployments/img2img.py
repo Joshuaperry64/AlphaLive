@@ -153,10 +153,6 @@ image = image.add_local_python_source("shared_app")
     memory=64 * 1024
 )
 class Img2Img:
-    def __init__(self):
-        self.current_model = None
-        self.pipe = None
-
     @modal.enter()
     def enter(self):
         self.current_model = None

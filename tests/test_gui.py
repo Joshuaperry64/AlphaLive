@@ -17,6 +17,8 @@ class TestLoadConfig(unittest.TestCase):
         # Mock required modules before importing gui
         sys.modules['pyautogui'] = MagicMock()
         sys.modules['dotenv'] = MagicMock()
+        sys.modules['integrations'] = MagicMock()
+        sys.modules['integrations.google_workspace'] = MagicMock()
         sys.modules['memory_manager'] = MagicMock()
         sys.modules['PyQt6'] = MagicMock()
         sys.modules['PyQt6.QtWidgets'] = MagicMock()
@@ -72,6 +74,51 @@ class TestLoadConfig(unittest.TestCase):
             "alpha_core.py": {"AudioMode": "half"}
         }
         self.assertEqual(config, expected)
+
+    @patch('pathlib.Path.exists')
+    def test_load_config_empty_dict(self, mock_exists):
+        mock_exists.return_value = True
+        saved_data = {}
+        with patch('builtins.open', mock_open(read_data=json.dumps(saved_data))):
+            config = gui.load_config()
+        self.assertEqual(config, gui.DEFAULT_CONFIG)
+
+    @patch('pathlib.Path.exists')
+    def test_load_config_extra_sections(self, mock_exists):
+        mock_exists.return_value = True
+        saved_data = {
+            "Global": {"Session": "custom_session", "ExtraKey": "extra_val"},
+            "ExtraSection": {"Key": "Val"}
+        }
+        with patch('builtins.open', mock_open(read_data=json.dumps(saved_data))):
+            config = gui.load_config()
+
+        expected = {
+            "Global": {"ApiKey": "123", "Session": "custom_session", "ExtraKey": "extra_val"},
+            "alpha_core.py": {"AudioMode": "half"},
+            "ExtraSection": {"Key": "Val"}
+        }
+        self.assertEqual(config, expected)
+
+    @patch('pathlib.Path.exists')
+    def test_load_config_malformed_section_type(self, mock_exists):
+        mock_exists.return_value = True
+        saved_data = {
+            "Global": "This is a string, not a dict"
+        }
+        with patch('builtins.open', mock_open(read_data=json.dumps(saved_data))):
+            config = gui.load_config()
+
+        # Due to AttributeError (or TypeError) raised when treating string as dict in load_config
+        # It should fall back to DEFAULT_CONFIG
+        self.assertEqual(config, gui.DEFAULT_CONFIG)
+
+    @patch('pathlib.Path.exists')
+    def test_load_config_file_read_error(self, mock_exists):
+        mock_exists.return_value = True
+        with patch('builtins.open', side_effect=OSError("Permission denied")):
+            config = gui.load_config()
+        self.assertEqual(config, gui.DEFAULT_CONFIG)
 
     @patch('pathlib.Path.exists')
     @patch('pathlib.Path.read_text')

@@ -170,5 +170,45 @@ class TestCharacterManager(unittest.TestCase):
             self.assertEqual(self.cm.get_active_character_name(), "")
             self.assertFalse(self.cm.update_metrics("ErrorChar", arousal=50))
 
+    def test_add_character_conflict_all_fields(self):
+        # Initial add
+        self.cm.add_character(
+            name="Beta",
+            gender="Male",
+            relation="Friend",
+            personality="Calm",
+            response_style="Polite",
+            avatar_path="/avatars/beta.png"
+        )
+
+        # Update with different values
+        self.cm.add_character(
+            name="Beta",
+            gender="Non-binary",
+            relation="Colleague",
+            personality="Energetic",
+            response_style="Excited",
+            avatar_path="/avatars/beta_new.png"
+        )
+
+        char = self.cm.get_character("Beta")
+        self.assertIsNotNone(char)
+        self.assertEqual(char["name"], "Beta")
+        self.assertEqual(char["gender"], "Non-binary")
+        self.assertEqual(char["relation"], "Colleague")
+        self.assertEqual(char["personality"], "Energetic")
+        self.assertEqual(char["response_style"], "Excited")
+        self.assertEqual(char["avatar_path"], "/avatars/beta_new.png")
+
+    def test_add_character_strips_name(self):
+        success = self.cm.add_character(name="   Gamma   ", gender="Female")
+        self.assertTrue(success)
+
+        # Should be able to get it by the stripped name
+        char = self.cm.get_character("Gamma")
+        self.assertIsNotNone(char)
+        self.assertEqual(char["name"], "Gamma")
+        self.assertEqual(char["gender"], "Female")
+
 if __name__ == '__main__':
     unittest.main()

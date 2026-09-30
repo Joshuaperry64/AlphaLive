@@ -240,16 +240,19 @@ client = genai.Client(
 
 # ── Screen resolution ──────────────────────────────────────────────────────────
 try:
-    # Force DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
-    # Note: SetProcessDpiAwarenessContext returns a bool, it doesn't throw on failure!
-    success = ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
-    if not success:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    if hasattr(ctypes, 'windll'):
+        # Force DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
+        # Note: SetProcessDpiAwarenessContext returns a bool, it doesn't throw on failure!
+        success = ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+        if not success:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        if hasattr(ctypes, 'windll'):
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
-        ctypes.windll.user32.SetProcessDPIAware()
+        if hasattr(ctypes, 'windll'):
+            ctypes.windll.user32.SetProcessDPIAware()
 
 import pyautogui
 _w, _h = pyautogui.size()

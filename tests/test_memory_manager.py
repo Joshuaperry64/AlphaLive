@@ -188,5 +188,159 @@ class TestMemoryManager(unittest.TestCase):
             self.assertEqual(self.mm.get_recent_episodes(), [])
             self.assertFalse(self.mm.delete_episode(1))
 
+    # ── User Profile & Personal Intelligence Tests ────────────────────────────
+
+    def test_set_user_attribute(self):
+        result = self.mm.set_user_attribute("favorite_color", "blue", category="preferences", confidence=0.9, source="chat")
+        self.assertTrue(result)
+
+        # Verify it was inserted correctly
+        val = self.mm.get_user_attribute("favorite_color")
+        self.assertEqual(val, "blue")
+
+        # Test upsert behavior
+        result_upsert = self.mm.set_user_attribute("favorite_color", "red")
+        self.assertTrue(result_upsert)
+
+        val_updated = self.mm.get_user_attribute("favorite_color")
+        self.assertEqual(val_updated, "red")
+
+    def test_set_user_attribute_strips_strings(self):
+        result = self.mm.set_user_attribute("  spaced_key  ", "  spaced_val  ", category="  spaced_cat  ", source="  spaced_src  ")
+        self.assertTrue(result)
+
+        val = self.mm.get_user_attribute("spaced_key")
+        self.assertEqual(val, "spaced_val")
+
+        details = self.mm.get_user_profile_details()
+        matching = [d for d in details if d["key_name"] == "spaced_key"]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0]["category"], "spaced_cat")
+        self.assertEqual(matching[0]["source"], "spaced_src")
+
+    def test_get_user_attribute(self):
+        self.mm.set_user_attribute("test_attr", "test_val")
+        self.assertEqual(self.mm.get_user_attribute("test_attr"), "test_val")
+        self.assertEqual(self.mm.get_user_attribute("nonexistent"), "")
+
+    def test_get_user_profile(self):
+        # Initial DB setup seeds some defaults. Let's clear them first for a clean test
+        with self.mm._get_conn() as conn:
+            conn.execute('DELETE FROM user_profile')
+            conn.commit()
+
+        self.mm.set_user_attribute("attr1", "val1", category="cat1")
+        self.mm.set_user_attribute("attr2", "val2", category="cat1")
+        self.mm.set_user_attribute("attr3", "val3", category="cat2")
+
+        full_profile = self.mm.get_user_profile()
+        self.assertEqual(len(full_profile), 3)
+        self.assertEqual(full_profile["attr1"], "val1")
+
+        cat1_profile = self.mm.get_user_profile("cat1")
+        self.assertEqual(len(cat1_profile), 2)
+        self.assertIn("attr1", cat1_profile)
+        self.assertIn("attr2", cat1_profile)
+        self.assertNotIn("attr3", cat1_profile)
+
+    def test_get_user_profile_details(self):
+        with self.mm._get_conn() as conn:
+            conn.execute('DELETE FROM user_profile')
+            conn.commit()
+
+        self.mm.set_user_attribute("test_attr", "test_val", category="test_cat", confidence=0.8, source="test_src")
+        details = self.mm.get_user_profile_details()
+
+        self.assertEqual(len(details), 1)
+        self.assertEqual(details[0]["key_name"], "test_attr")
+        self.assertEqual(details[0]["value"], "test_val")
+        self.assertEqual(details[0]["category"], "test_cat")
+        self.assertEqual(details[0]["confidence"], 0.8)
+        self.assertEqual(details[0]["source"], "test_src")
+
+    def test_delete_user_attribute(self):
+        self.mm.set_user_attribute("attr_to_delete", "val")
+        self.assertEqual(self.mm.get_user_attribute("attr_to_delete"), "val")
+
+        result = self.mm.delete_user_attribute("attr_to_delete")
+        self.assertTrue(result)
+        self.assertEqual(self.mm.get_user_attribute("attr_to_delete"), "")
+
+    def test_user_profile_exceptions(self):
+        with patch.object(self.mm, '_get_conn', side_effect=Exception("Test error")):
+            self.assertFalse(self.mm.set_user_attribute("key", "val"))
+            self.assertEqual(self.mm.get_user_attribute("key"), "")
+            self.assertEqual(self.mm.get_user_profile(), {})
+            self.assertEqual(self.mm.get_user_profile_details(), [])
+            self.assertFalse(self.mm.delete_user_attribute("key"))
+
+    def test_search_personal_vault(self):
+        # Seed some data
+        self.mm.set_user_attribute("hobby", "playing guitar")
+        self.mm.memorize_fact("josh", "owns", "acoustic guitar")
+        self.mm.write_diary_entry("Practiced guitar for an hour today.", session_name="session_1")
+
+        results = self.mm.search_personal_vault("guitar")
+
+        self.assertEqual(results["query"], "guitar")
+        self.assertEqual(len(results["user_profile"]), 1)
+        self.assertEqual(results["user_profile"][0]["key_name"], "hobby")
+
+        self.assertEqual(len(results["knowledge_graph"]), 1)
+        self.assertEqual(results["knowledge_graph"][0]["object"], "acoustic guitar")
+
+        self.assertEqual(len(results["episodic_memory"]), 1)
+        self.assertEqual(results["episodic_memory"][0]["content"], "Practiced guitar for an hour today.")
+
+        self.assertIn("hobby=playing guitar", results["formatted_summary"])
+        self.assertIn("(josh owns acoustic guitar)", results["formatted_summary"])
+        self.assertIn("[session_1] Practiced guitar for an hour today.", results["formatted_summary"])
+
+    def test_search_personal_vault_exception(self):
+        with patch.object(self.mm, '_get_conn', side_effect=Exception("Test error")):
+            results = self.mm.search_personal_vault("guitar")
+            self.assertEqual(results["query"], "guitar")
+            self.assertEqual(results["user_profile"], [])
+            self.assertEqual(results["knowledge_graph"], [])
+            self.assertEqual(results["episodic_memory"], [])
+            self.assertEqual(results["formatted_summary"], "")
+
+    def test_auto_extract_facts(self):
+        # Clear out existing defaults to avoid confusion
+        with self.mm._get_conn() as conn:
+            conn.execute('DELETE FROM user_profile')
+            conn.execute('DELETE FROM knowledge_graph')
+            conn.commit()
+
+        text = "I really love cyberpunk aesthetics. I am working on a new project."
+        extracted = self.mm.auto_extract_facts(text)
+
+        self.assertEqual(len(extracted), 2)
+
+        # Check the extracted list
+        keys = [e["key"] for e in extracted]
+        self.assertIn("preference", keys)
+        self.assertIn("current_focus", keys)
+
+        # Verify it went to DB
+        prof = self.mm.get_user_profile()
+        self.assertIn("preference", prof)
+        self.assertEqual(prof["preference"], "cyberpunk aesthetics")
+        self.assertIn("current_focus", prof)
+        self.assertEqual(prof["current_focus"], "a new project")
+
+        facts = self.mm.get_all_facts()
+        self.assertEqual(len(facts), 2)
+        predicates = [f["predicate"] for f in facts]
+        self.assertIn("likes", predicates)
+        self.assertIn("working_on", predicates)
+
+    def test_auto_extract_facts_empty(self):
+        extracted = self.mm.auto_extract_facts("Hi")
+        self.assertEqual(extracted, [])
+
+        extracted2 = self.mm.auto_extract_facts("")
+        self.assertEqual(extracted2, [])
+
 if __name__ == '__main__':
     unittest.main()

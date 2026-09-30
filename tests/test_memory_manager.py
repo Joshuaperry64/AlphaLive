@@ -143,6 +143,33 @@ class TestMemoryManager(unittest.TestCase):
         personality = self.mm.get_personality()
         self.assertEqual(personality.get("spaced_trait"), "spaced_value")
 
+    def test_update_personality_non_string_value(self):
+        result = self.mm.update_personality("int_trait", 123)
+        self.assertTrue(result)
+        personality = self.mm.get_personality()
+        self.assertEqual(personality.get("int_trait"), "123")
+
+    def test_update_personality_executes_upsert(self):
+        self.mm.update_personality("test_trait", "old_value")
+
+        with patch('memory.memory_manager.sqlite3.connect') as mock_connect:
+            mock_conn = mock_connect.return_value
+            # We enforce dict-like row access, but since mm._get_conn uses contextmanager we mock the yield
+            self.mm.update_personality("test_trait", "new_value")
+
+            # The actual execution happens via conn.execute
+            calls = mock_conn.execute.call_args_list
+            self.assertTrue(len(calls) > 0, "Expected execute to be called")
+            sql = calls[0][0][0]
+            args = calls[0][0][1]
+            self.assertIn("ON CONFLICT(trait_name) DO UPDATE SET", sql)
+            self.assertEqual(args, ("test_trait", "new_value"))
+
+    def test_update_personality_exception_handling(self):
+        with patch.object(self.mm, '_get_conn', side_effect=sqlite3.Error("Test DB Error")):
+            result = self.mm.update_personality("humor", "high")
+            self.assertFalse(result)
+
     def test_get_personality_details(self):
         self.mm.update_personality("humor", "high")
         details = self.mm.get_personality_details()

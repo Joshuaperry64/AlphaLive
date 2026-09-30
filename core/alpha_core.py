@@ -242,13 +242,17 @@ client = genai.Client(
 try:
     # Force DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
     # Note: SetProcessDpiAwarenessContext returns a bool, it doesn't throw on failure!
-    success = ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+    if sys.platform == "win32":
+        success = ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
     if not success:
+        if sys.platform == "win32":
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     try:
+        if sys.platform == "win32":
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
+        if sys.platform == "win32":
         ctypes.windll.user32.SetProcessDPIAware()
 
 import pyautogui

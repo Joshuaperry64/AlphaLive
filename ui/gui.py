@@ -4220,6 +4220,7 @@ class LaunchSidebar(QFrame):
     stop_requested   = pyqtSignal()
     calib_requested  = pyqtSignal()
     overlay_requested= pyqtSignal()
+    hud_requested    = pyqtSignal()
     vllm_health_requested = pyqtSignal()
     quick_settings_changed = pyqtSignal(dict)
     pleasure_mode_requested = pyqtSignal(bool)
@@ -4424,6 +4425,11 @@ class LaunchSidebar(QFrame):
         self._ovl_btn.setFixedHeight(30)
         self._ovl_btn.clicked.connect(self.overlay_requested.emit)
         root.addWidget(self._ovl_btn)
+        
+        self._hud_btn = QPushButton("TOGGLE HUD")
+        self._hud_btn.setFixedHeight(30)
+        self._hud_btn.clicked.connect(self.hud_requested.emit)
+        root.addWidget(self._hud_btn)
         
         root.addStretch(1)
 
@@ -4781,6 +4787,7 @@ class MainWindow(QMainWindow):
         self._sidebar.stop_requested.connect(self._stop)
         self._sidebar.calib_requested.connect(self._start_calibration)
         self._sidebar.overlay_requested.connect(self._toggle_overlay)
+        self._sidebar.hud_requested.connect(self._toggle_hud)
         self._sidebar.vllm_health_requested.connect(self._check_vllm_health)
         self._sidebar.quick_settings_changed.connect(self._on_quick_settings_changed)
         self._sidebar.pleasure_mode_requested.connect(self._on_pleasure_mode)
@@ -5044,6 +5051,13 @@ class MainWindow(QMainWindow):
         else:
             self._cursor_overlay.close()
             self._cursor_overlay = None
+
+    def _toggle_hud(self):
+        if hasattr(self, '_status_overlay'):
+            if self._status_overlay.isVisible():
+                self._status_overlay.hide()
+            else:
+                self._status_overlay.show()
 
     def _start_calibration(self):
         if self._calib_overlay is not None:

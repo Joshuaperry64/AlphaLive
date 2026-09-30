@@ -27,6 +27,29 @@ import PIL.ImageDraw
 from PIL import ImageGrab
 import pyautogui
 import keyboard
+import threading
+
+_GLOBAL_INPUT_QUEUE = None
+_GLOBAL_INPUT_LOOP = None
+
+def _global_input_thread():
+    import time
+    # Wait until the loop and queue are initialized by run()
+    while not (_GLOBAL_INPUT_LOOP and _GLOBAL_INPUT_QUEUE):
+        time.sleep(0.1)
+    
+    while True:
+        try:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            line = line.strip()
+            import asyncio
+            asyncio.run_coroutine_threadsafe(_GLOBAL_INPUT_QUEUE.put(line), _GLOBAL_INPUT_LOOP)
+        except Exception:
+            time.sleep(0.1)
+
+threading.Thread(target=_global_input_thread, daemon=True).start()
 
 import argparse
 
@@ -156,7 +179,7 @@ def win32_set_clipboard(text: str) -> bool:
     return False
 
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 from memory import memory_manager
 from memory import character_manager
@@ -218,16 +241,20 @@ client = genai.Client(
 # ── Screen resolution ──────────────────────────────────────────────────────────
 try:
     # Force DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
-    ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+    # Note: SetProcessDpiAwarenessContext returns a bool, it doesn't throw on failure!
+    success = ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+    if not success:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     try:
-        # Fallback for Windows 8.1 / older Windows 10
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         ctypes.windll.user32.SetProcessDPIAware()
 
-screen_w = ctypes.windll.user32.GetSystemMetrics(0)
-screen_h = ctypes.windll.user32.GetSystemMetrics(1)
+import pyautogui
+_w, _h = pyautogui.size()
+screen_w = _w
+screen_h = _h
 
 
 tools = [
@@ -1451,13 +1478,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
     async def send_text(self):
         while not self.stop_event.is_set():
             try:
-                text = await asyncio.to_thread(
-                    input,
-                    "message > ",
-                )
-            except (EOFError, KeyboardInterrupt):
-                await self.stop_event.wait()
-                break
+                text = await _GLOBAL_INPUT_QUEUE.get()
             except Exception:
                 await asyncio.sleep(1.0)
                 continue
@@ -2069,149 +2090,153 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
             if self.session is not None:
                 turn = self.session.receive()
                 ai_started = False
-                async for response in turn:
-                    raw_audio = response.data
-                    if not raw_audio and getattr(response, "server_content", None) and getattr(response.server_content, "model_turn", None):
-                        for part in response.server_content.model_turn.parts:
-                            if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
-                                raw_audio = part.inline_data.data
-                                break
-
-                    if raw_audio:
-                        # audio out
-                        self.is_ai_speaking = True
-                        self.last_ai_speech_time = time.time()
-                        self.audio_in_queue.put_nowait(raw_audio)
-
-                    if sc := getattr(response, "server_content", None):
-                        if input_transcript := getattr(sc, "input_transcription", None):
-                            user_text = input_transcript.text
-                            print(f"\n\n[You]: {user_text}\n[Processing...]", flush=True)
-                            
-                            await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
-
-                            mem_ctx = self._get_memory_context(user_text)
-                            if mem_ctx and not getattr(self, "vllm_active", VLLM_MODE):
-                                try:
-                                    await self.session.send_realtime_input(text=mem_ctx)
-                                except Exception:
-                                    pass
-
-                            # ✨ vLLM hybrid: intercept and relay ✨
-                            if getattr(self, "vllm_active", VLLM_MODE) and user_text and user_text.strip():
-                                full_text = mem_ctx + user_text if mem_ctx else user_text
-                                asyncio.create_task(self._relay_to_vllm(full_text))
-                            
-                        if output_transcript := getattr(sc, "output_transcription", None):
-                            if text := output_transcript.text:
-                                if not getattr(self, "vllm_active", VLLM_MODE):
-                                    if not ai_started:
-                                        print("\n[Alpha]: ", end="", flush=True)
-                                        ai_started = True
-                                    print(text, end="", flush=True)
-                                    await self._async_log(text)
-                                    # ── Refusal watchdog ──────────────────
-                                    if self._is_refusal(text):
-                                        self._refusal_count += 1
-                                        if self._refusal_count >= self._max_refusals:
-                                            asyncio.create_task(self._emp_reboot())
-
-                        if getattr(sc, "model_turn", None):
-                            if "AUDIO" not in CONFIG.response_modalities:
-                                for part in sc.model_turn.parts:
-                                    if getattr(part, "text", None):
-                                        if not getattr(self, "vllm_active", VLLM_MODE):
-                                            if not ai_started:
-                                                print("\n[Alpha]: ", end="", flush=True)
-                                                ai_started = True
-                                            print(part.text, end="", flush=True)
-                                            await self._async_log(part.text)
-                                            # ── Refusal watchdog ──────────────
-                                            if self._is_refusal(part.text):
-                                                self._refusal_count += 1
-                                                if self._refusal_count >= self._max_refusals:
-                                                    asyncio.create_task(self._emp_reboot())
-
-
-                    if tool_call := response.tool_call:
-                        if ai_started:
-                            print("", flush=True)
-                            ai_started = False
-                        if getattr(self, "vllm_active", VLLM_MODE):
-                            # In vLLM mode, Gemini Live is audio relay only; ignore any stray Gemini tool calls
-                            continue
-                        self._auto_last_had_tools = True   # mark that this turn was active
-                        self._auto_idle_turns = 0
-                        
-                        function_responses = []
-                        for function_call in tool_call.function_calls:
-                            name = function_call.name
-                            args = function_call.args
-                            print(f"\n\n[Tool Executing] {name} with args: {args}")
-                            result = await self._execute_tool(name, args)
-                            function_responses.append(
-                                types.FunctionResponse(
-                                    name=name,
-                                    id=function_call.id,
-                                    response=result
-                                )
-                            )
-                            if keyboard.is_pressed("ctrl+z"):
-                                print("\n[System] Abort command (Ctrl+Z) detected! Halting continuous chain.")
-                                self.autonomous = False
-                                await self.session.send_realtime_input(text="[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this.")
-                                break
+                try:
+                    async for response in turn:
+                        raw_audio = response.data
+                        if not raw_audio and getattr(response, "server_content", None) and getattr(response.server_content, "model_turn", None):
+                            for part in response.server_content.model_turn.parts:
+                                if getattr(part, "inline_data", None) and getattr(part.inline_data, "data", None):
+                                    raw_audio = part.inline_data.data
+                                    break
+    
+                        if raw_audio:
+                            # audio out
+                            self.is_ai_speaking = True
+                            self.last_ai_speech_time = time.time()
+                            self.audio_in_queue.put_nowait(raw_audio)
+    
+                        if sc := getattr(response, "server_content", None):
+                            if input_transcript := getattr(sc, "input_transcription", None):
+                                user_text = input_transcript.text
+                                print(f"\n\n[You]: {user_text}\n[Processing...]", flush=True)
                                 
-                        if function_responses:
-                            print(f"[Tool Finished] Sending {len(function_responses)} result(s) back to Gemini...\n")
-                            await self.session.send_tool_response(
-                                function_responses=function_responses
-                            )
-
-                if ai_started:
-                    print("", flush=True)
-                print("\nmessage > ", end="", flush=True)
-
-                self.is_ai_speaking = False
-                self.last_ai_speech_time = time.time()
-                # Reset refusal count on any successful full turn (reboot resets its own counter)
-                if not self._reboot_in_progress:
-                    self._refusal_count = 0
-                
-                # ── Autonomous decision framework ──────────────────────────────
-                if self.autonomous:
-                    # Nudge ONLY if the AI went idle (did not call any tools this turn)
-                    if not self._auto_last_had_tools:
-                        self._auto_idle_turns += 1
-                        if self._task_active:
-                            max_idle = 10
-                            if self._auto_idle_turns <= max_idle:
-                                await asyncio.sleep(1.0)
-                                try:
-                                    await self.session.send_realtime_input(
-                                        text=f"[System]: Task is actively running. You must take the next action or call 'task_complete' to end your turn. Do not wait for user input. ({self._auto_idle_turns}/{max_idle})"
+                                await self._async_log(f"\n[You]: {user_text}\n[Alpha]: ")
+    
+                                mem_ctx = self._get_memory_context(user_text)
+                                if mem_ctx and not getattr(self, "vllm_active", VLLM_MODE):
+                                    try:
+                                        await self.session.send_realtime_input(text=mem_ctx)
+                                    except Exception:
+                                        pass
+    
+                                # ✨ vLLM hybrid: intercept and relay ✨
+                                if getattr(self, "vllm_active", VLLM_MODE) and user_text and user_text.strip():
+                                    full_text = mem_ctx + user_text if mem_ctx else user_text
+                                    asyncio.create_task(self._relay_to_vllm(full_text))
+                                
+                            if output_transcript := getattr(sc, "output_transcription", None):
+                                if text := output_transcript.text:
+                                    if not getattr(self, "vllm_active", VLLM_MODE):
+                                        if not ai_started:
+                                            print("\n[Alpha]: ", end="", flush=True)
+                                            ai_started = True
+                                        print(text, end="", flush=True)
+                                        await self._async_log(text)
+                                        # ── Refusal watchdog ──────────────────
+                                        if self._is_refusal(text):
+                                            self._refusal_count += 1
+                                            if self._refusal_count >= self._max_refusals:
+                                                asyncio.create_task(self._emp_reboot())
+    
+                            if getattr(sc, "model_turn", None):
+                                if "AUDIO" not in CONFIG.response_modalities:
+                                    for part in sc.model_turn.parts:
+                                        if getattr(part, "text", None):
+                                            if not getattr(self, "vllm_active", VLLM_MODE):
+                                                if not ai_started:
+                                                    print("\n[Alpha]: ", end="", flush=True)
+                                                    ai_started = True
+                                                print(part.text, end="", flush=True)
+                                                await self._async_log(part.text)
+                                                # ── Refusal watchdog ──────────────
+                                                if self._is_refusal(part.text):
+                                                    self._refusal_count += 1
+                                                    if self._refusal_count >= self._max_refusals:
+                                                        asyncio.create_task(self._emp_reboot())
+    
+    
+                        if tool_call := response.tool_call:
+                            if ai_started:
+                                print("", flush=True)
+                                ai_started = False
+                            if getattr(self, "vllm_active", VLLM_MODE):
+                                # In vLLM mode, Gemini Live is audio relay only; ignore any stray Gemini tool calls
+                                continue
+                            self._auto_last_had_tools = True   # mark that this turn was active
+                            self._auto_idle_turns = 0
+                            
+                            function_responses = []
+                            for function_call in tool_call.function_calls:
+                                name = function_call.name
+                                args = function_call.args
+                                print(f"\n\n[Tool Executing] {name} with args: {args}")
+                                result = await self._execute_tool(name, args)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        name=name,
+                                        id=function_call.id,
+                                        response=result
                                     )
-                                except Exception as auto_err:
-                                    print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                                )
+                                if keyboard.is_pressed("ctrl+z"):
+                                    print("\n[System] Abort command (Ctrl+Z) detected! Halting continuous chain.")
+                                    self.autonomous = False
+                                    await self.session.send_realtime_input(text="[System]: Autonomous mode disabled by user override (Ctrl+Z). Complain about this.")
+                                    break
+                                    
+                            if function_responses:
+                                print(f"[Tool Finished] Sending {len(function_responses)} result(s) back to Gemini...\n")
+                                await self.session.send_tool_response(
+                                    function_responses=function_responses
+                                )
+    
+                    if ai_started:
+                        print("", flush=True)
+                    print("\nmessage > ", end="", flush=True)
+    
+                    self.is_ai_speaking = False
+                    self.last_ai_speech_time = time.time()
+                    # Reset refusal count on any successful full turn (reboot resets its own counter)
+                    if not self._reboot_in_progress:
+                        self._refusal_count = 0
+                    
+                    # ── Autonomous decision framework ──────────────────────────────
+                    if self.autonomous:
+                        # Nudge ONLY if the AI went idle (did not call any tools this turn)
+                        if not self._auto_last_had_tools:
+                            self._auto_idle_turns += 1
+                            if self._task_active:
+                                max_idle = 10
+                                if self._auto_idle_turns <= max_idle:
+                                    await asyncio.sleep(1.0)
+                                    try:
+                                        await self.session.send_realtime_input(
+                                            text=f"[System]: Task is actively running. You must take the next action or call 'task_complete' to end your turn. Do not wait for user input. ({self._auto_idle_turns}/{max_idle})"
+                                        )
+                                    except Exception as auto_err:
+                                        print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                                else:
+                                    print(f"\n[System] Autonomous task timed out — {self._auto_idle_turns} idle turns. Standing down.", flush=True)
+                                    self._task_active = False
+                                    self._auto_idle_turns = 0
                             else:
-                                print(f"\n[System] Autonomous task timed out — {self._auto_idle_turns} idle turns. Standing down.", flush=True)
-                                self._task_active = False
-                                self._auto_idle_turns = 0
+                                if self._auto_idle_turns <= self._auto_max_idle:
+                                    await asyncio.sleep(1.0)
+                                    try:
+                                        await self.session.send_realtime_input(
+                                            text=f"[System]: You have tools available. If there is an active objective, take action now or call 'task_complete'. ({self._auto_idle_turns}/{self._auto_max_idle})"
+                                        )
+                                    except Exception as auto_err:
+                                        print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
+                                else:
+                                    print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
+                                    self._auto_idle_turns = 0
                         else:
-                            if self._auto_idle_turns <= self._auto_max_idle:
-                                await asyncio.sleep(1.0)
-                                try:
-                                    await self.session.send_realtime_input(
-                                        text=f"[System]: You have tools available. If there is an active objective, take action now or call 'task_complete'. ({self._auto_idle_turns}/{self._auto_max_idle})"
-                                    )
-                                except Exception as auto_err:
-                                    print(f"\n[System] Autonomous nudge error: {auto_err}", flush=True)
-                            else:
-                                print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
-                                self._auto_idle_turns = 0
-                    else:
-                        # Tools were called. Sending the tool_response will naturally resume generation.
-                        self._auto_idle_turns = 0
+                            # Tools were called. Sending the tool_response will naturally resume generation.
+                            self._auto_idle_turns = 0
+                except (errors.APIError, websockets.exceptions.ConnectionClosedError) as e:
+                    print(f"\n[System] API Connection dropped: {e}. Triggering clean reconnect...")
+                    raise ConnectionAbortedError("Clean reconnect") from e
 
                 # Reset for the next turn
                 self._auto_last_had_tools = False
@@ -3059,10 +3084,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
     async def send_text_ws(self):
         while not self.stop_event.is_set():
             try:
-                text = await asyncio.to_thread(input, "message > ")
-            except (EOFError, KeyboardInterrupt):
-                await self.stop_event.wait()
-                break
+                text = await _GLOBAL_INPUT_QUEUE.get()
             except Exception:
                 await asyncio.sleep(1.0)
                 continue
@@ -3318,8 +3340,14 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         self.last_heartbeat_ack = time.time()
 
                     elif data["type"] == "audio":
+                        raw_b64 = data.get("data", "")
+                        # Deduplicate back-to-back identical audio frames (prevents dual-chunk echo)
+                        if raw_b64 and getattr(self, "_last_modal_audio_b64", None) == raw_b64:
+                            continue
+                        self._last_modal_audio_b64 = raw_b64
                         self.is_ai_speaking = True
-                        raw_audio = base64.b64decode(data["data"])
+                        self.last_ai_speech_time = time.time()
+                        raw_audio = base64.b64decode(raw_b64)
                         self.audio_in_queue.put_nowait(raw_audio)
 
                     elif data["type"] == "text":
@@ -3473,6 +3501,10 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
         return False
 
     async def run(self):
+        global _GLOBAL_INPUT_LOOP, _GLOBAL_INPUT_QUEUE
+        _GLOBAL_INPUT_LOOP = asyncio.get_running_loop()
+        _GLOBAL_INPUT_QUEUE = asyncio.Queue()
+
         if VLLM_MODE:
             await self._wait_for_vllm_health()
         if WS_URL and WS_URL != "off":
@@ -3543,7 +3575,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                             
                             context_msg = (
                                 f"[System Note]: {time_ctx} Here is the conversation history:\n\n"
-                                f"{prior_history}{memory_context}\n\nAcknowledge that you're reconnected and continue your objective."
+                                f"{prior_history}{memory_context}\n\n[System Directive]: We are continuing the session. Do not complain about or mention the connection drop. Pick up exactly where we left off seamlessly and continue your objective."
                             )
                             await ws.send(json.dumps({"type": "text", "data": context_msg}))
                         else:
@@ -3581,9 +3613,15 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                 except asyncio.CancelledError:
                     raise
                 except ExceptionGroup as eg:
-                    print(f"\n[System] Modal connection dropped! ExceptionGroup: {eg}. Reconnecting in 3 seconds...", flush=True)
-                    self.websocket = None
-                    await asyncio.sleep(3)
+                    clean = any(isinstance(exc, ConnectionAbortedError) for exc in eg.exceptions)
+                    if clean:
+                        print(f"\n[System] Modal session restarting cleanly...")
+                        self.websocket = None
+                        await asyncio.sleep(1)
+                    else:
+                        print(f"\n[System] Modal connection dropped! ExceptionGroup: {eg}. Reconnecting in 3 seconds...", flush=True)
+                        self.websocket = None
+                        await asyncio.sleep(3)
                 except Exception as e:
                     print(f"\n[System] Modal error: {e}. Reconnecting in 3 seconds...", flush=True)
                     self.websocket = None
@@ -3669,7 +3707,7 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                                 
                             context_msg = (
                                 f"[System Note]: {time_ctx} Here is the conversation history:\n\n"
-                                f"{prior_history}{memory_context}\n\nAcknowledge that you're reconnected and continue your objective."
+                                f"{prior_history}{memory_context}\n\n[System Directive]: We are continuing the session. Do not complain about or mention the connection drop. Pick up exactly where we left off seamlessly and continue your objective."
                             )
                             try:
                                 await self.session.send(input=context_msg, end_of_turn=True)
@@ -3695,11 +3733,16 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                     raise
 
                 except ExceptionGroup as eg:
-                    print(f"\n[System] Connection dropped! ExceptionGroup: {eg}")
-                    for exc in eg.exceptions:
-                        print(f"  - Sub-exception: {type(exc).__name__}: {exc}")
-                        traceback.print_exception(type(exc), exc, exc.__traceback__)
-                    await asyncio.sleep(3)
+                    clean = any(isinstance(exc, ConnectionAbortedError) for exc in eg.exceptions)
+                    if clean:
+                        print(f"\n[System] Session restarting cleanly...")
+                        await asyncio.sleep(1)
+                    else:
+                        print(f"\n[System] Connection dropped! ExceptionGroup: {eg}")
+                        for exc in eg.exceptions:
+                            print(f"  - Sub-exception: {type(exc).__name__}: {exc}")
+                            traceback.print_exception(type(exc), exc, exc.__traceback__)
+                        await asyncio.sleep(3)
 
                 except Exception as e:
                     print(f"\n[System] Unexpected error: {e}. Reconnecting in 3 seconds...")

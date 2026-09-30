@@ -89,6 +89,7 @@ class MemoryManager:
                 defaults = [
                     ("identity", "name", "Josh", 1.0, "system_init"),
                     ("identity", "role", "Creator & Lead Architect of AlphaLive", 1.0, "system_init"),
+                    ("identity", "email", "josh64perry@gmail.com", 1.0, "system_init"),
                     ("environment", "operating_system", "Windows 11", 1.0, "system_init"),
                     ("environment", "shell", "PowerShell", 1.0, "system_init"),
                     ("preferences", "communication_style", "Direct, unfiltered, laid-back, highly technically competent", 1.0, "system_init"),

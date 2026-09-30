@@ -71,9 +71,11 @@ async def websocket_endpoint(websocket: WebSocket):
                             turn = session.receive()
                             async for response in turn:
                                 # ── Audio (primary path: response.data) ──────
+                                audio_sent = False
                                 if response.data:
                                     b64_audio = base64.b64encode(response.data).decode("utf-8")
                                     await send_json({"type": "audio", "data": b64_audio})
+                                    audio_sent = True
 
                                 # ── Tool calls (LiveServerToolCall - primary Google GenAI Live path) ──
                                 tc = getattr(response, "tool_call", None)
@@ -123,14 +125,16 @@ async def websocket_endpoint(websocket: WebSocket):
 
                                 sc = getattr(response, "server_content", None)
                                 if sc:
-                                    # ── model_turn parts (text + function_call + inline audio) ──
+                                    # ── model_turn parts (text + function_call + inline audio fallback) ──
                                     if getattr(sc, "model_turn", None):
                                         for part in sc.model_turn.parts:
-                                            # Inline audio blob (fallback)
-                                            inline_data = getattr(part, "inline_data", None)
-                                            if inline_data and hasattr(inline_data, "data"):
-                                                b64_audio = base64.b64encode(inline_data.data).decode("utf-8")
-                                                await send_json({"type": "audio", "data": b64_audio})
+                                            # Inline audio blob (fallback only if response.data was not sent)
+                                            if not audio_sent:
+                                                inline_data = getattr(part, "inline_data", None)
+                                                if inline_data and hasattr(inline_data, "data") and inline_data.data:
+                                                    b64_audio = base64.b64encode(inline_data.data).decode("utf-8")
+                                                    await send_json({"type": "audio", "data": b64_audio})
+                                                    audio_sent = True
                                             # Text
                                             if getattr(part, "text", None):
                                                 await send_json({"type": "text", "data": part.text})

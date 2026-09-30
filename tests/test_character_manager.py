@@ -137,6 +137,29 @@ class TestCharacterManager(unittest.TestCase):
         self.assertEqual(new_submission, 0)
         self.assertEqual(self.cm.get_character("Eden")["submission"], 0)
 
+    def test_missing_coverage(self):
+        # 93: if not name in get_character
+        self.assertIsNone(self.cm.get_character(None))
+        self.assertIsNone(self.cm.get_character(""))
+
+        # 158: if not name in update_metrics
+        self.assertFalse(self.cm.update_metrics(""))
+
+        # 172-173: nsfw_description in update_metrics
+        self.cm.add_character("TestMissing", arousal=0, submission=0)
+        self.assertTrue(self.cm.update_metrics("TestMissing", nsfw_description="test desc"))
+        char = self.cm.get_character("TestMissing")
+        self.assertEqual(char["nsfw_description"], "test desc")
+
+        # 176: if not updates in update_metrics
+        self.assertTrue(self.cm.update_metrics("TestMissing"))
+
+        # 194: if not c in adjust_arousal
+        self.assertEqual(self.cm.adjust_arousal("NonExistent", 10), 0)
+
+        # 203: if not c in adjust_submission
+        self.assertEqual(self.cm.adjust_submission("NonExistent", 10), 0)
+
     def test_exception_handling(self):
         with patch.object(self.cm, '_get_conn', side_effect=sqlite3.Error("Test DB Error")):
             self.assertFalse(self.cm.add_character("ErrorChar"))

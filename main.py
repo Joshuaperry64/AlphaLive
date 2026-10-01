@@ -33,21 +33,41 @@ def main():
 
     if os.path.exists(target_python) and not in_venv:
         print(f"[AlphaLive] Routing through venv: {target_python}")
-        # Relaunch gui.py using the venv
-        gui_script = os.path.join(base_dir, "ui", "gui.py")
         try:
-            ret = subprocess.call([target_python, gui_script])
+            # Pass all arguments through to the venv process
+            ret = subprocess.call([target_python, os.path.abspath(__file__)] + sys.argv[1:])
             sys.exit(ret)
         except KeyboardInterrupt:
             sys.exit(0)
     else:
-        # We are already in the venv (or venv doesn't exist, which will probably crash anyway without deps)
-        print("[AlphaLive] Starting GUI...")
-        try:
+        # We are running inside the venv
+        cfg_path = os.path.join(base_dir, "config.json")
+        default_sys = None
+        if os.path.exists(cfg_path):
+            try:
+                import json
+                with open(cfg_path, "r") as f:
+                    cfg = json.load(f)
+                    default_sys = cfg.get("Global", {}).get("DefaultSystem")
+            except Exception:
+                pass
+
+        if "--live" in sys.argv:
             from ui import gui
             gui.main()
-        except KeyboardInterrupt:
-            sys.exit(0)
+        elif "--agent" in sys.argv:
+            from ui import agent_gui
+            agent_gui.main()
+        elif default_sys == "alphalive" and "--launcher" not in sys.argv:
+            from ui import gui
+            gui.main()
+        elif default_sys == "alpha_agent" and "--launcher" not in sys.argv:
+            from ui import agent_gui
+            agent_gui.main()
+        else:
+            print("[AlphaLive] Opening System Selector Launcher...", flush=True)
+            from ui import launcher
+            launcher.show_launcher()
 
 if __name__ == "__main__":
     try:

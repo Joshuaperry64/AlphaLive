@@ -677,6 +677,14 @@ tools = [
                 ),
             ),
             types.FunctionDeclaration(
+                name="reset_calibration",
+                description="Immediately reset all learned mouse coordinate calibration offsets back to 0. Call this if mouse clicks are drifting or clicking off-target.",
+                parameters=genai.types.Schema(
+                    type=genai.types.Type.OBJECT,
+                    properties={},
+                ),
+            ),
+            types.FunctionDeclaration(
                 name="write_diary_entry",
                 description="Log a diary entry, session summary, or notable event to episodic memory.",
                 parameters=genai.types.Schema(
@@ -1216,9 +1224,9 @@ class CoordinateCalibrator:
         dx = float(actual_x - estimated_x)
         dy = float(actual_y - estimated_y)
 
-        # Outlier rejection: if error is huge (> 500px), it's likely a misidentification or different element
-        if abs(dx) > 500 or abs(dy) > 500:
-            print(f"[Calibrator] Outlier delta rejected: dx={dx:+.1f}, dy={dy:+.1f} for '{label}'", flush=True)
+        # Outlier rejection: if error exceeds 60px, it is definitely a different UI element or context match
+        if abs(dx) > 60 or abs(dy) > 60:
+            print(f"[Calibrator] Outlier delta rejected: dx={dx:+.1f}, dy={dy:+.1f} for '{label}' (exceeds 60px threshold)", flush=True)
             return None
 
         self.sample_count += 1
@@ -1234,6 +1242,10 @@ class CoordinateCalibrator:
         else:
             self.offset_x = (1.0 - alpha) * self.offset_x + alpha * dx
             self.offset_y = (1.0 - alpha) * self.offset_y + alpha * dy
+
+        # Clamp offsets to +-40px to prevent runaway drift
+        self.offset_x = max(-40.0, min(40.0, self.offset_x))
+        self.offset_y = max(-40.0, min(40.0, self.offset_y))
 
         obs = {
             "label": str(label),
@@ -2235,8 +2247,15 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                                     print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
                                     self._auto_idle_turns = 0
                         else:
-                            # Tools were called. Sending the tool_response will naturally resume generation.
+                            # Tools were called. If task is actively running, nudge to continue multi-step execution!
                             self._auto_idle_turns = 0
+                            if self._task_active:
+                                try:
+                                    await self.session.send_realtime_input(
+                                        text="[System]: Action completed. Continue executing the next step of your objective without waiting for user input. If finished, call task_complete."
+                                    )
+                                except Exception:
+                                    pass
                 except (errors.APIError, websockets.exceptions.ConnectionClosedError) as e:
                     print(f"\n[System] API Connection dropped: {e}. Triggering clean reconnect...")
                     raise ConnectionAbortedError("Clean reconnect") from e
@@ -2612,8 +2631,6 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         explicit_estimate = True
                     except (ValueError, TypeError):
                         pass
-                elif self._last_commanded_pos is not None:
-                    est_x, est_y = self._last_commanded_pos
 
                 q = query.lower()
                 candidates = []
@@ -2698,12 +2715,11 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                     bx, by, bw, bh = best["bx"], best["by"], best["bw"], best["bh"]
                     matched_text = best["text"]
 
-                    # Perform coordinate learning if estimated coordinates are available
+                    # Perform coordinate learning ONLY if caller EXPLICITLY passed estimated_x and estimated_y
                     learn_msg = ""
-                    if est_x is not None and est_y is not None:
+                    if explicit_estimate and est_x is not None and est_y is not None:
                         dist = math.hypot(cx - est_x, cy - est_y)
-                        max_dist = 500 if explicit_estimate else 300
-                        if dist <= max_dist:
+                        if dist <= 60:
                             obs = self.calibrator.record_observation(est_x, est_y, cx, cy, label=matched_text)
                             if obs:
                                 learn_msg = (
@@ -2712,7 +2728,6 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                                     f"dx={self.calibrator.offset_x:+.1f}, dy={self.calibrator.offset_y:+.1f} "
                                     f"across {self.calibrator.sample_count} sample(s)]"
                                 )
-                                self._last_commanded_pos = None
 
                     if click:
                         def _do_ocr_click():
@@ -2826,6 +2841,10 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                         f"Recent observation history: {self.calibrator.history[-5:]}"
                     )
                 }
+
+            elif name == "reset_calibration":
+                self.calibrator.reset()
+                return {"result": "Visual coordinate calibration offsets have been successfully reset to dx=0.0, dy=0.0."}
 
             # ── Memory & Persona ───────────────────────────────────────────────────────
             elif name == "memorize_fact":
@@ -3431,8 +3450,16 @@ MANDATORY DIRECTIVE: You MUST speak, act, react, and respond consistently with {
                                         print(f"\n[System] Autonomous mode standing down — {self._auto_idle_turns} consecutive idle turns. Awaiting user command.", flush=True)
                                         self._auto_idle_turns = 0
                             else:
-                                # Tools were called. Sending the tool_response will naturally resume generation.
+                                # Tools were called. If task is actively running, nudge to continue multi-step execution!
                                 self._auto_idle_turns = 0
+                                if self._task_active:
+                                    try:
+                                        await self.send_ws_json({
+                                            "type": "text",
+                                            "data": "[System]: Action completed. Continue executing the next step of your objective without waiting for user input. If finished, call task_complete."
+                                        })
+                                    except Exception:
+                                        pass
 
                         # Reset for the next turn
                         self._auto_last_had_tools = False

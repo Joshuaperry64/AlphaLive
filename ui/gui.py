@@ -5060,6 +5060,19 @@ class MainWindow(QMainWindow):
                 self._status_overlay.show()
 
     def _start_calibration(self):
+        try:
+            import sqlite3
+            db_path = SCRIPT_DIR / "memory" / "memory.db"
+            if db_path.exists():
+                conn = sqlite3.connect(str(db_path))
+                conn.execute("UPDATE core_identity SET trait_value = '0.0' WHERE trait_name IN ('visual_offset_x', 'visual_offset_y')")
+                conn.execute("UPDATE core_identity SET trait_value = '0' WHERE trait_name = 'visual_sample_count'")
+                conn.commit()
+                conn.close()
+                self._slog("Visual calibration database offsets reset to 0.0.", "system")
+        except Exception as e:
+            self._slog(f"Warning resetting calibration in DB: {e}", "warning")
+
         if self._calib_overlay is not None:
             self._calib_overlay.close()
         self._calib_overlay = CalibrationOverlay()
@@ -5462,8 +5475,15 @@ class CoordinateOverlay(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
         w, h = self.width(), self.height()
+        screen = self.screen()
+        dpr = screen.devicePixelRatio() if screen else 1.0
 
-        # 1. Coordinate Grid Lines every 200px
+        phys_w = int(round(w * dpr))
+        phys_h = int(round(h * dpr))
+        phys_x = int(round(x * dpr))
+        phys_y = int(round(y * dpr))
+
+        # 1. Coordinate Grid Lines every 200 physical px
         grid_pen = QPen(QColor(0, 200, 255, 35))
         grid_pen.setStyle(Qt.PenStyle.DashLine)
         grid_pen.setWidth(1)
@@ -5471,19 +5491,21 @@ class CoordinateOverlay(QWidget):
         axis_pen = QPen(QColor(0, 255, 200, 110))
         painter.setFont(QFont("Consolas", 8))
 
-        # Vertical grid ticks
-        for gx in range(200, w, 200):
+        # Vertical grid ticks at physical intervals
+        for pgx in range(200, phys_w, 200):
+            lgx = int(round(pgx / dpr))
             painter.setPen(grid_pen)
-            painter.drawLine(gx, 0, gx, h)
+            painter.drawLine(lgx, 0, lgx, h)
             painter.setPen(axis_pen)
-            painter.drawText(gx + 3, 14, f"X:{gx}")
+            painter.drawText(lgx + 3, 14, f"X:{pgx}")
 
-        # Horizontal grid ticks
-        for gy in range(200, h, 200):
+        # Horizontal grid ticks at physical intervals
+        for pgy in range(200, phys_h, 200):
+            lgy = int(round(pgy / dpr))
             painter.setPen(grid_pen)
-            painter.drawLine(0, gy, w, gy)
+            painter.drawLine(0, lgy, w, lgy)
             painter.setPen(axis_pen)
-            painter.drawText(6, gy - 3, f"Y:{gy}")
+            painter.drawText(6, lgy - 3, f"Y:{pgy}")
 
         # 2. Dynamic Crosshair
         cross_pen = QPen(QColor(255, 0, 80, 220))
@@ -5497,12 +5519,12 @@ class CoordinateOverlay(QWidget):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(QPoint(x, y), 3, 3)
 
-        # 3. Floating Coordinate Badge beside cursor
-        badge_text = f"X: {x}, Y: {y}"
+        # 3. Floating Coordinate Badge beside cursor (displays PHYSICAL pixels)
+        badge_text = f"X: {phys_x}, Y: {phys_y}"
         painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
         painter.setBrush(QBrush(QColor(10, 15, 25, 210)))
         painter.setPen(QPen(QColor(0, 255, 220, 180)))
-        painter.drawRoundedRect(x + 12, y + 12, 108, 22, 4, 4)
+        painter.drawRoundedRect(x + 12, y + 12, 126, 22, 4, 4)
         painter.drawText(x + 18, y + 27, badge_text)
 
 class CalibrationOverlay(QWidget):
@@ -5608,7 +5630,11 @@ class CalibrationOverlay(QWidget):
             if self.page == 1:
                 painter.setPen(Qt.GlobalColor.white)
                 painter.setFont(QFont("Arial", 10, QFont.Weight.Bold))
-                coord_text = f"{rect.center().x()}, {rect.center().y()}"
+                screen = self.screen()
+                dpr = screen.devicePixelRatio() if screen else 1.0
+                phys_cx = int(round(rect.center().x() * dpr))
+                phys_cy = int(round(rect.center().y() * dpr))
+                coord_text = f"{phys_cx}, {phys_cy}"
                 painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, coord_text)
                 
         # Draw blue dots for click history

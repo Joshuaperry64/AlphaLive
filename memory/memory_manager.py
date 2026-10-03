@@ -87,9 +87,8 @@ class MemoryManager:
             cursor.execute('SELECT COUNT(*) AS cnt FROM user_profile')
             if cursor.fetchone()['cnt'] == 0:
                 defaults = [
-                    ("identity", "name", "Josh", 1.0, "system_init"),
+                    ("identity", "name", "Architect", 1.0, "system_init"),
                     ("identity", "role", "Creator & Lead Architect of AlphaLive", 1.0, "system_init"),
-                    ("identity", "email", "josh64perry@gmail.com", 1.0, "system_init"),
                     ("environment", "operating_system", "Windows 11", 1.0, "system_init"),
                     ("environment", "shell", "PowerShell", 1.0, "system_init"),
                     ("preferences", "communication_style", "Direct, unfiltered, laid-back, highly technically competent", 1.0, "system_init"),
@@ -419,7 +418,7 @@ class MemoryManager:
                 # Store in user profile
                 self.set_user_attribute(key, val, category=cat, source=source)
                 # Store in knowledge graph
-                self.memorize_fact("josh", kg_pred, val, source=source)
+                self.memorize_fact("architect", kg_pred, val, source=source)
                 extracted.append({"key": key, "category": cat, "value": val, "predicate": kg_pred})
 
         return extracted
@@ -435,8 +434,8 @@ if __name__ == "__main__":
     print("Personality:", mm.get_personality())
     
     # Test Facts
-    mm.memorize_fact("josh", "likes", "cyberpunk aesthetic", "startup_script")
-    print("Facts about Josh:", mm.recall_knowledge("josh"))
+    mm.memorize_fact("architect", "likes", "cyberpunk aesthetic", "startup_script")
+    print("Facts about Architect:", mm.recall_knowledge("architect"))
     
     # Test User Profile
     mm.set_user_attribute("favorite_framework", "FastAPI / Modal", "tech_stack")

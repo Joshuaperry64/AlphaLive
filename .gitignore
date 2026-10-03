@@ -9,3 +9,6 @@ credentials.json
 oauth.json
 token.json
 *.db-journal
+alphacore.txt
+*.db
+*.sqlite

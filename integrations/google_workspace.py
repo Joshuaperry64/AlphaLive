@@ -123,7 +123,7 @@ class GoogleWorkspaceManager:
 
     def start_auth_flow(self, port: int = 0) -> Dict[str, Any]:
         """
-        Interactive OAuth 2.0 flow: opens browser for Josh to grant Google Workspace access.
+        Interactive OAuth 2.0 flow: opens browser for Architect to grant Google Workspace access.
         Saves token to token.json upon approval.
         """
         if not self.is_available():

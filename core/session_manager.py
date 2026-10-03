@@ -180,7 +180,7 @@ class SessionManager:
 
                 parts = []
                 if user_prof:
-                    parts.append("User Profile (Josh):\n" + "\n".join(f"  - {k}: {v}" for k, v in user_prof.items()))
+                    parts.append("User Profile (Architect):\n" + "\n".join(f"  - {k}: {v}" for k, v in user_prof.items()))
                 if traits:
                     parts.append("Core Personality Traits:\n" + "\n".join(f"  - {k}: {v}" for k, v in traits.items()))
                 if episodes:
@@ -195,7 +195,7 @@ class SessionManager:
 
         context_blocks = [
             f"[System Note - Active Session Context: '{clean}']",
-            "You are resuming an existing AlphaLive conversation session with Josh. Below is the prior conversation history and personal memory:",
+            "You are resuming an existing AlphaLive conversation session with Architect. Below is the prior conversation history and personal memory:",
         ]
 
         if prior_history:
@@ -204,7 +204,7 @@ class SessionManager:
             context_blocks.append(memory_summary)
 
         context_blocks.append(
-            "\n[System Directive]: Continue this session seamlessly with Josh. You have complete recall of all prior messages and actions above. Do not repeat greetings or announce that you've restored the session; immediately respond to Josh's latest instruction."
+            "\n[System Directive]: Continue this session seamlessly with Architect. You have complete recall of all prior messages and actions above. Do not repeat greetings or announce that you've restored the session; immediately respond to Architect's latest instruction."
         )
 
         return "\n\n".join(context_blocks)

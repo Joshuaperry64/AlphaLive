@@ -37,43 +37,43 @@ class TestMemoryManager(unittest.TestCase):
     # ── Knowledge Graph Tests ─────────────────────────────────────────────────
 
     def test_memorize_fact_success(self):
-        result = self.mm.memorize_fact("josh", "likes", "cyberpunk")
+        result = self.mm.memorize_fact("architect", "likes", "cyberpunk")
         self.assertTrue(result)
 
-        facts = self.mm.recall_knowledge("josh")
+        facts = self.mm.recall_knowledge("architect")
         self.assertEqual(len(facts), 1)
-        self.assertEqual(facts[0]['subject'], "josh")
+        self.assertEqual(facts[0]['subject'], "architect")
         self.assertEqual(facts[0]['predicate'], "likes")
         self.assertEqual(facts[0]['object'], "cyberpunk")
 
     def test_memorize_fact_strips_and_lowercases(self):
-        result = self.mm.memorize_fact("  JOSH  ", " LiKeS ", " CyberPunk   ")
+        result = self.mm.memorize_fact("  ARCHITECT  ", " LiKeS ", " CyberPunk   ")
         self.assertTrue(result)
 
-        facts = self.mm.recall_knowledge("josh")
+        facts = self.mm.recall_knowledge("architect")
         self.assertEqual(len(facts), 1)
-        self.assertEqual(facts[0]['subject'], "josh")
+        self.assertEqual(facts[0]['subject'], "architect")
         self.assertEqual(facts[0]['predicate'], "likes")
         self.assertEqual(facts[0]['object'], "cyberpunk")
 
     def test_memorize_fact_default_source(self):
-        result = self.mm.memorize_fact("josh", "likes", "cyberpunk")
+        result = self.mm.memorize_fact("architect", "likes", "cyberpunk")
         self.assertTrue(result)
 
-        facts = self.mm.recall_knowledge("josh")
+        facts = self.mm.recall_knowledge("architect")
         self.assertEqual(facts[0]['source'], "conversation")
 
     def test_memorize_fact_custom_source(self):
-        result = self.mm.memorize_fact("josh", "likes", "cyberpunk", source="system_prompt")
+        result = self.mm.memorize_fact("architect", "likes", "cyberpunk", source="system_prompt")
         self.assertTrue(result)
 
-        facts = self.mm.recall_knowledge("josh")
+        facts = self.mm.recall_knowledge("architect")
         self.assertEqual(facts[0]['source'], "system_prompt")
 
     @patch.object(MemoryManager, '_get_conn')
     def test_memorize_fact_exception_handling(self, mock_get_conn):
         mock_get_conn.side_effect = sqlite3.Error("Test DB Error")
-        result = self.mm.memorize_fact("josh", "likes", "cyberpunk")
+        result = self.mm.memorize_fact("architect", "likes", "cyberpunk")
         self.assertFalse(result)
 
     def test_recall_knowledge_returns_facts(self):
@@ -102,25 +102,25 @@ class TestMemoryManager(unittest.TestCase):
         self.assertEqual(len(facts3), 1)
 
     def test_get_all_facts(self):
-        self.mm.memorize_fact("josh", "likes", "pizza")
+        self.mm.memorize_fact("architect", "likes", "pizza")
         self.mm.memorize_fact("alice", "likes", "sushi")
         facts = self.mm.get_all_facts()
         self.assertEqual(len(facts), 2)
 
     def test_search_knowledge(self):
-        self.mm.memorize_fact("josh", "likes", "pizza")
+        self.mm.memorize_fact("architect", "likes", "pizza")
         self.mm.memorize_fact("alice", "likes", "sushi")
         results = self.mm.search_knowledge("pizza")
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["subject"], "josh")
+        self.assertEqual(results[0]["subject"], "architect")
 
     def test_delete_fact(self):
-        self.mm.memorize_fact("josh", "likes", "pizza")
-        facts = self.mm.recall_knowledge("josh")
+        self.mm.memorize_fact("architect", "likes", "pizza")
+        facts = self.mm.recall_knowledge("architect")
         fact_id = facts[0]["id"]
         result = self.mm.delete_fact(fact_id)
         self.assertTrue(result)
-        self.assertEqual(len(self.mm.recall_knowledge("josh")), 0)
+        self.assertEqual(len(self.mm.recall_knowledge("architect")), 0)
 
     # ── Core Identity Tests ───────────────────────────────────────────────────
 
@@ -304,7 +304,7 @@ class TestMemoryManager(unittest.TestCase):
     def test_search_personal_vault(self):
         # Seed some data
         self.mm.set_user_attribute("hobby", "playing guitar")
-        self.mm.memorize_fact("josh", "owns", "acoustic guitar")
+        self.mm.memorize_fact("architect", "owns", "acoustic guitar")
         self.mm.write_diary_entry("Practiced guitar for an hour today.", session_name="session_1")
 
         results = self.mm.search_personal_vault("guitar")
@@ -320,7 +320,7 @@ class TestMemoryManager(unittest.TestCase):
         self.assertEqual(results["episodic_memory"][0]["content"], "Practiced guitar for an hour today.")
 
         self.assertIn("hobby=playing guitar", results["formatted_summary"])
-        self.assertIn("(josh owns acoustic guitar)", results["formatted_summary"])
+        self.assertIn("(architect owns acoustic guitar)", results["formatted_summary"])
         self.assertIn("[session_1] Practiced guitar for an hour today.", results["formatted_summary"])
 
     def test_search_personal_vault_exception(self):

@@ -13,7 +13,7 @@ def _excepthook(exc_type, exc_value, exc_traceback):
 sys.excepthook = _excepthook
 
 def main():
-    print("[AlphaLive] Booting through main.py entrypoint...")
+    print("[AlphaLive] Booting AlphaCore Autonomous Desktop Agent...")
     base_dir = os.path.dirname(os.path.abspath(__file__))
     venv_path = os.path.join(base_dir, ".venv")
     is_windowless = "pythonw" in os.path.basename(sys.executable).lower()
@@ -34,44 +34,30 @@ def main():
     if os.path.exists(target_python) and not in_venv:
         print(f"[AlphaLive] Routing through venv: {target_python}")
         try:
-            # Pass all arguments through to the venv process
             ret = subprocess.call([target_python, os.path.abspath(__file__)] + sys.argv[1:])
             sys.exit(ret)
         except KeyboardInterrupt:
             sys.exit(0)
     else:
-        # We are running inside the venv
-        cfg_path = os.path.join(base_dir, "config.json")
-        default_sys = None
-        if os.path.exists(cfg_path):
-            try:
-                import json
-                with open(cfg_path, "r") as f:
-                    cfg = json.load(f)
-                    default_sys = cfg.get("Global", {}).get("DefaultSystem")
-            except Exception:
-                pass
+        # Start Alexa Ingress Webhook Listener in background thread
+        try:
+            from integrations.alexa_ingress import start_ingress_server_thread
+            start_ingress_server_thread(host="0.0.0.0", port=8765)
+        except Exception as err:
+            print(f"[AlphaLive] Warning: Could not start Ingress Listener: {err}")
 
-        if "--live" in sys.argv:
-            from ui import gui
-            gui.main()
-        elif "--agent" in sys.argv:
-            from ui import agent_gui
-            agent_gui.main()
-        elif default_sys == "alphalive" and "--launcher" not in sys.argv:
-            from ui import gui
-            gui.main()
-        elif default_sys == "alpha_agent" and "--launcher" not in sys.argv:
-            from ui import agent_gui
-            agent_gui.main()
-        else:
-            print("[AlphaLive] Opening System Selector Launcher...", flush=True)
-            from ui import launcher
-            launcher.show_launcher()
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("alphacore.alphalive.agent.v4")
+        except Exception:
+            pass
+
+        # Directly launch AlphaCore Autonomous Agent GUI
+        from ui import agent_gui
+        agent_gui.main()
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
         sys.exit(0)
-

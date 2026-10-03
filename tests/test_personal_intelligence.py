@@ -26,10 +26,10 @@ class TestPersonalIntelligence(unittest.TestCase):
         self.tmp_dir.cleanup()
 
     def test_user_profile_defaults_seeded(self):
-        """Verify default Josh profile attributes are seeded on first DB init."""
+        """Verify default Architect profile attributes are seeded on first DB init."""
         prof = self.mm.get_user_profile()
         self.assertIn("name", prof)
-        self.assertEqual(prof["name"], "Josh")
+        self.assertEqual(prof["name"], "Architect")
         self.assertIn("operating_system", prof)
         self.assertEqual(prof["operating_system"], "Windows 11")
         self.assertIn("role", prof)
@@ -60,7 +60,7 @@ class TestPersonalIntelligence(unittest.TestCase):
     def test_search_personal_vault(self):
         """Test unified multi-table search across profile, facts, and episodes."""
         self.mm.set_user_attribute("primary_framework", "PyTorch & Modal", category="tech")
-        self.mm.memorize_fact("josh", "develops", "modal gpu engines", source="test")
+        self.mm.memorize_fact("architect", "develops", "modal gpu engines", source="test")
         self.mm.write_diary_entry("Deployed modal proxy successfully today.", session_name="test_session")
 
         res = self.mm.search_personal_vault("modal")
@@ -75,19 +75,19 @@ class TestPersonalIntelligence(unittest.TestCase):
     def test_auto_extract_facts(self):
         """Test passive fact and preference extraction from user speech."""
         sample_utterance = (
-            "I really like high-performance GPUs and my email is josh@example.com. "
+            "I really like high-performance GPUs and my email is architect@example.com. "
             "Also remember that the server port is 8080."
         )
         extracted = self.mm.auto_extract_facts(sample_utterance, source="test_speech")
         self.assertGreaterEqual(len(extracted), 2)
 
         # Verify extracted preference stored in knowledge graph
-        facts = self.mm.recall_knowledge("josh")
+        facts = self.mm.recall_knowledge("architect")
         self.assertTrue(any(f["predicate"] in ("likes", "email", "remember") for f in facts))
 
         # Verify email stored in user profile
         email = self.mm.get_user_attribute("email")
-        self.assertEqual(email, "josh@example.com")
+        self.assertEqual(email, "architect@example.com")
 
     def test_google_workspace_unauthenticated_safety(self):
         """Verify GoogleWorkspaceManager behaves safely and gracefully when unauthenticated."""
@@ -160,7 +160,7 @@ class TestPersonalIntelligence(unittest.TestCase):
         # 1. Test get_user_profile tool
         res = asyncio.run(loop._execute_tool("get_user_profile", {}))
         self.assertIn("result", res)
-        self.assertEqual(res["result"].get("name"), "Josh")
+        self.assertEqual(res["result"].get("name"), "Architect")
 
         # 2. Test update_user_profile tool
         update_res = asyncio.run(loop._execute_tool("update_user_profile", {
@@ -172,7 +172,7 @@ class TestPersonalIntelligence(unittest.TestCase):
         self.assertIn("hobby", self.mm.get_user_profile())
 
         # 3. Test search_personal_vault tool
-        vault_res = asyncio.run(loop._execute_tool("search_personal_vault", {"query": "Josh"}))
+        vault_res = asyncio.run(loop._execute_tool("search_personal_vault", {"query": "Architect"}))
         self.assertIn("result", vault_res)
         self.assertIn("user_profile", vault_res["result"])
 

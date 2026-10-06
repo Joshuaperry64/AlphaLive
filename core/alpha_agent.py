@@ -1218,6 +1218,20 @@ class DesktopController:
             return f"Error showing notification: {e}"
 
 # ── Alpha Autonomous Agent Core ───────────────────────────────────────────────
+def normalize_endpoint(url: str) -> str:
+    """Normalize a pasted endpoint URL: add https:// if missing and append /v1 automatically."""
+    import re as _re
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if not _re.match(r"^https?://", url, _re.I):
+        url = "https://" + url
+    url = url.rstrip("/")
+    if not url.endswith("/v1"):
+        url += "/v1"
+    return url
+
+
 MOOD_PRESETS = {
     "default": "Default / Direct Alpha: sharp, confident, concise, zero hesitation, highly capable, razor-sharp execution.",
     "sassy": "Sassy & Playful: witty, playfully sarcastic, banter-heavy, sharp humor, teasing quips, fun and cheeky remarks.",
@@ -1261,8 +1275,9 @@ class AlphaAgent:
 
         # Cognitive Backend: 'gemini' or 'modal_qwen'
         self.backend_type = "gemini"
-        self.modal_endpoint = os.getenv("ALPHALIVE_MODAL_ENDPOINT", "")
-        self.modal_model = "huihui-qwen3-14b-awq"
+        self.modal_endpoint = normalize_endpoint(os.getenv("ALPHALIVE_MODAL_ENDPOINT", ""))
+        self.modal_model = ""  # auto-detected from /v1/models
+        self.modal_api_key = ""
         self.openai_client = None
 
         self.voice_mode = "leda"
@@ -1276,7 +1291,11 @@ class AlphaAgent:
                         self.backend_type = b
                     me = cfg.get("Global", {}).get("ModalEndpoint")
                     if me:
-                        self.modal_endpoint = me
+                        self.modal_endpoint = normalize_endpoint(me)
+                    mm = cfg.get("Global", {}).get("ModalModel")
+                    if mm:
+                        self.modal_model = mm
+                    self.modal_api_key = cfg.get("Global", {}).get("ModalApiKey", "") or ""
                     dc = cfg.get("Global", {}).get("DesktopControl", "enabled")
                     self.desktop_control = (str(dc).lower() in ("enabled", "true"))
                     self.current_mood = cfg.get("Global", {}).get("Mood", "default")
@@ -1395,7 +1414,7 @@ class AlphaAgent:
         import urllib.request
         import urllib.error
 
-        health_url = self.modal_endpoint.rstrip("/v1").rstrip("/") + "/health"
+        health_url = (self.modal_endpoint[:-3] if self.modal_endpoint.endswith("/v1") else self.modal_endpoint).rstrip("/") + "/health"
         start_t = time.time()
         try:
             def _probe():
@@ -1956,6 +1975,23 @@ class AlphaAgent:
                 except Exception:
                     pass
 
+    def _detect_modal_model(self) -> str:
+        """Ask the custom endpoint which model it serves (GET /v1/models); falls back to 'default'."""
+        import urllib.request
+        try:
+            headers = {"User-Agent": "AlphaAgent/4.0"}
+            if self.modal_api_key:
+                headers["Authorization"] = f"Bearer {self.modal_api_key}"
+            req = urllib.request.Request(self.modal_endpoint.rstrip("/") + "/models", headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("data") or []
+            if models and models[0].get("id"):
+                return models[0]["id"]
+        except Exception as e:
+            print(f"[AlphaAgent] Model auto-detect failed: {e}", flush=True)
+        return "default"
+
     def get_system_prompt(self) -> str:
         """Compose the full system instruction with dynamic mood, character persona, and user knowledge."""
         base = _load_alphacore_system_prompt()
@@ -1990,8 +2026,16 @@ class AlphaAgent:
             except Exception:
                 pass
 
-        return base + overlay
+        # User-defined custom instructions (Settings tab) appended to the system prompt
+        try:
+            with open(os.path.join(ROOT_DIR, "config.json"), "r", encoding="utf-8") as f:
+                custom = (json.load(f).get("Global", {}).get("CustomInstructions") or "").strip()
+            if custom:
+                overlay += f"\n[CUSTOM INSTRUCTIONS]\n{custom}\n"
+        except Exception:
+            pass
 
+        return base + overlay
     def switch_session(self, session_name: str) -> str:
         """Switch active session and persist in config."""
         if self.session_manager:
@@ -2885,9 +2929,11 @@ class AlphaAgent:
                 import openai
                 self.openai_client = openai.AsyncOpenAI(
                     base_url=self.modal_endpoint,
-                    api_key="modal",
+                    api_key=self.modal_api_key or "none",
                     timeout=240.0
                 )
+            if not self.modal_model:
+                self.modal_model = await asyncio.to_thread(self._detect_modal_model)
 
             messages = [
                 {

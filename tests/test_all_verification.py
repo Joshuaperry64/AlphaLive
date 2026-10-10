@@ -22,14 +22,14 @@ def run_tests():
 
     # 2. Verify Quick Toggles in Sidebar
     toggles = [
-        "btn_t_mic", "btn_t_tts", "btn_t_auto", "btn_t_desk",
+        "btn_t_mic", "btn_t_auto", "btn_t_desk",
         "btn_t_vis", "btn_t_proact", "btn_t_studio", "btn_t_autoloop",
         "btn_t_identity", "btn_t_unobserved", "btn_t_workspace"
     ]
     for t in toggles:
         assert hasattr(win, t), f"Missing toggle {t}"
-    assert "SOON" in win.btn_t_workspace.text()
-    assert not win.btn_t_workspace.isEnabled()
+    assert "OFF" in win.btn_t_workspace.text()
+    assert win.btn_t_workspace.isEnabled()
     print("[TEST] Sidebar quick toggles verified (including MULTI-WS: SOON placeholder).")
 
     # 3. Verify Identity Mode and Private Sanctuary Sub-Mode

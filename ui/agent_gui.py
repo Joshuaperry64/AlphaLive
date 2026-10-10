@@ -462,6 +462,20 @@ class AgentMainWindow(QMainWindow):
         self._proactive_triggered = False
         self.duplex_mode = "half"
 
+        # Workspace Server
+        self.workspace_server = None
+        self.workspace_timer = None
+
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    wm = cfg.get("Global", {}).get("WorkspaceMode", False)
+                    self.agent.workspace_mode = wm
+            except Exception:
+                pass
+
         cfg_path = ROOT_DIR / "config.json"
         if cfg_path.exists():
             try:
@@ -491,6 +505,8 @@ class AgentMainWindow(QMainWindow):
         self.hud = MiniStatusHUD()
         self.hud.show()
         self.hud.set_state("standby")
+
+        self._apply_workspace_mode()
         self._current_task_thread = None
 
         self.voice_listener = None
@@ -539,6 +555,7 @@ class AgentMainWindow(QMainWindow):
         if self.calib_overlay: self.calib_overlay.close()
         if self.overseer_panel: self.overseer_panel.close()
         if self.voice_listener: self.voice_listener.stop()
+        self._stop_workspace_server()
         event.accept()
 
     def _load_saved_mic_index(self) -> int | None:
@@ -1481,26 +1498,26 @@ class AgentMainWindow(QMainWindow):
 
         l_auto.addWidget(grp_modes)
 
-        # Multi-Workspace Group (Postponed Placeholder)
-        grp_multi_ws = QGroupBox("🌐 MULTI-WORKSPACE & ASTER NETWORKING [COMING SOON]")
-        grp_multi_ws.setStyleSheet(f"QGroupBox {{ color: #708caa; font-weight: bold; border: 1px dashed {C['border']}; border-radius: 6px; padding-top: 15px; margin-top: 6px; }}")
+        # Multi-Workspace Group
+        grp_multi_ws = QGroupBox("🌐 MULTI-WORKSPACE & ASTER NETWORKING")
+        grp_multi_ws.setStyleSheet(f"QGroupBox {{ color: {C['text_bright']}; font-weight: bold; border: 1px solid {C['border']}; border-radius: 6px; padding-top: 15px; margin-top: 6px; }}")
         ws_layout = QVBoxLayout(grp_multi_ws)
         ws_layout.setSpacing(6)
-        lbl_ws_info = QLabel("⏳ [FEATURE POSTPONED // COMING SOON]\nMulti-Workspace ASTER multiseat & remote network cockpit integration is currently postponed.")
-        lbl_ws_info.setStyleSheet("color: #eab308; font-size: 8pt; font-family: Consolas;")
+        lbl_ws_info = QLabel("Enable Multi-Workspace Mode to start a local WebSocket server (ASTER multiseat & remote network).")
+        lbl_ws_info.setStyleSheet("color: #708caa; font-size: 8pt; font-family: Consolas;")
         lbl_ws_info.setWordWrap(True)
         ws_layout.addWidget(lbl_ws_info)
 
         row_ws_ph = QHBoxLayout()
-        chk_ws_placeholder = QCheckBox("🌐 Multi-Workspace Mode (Postponed)")
-        chk_ws_placeholder.setEnabled(False)
-        chk_ws_placeholder.setStyleSheet("color: #4a5d73; font-weight: bold; font-family: Consolas;")
-        row_ws_ph.addWidget(chk_ws_placeholder, 2)
+        self.chk_workspace_mode = QCheckBox("🌐 Multi-Workspace Mode")
+        self.chk_workspace_mode.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
+        self.chk_workspace_mode.setChecked(getattr(self.agent, "workspace_mode", False))
+        row_ws_ph.addWidget(self.chk_workspace_mode, 2)
 
-        btn_launch_ws_ph = QPushButton("🚀 LAUNCH REMOTE COCKPIT [SOON]")
-        btn_launch_ws_ph.setEnabled(False)
-        btn_launch_ws_ph.setStyleSheet(f"background: #08111d; color: #4a5d73; border: 1px dashed {C['border']}; border-radius: 4px; padding: 4px 8px; font-family: Consolas; font-size: 10px; font-weight: bold;")
-        row_ws_ph.addWidget(btn_launch_ws_ph, 1)
+        self.btn_launch_ws = QPushButton("🚀 LAUNCH REMOTE COCKPIT")
+        self.btn_launch_ws.setStyleSheet(btn_base_style)
+        self.btn_launch_ws.clicked.connect(self._launch_remote_cockpit)
+        row_ws_ph.addWidget(self.btn_launch_ws, 1)
         ws_layout.addLayout(row_ws_ph)
         l_auto.addWidget(grp_multi_ws)
 
@@ -1555,6 +1572,8 @@ class AgentMainWindow(QMainWindow):
             self.agent.identity_mode = self.chk_identity_mode.isChecked()
             self.agent.unobserved_mode = self.chk_unobserved_mode.isChecked()
             self.agent.studio_mode = self.chk_studio_mode.isChecked()
+            self.agent.workspace_mode = self.chk_workspace_mode.isChecked()
+            self._apply_workspace_mode()
             
             # Save to config
             import json, os
@@ -1572,6 +1591,7 @@ class AgentMainWindow(QMainWindow):
                 cfg["Global"]["IdentityMode"] = self.agent.identity_mode
                 cfg["Global"]["UnobservedMode"] = self.agent.unobserved_mode
                 cfg["Global"]["StudioMode"] = self.agent.studio_mode
+                cfg["Global"]["WorkspaceMode"] = self.agent.workspace_mode
                 with open(cfg_path, 'w') as f:
                     json.dump(cfg, f, indent=4)
             self._sync_toggles()
@@ -1699,12 +1719,11 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_unobserved = QPushButton("🕶 PRIVACY: OFF")
         self.btn_t_unobserved.setEnabled(False)
 
-        self.btn_t_workspace = QPushButton("MULTI-WS: SOON")
-        self.btn_t_workspace.setEnabled(False)
+        self.btn_t_workspace = QPushButton("MULTI-WS: OFF")
+        self.btn_t_workspace.setCheckable(True)
         self.btn_t_workspace.setFixedHeight(27)
         self.btn_t_workspace.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        self.btn_t_workspace.setStyleSheet(f"background: transparent; color: #4b6079; border: 1px dashed {C['border']}; border-radius: 4px;")
-        self.btn_t_workspace.setToolTip("Multi-Workspace Mode (ASTER Multiseat & LAN Remote Link) — Feature Postponed / Coming Soon")
+        self.btn_t_workspace.setToolTip("Multi-Workspace Mode (ASTER Multiseat & LAN Remote Link)")
 
         for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved]:
             btn.setCheckable(True)
@@ -1724,6 +1743,7 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_autoloop.clicked.connect(self._toggle_quick_autoloop)
         self.btn_t_identity.clicked.connect(self._toggle_quick_identity)
         self.btn_t_unobserved.clicked.connect(self._toggle_quick_unobserved)
+        self.btn_t_workspace.clicked.connect(self._toggle_quick_workspace)
 
         self.autonomous_loop_timer = QTimer(self)
         self.autonomous_loop_timer.timeout.connect(self._on_autonomous_loop_tick)
@@ -2845,6 +2865,15 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_unobserved.setText("🕶 PRIVACY: OFF")
             self.btn_t_unobserved.setStyleSheet("color: #708caa;")
             self.btn_t_unobserved.setChecked(False)
+
+        if getattr(self.agent, "workspace_mode", False):
+            self.btn_t_workspace.setText("MULTI-WS: ON")
+            self.btn_t_workspace.setStyleSheet("color: #00ffff; font-weight: bold;")
+            self.btn_t_workspace.setChecked(True)
+        else:
+            self.btn_t_workspace.setText("MULTI-WS: OFF")
+            self.btn_t_workspace.setStyleSheet("color: #708caa;")
+            self.btn_t_workspace.setChecked(False)
         self._sync_overseer_panel_visibility()
 
     def _toggle_quick_mic(self):
@@ -3045,6 +3074,133 @@ class AgentMainWindow(QMainWindow):
             self._run_task(prompt)
 
     # ── Covert Overseer HUD Handlers ──────────────────────────────────────────
+    def _toggle_quick_workspace(self):
+        self.agent.workspace_mode = not getattr(self.agent, "workspace_mode", False)
+        self._apply_workspace_mode()
+        self._sync_toggles()
+        if hasattr(self, 'chk_workspace_mode'):
+            self.chk_workspace_mode.blockSignals(True)
+            self.chk_workspace_mode.setChecked(self.agent.workspace_mode)
+            self.chk_workspace_mode.blockSignals(False)
+
+    def _apply_workspace_mode(self):
+        if getattr(self.agent, "workspace_mode", False):
+            self._start_workspace_server()
+        else:
+            self._stop_workspace_server()
+
+    def _start_workspace_server(self):
+        if self.workspace_server:
+            return
+        try:
+            from core.workspace_bridge import WorkspaceServer
+            self.workspace_server = WorkspaceServer(host="0.0.0.0", port=8766)
+            self.workspace_server.on_command = self._on_workspace_command
+            self.workspace_server.start()
+            self._append_log("[WORKSPACE] Multi-Workspace Server started on 0.0.0.0:8766", C["neon_cyan"])
+            self._update_status("WORKSPACE SERVER ON", C["neon_cyan"])
+
+            if not self.workspace_timer:
+                self.workspace_timer = QTimer(self)
+                self.workspace_timer.timeout.connect(self._broadcast_telemetry)
+                self.workspace_timer.start(500)
+        except Exception as e:
+            self._append_log(f"[WORKSPACE ERROR] Failed to start server: {e}", C["neon_red"])
+
+    def _stop_workspace_server(self):
+        if self.workspace_timer:
+            self.workspace_timer.stop()
+            self.workspace_timer = None
+        if self.workspace_server:
+            try:
+                self.workspace_server.stop()
+                self.workspace_server = None
+                self._append_log("[WORKSPACE] Multi-Workspace Server stopped", C["text_dim"])
+                self._update_status("WORKSPACE SERVER OFF", C["text_dim"])
+            except Exception as e:
+                self._append_log(f"[WORKSPACE ERROR] Failed to stop server: {e}", C["neon_red"])
+
+    def _broadcast_telemetry(self):
+        if not self.workspace_server:
+            return
+        state = self.hud.current_state if self.hud else "offline"
+        mood = getattr(self.agent, "current_mood", "default")
+        active_task = getattr(self.agent, "active_task", "") or ""
+
+        # Determine monologue
+        mono = ""
+        # Check if speaking
+        tts_engine = getattr(self.agent, "tts_engine", "gemini")
+        tts_active = tts_engine != "off" and hasattr(self.agent, "voice") and self.agent.voice
+        if tts_active and getattr(self.agent.voice, "is_speaking", False):
+            # Try to get the latest spoken phrase
+            phrases = self.agent.voice.get_recent_spoken_phrases()
+            if phrases:
+                mono = phrases[-1]
+
+        # Try finding last spoken text in log box if not currently speaking or empty mono
+        if not mono and hasattr(self, 'log_box'):
+            text = self.log_box.toPlainText()
+            lines = text.split('\n')
+            for i in range(len(lines) - 1, -1, -1):
+                line = lines[i]
+                if line.startswith('[') and ']' in line:
+                    prefix_end = line.find(']')
+                    prefix = line[1:prefix_end]
+                    # Looking for persona name e.g. [Alpha]
+                    persona = getattr(self.agent, "get_active_persona_name", lambda: "Alpha")()
+                    if prefix.startswith(persona):
+                         mono = line[prefix_end + 2:].strip()
+                         break
+
+        is_paused = getattr(self.agent.controller, "is_paused", False)
+
+        telemetry_data = {
+            "agent_state": state,
+            "mood": mood,
+            "is_paused": is_paused,
+            "monologue": mono,
+            "active_task": active_task
+        }
+        self.workspace_server.broadcast_telemetry(telemetry_data)
+
+    def _on_workspace_command(self, action: str, data: dict):
+        def _dispatch():
+            if action == "inject_thought":
+                text = data.get("text", "")
+                if text:
+                    self._on_overseer_thought_injected(text)
+            elif action == "set_mood":
+                mood = data.get("mood", "")
+                if mood:
+                    self._on_overseer_mood_selected(mood)
+            elif action == "trigger_action":
+                impulse = data.get("impulse", "")
+                if impulse:
+                    self._on_overseer_action_requested(impulse)
+            elif action == "toggle_pause":
+                paused = data.get("paused", False)
+                self._on_overseer_pause_toggled(paused)
+            elif action == "emergency_halt":
+                self._on_overseer_emergency_halt()
+            elif action == "voice_input":
+                text = data.get("text", "")
+                if text:
+                    if getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False):
+                        if hasattr(self, "overseer_panel") and self.overseer_panel:
+                            self.overseer_panel.on_voice_received(text)
+                    else:
+                        self.signals.voice_heard.emit(text)
+        self.signals.run_on_gui.emit(_dispatch)
+
+    def _launch_remote_cockpit(self):
+        try:
+            cmd = [sys.executable, "run_overseer_client.py"]
+            subprocess.Popen(cmd, cwd=str(ROOT_DIR))
+            self._append_log("[WORKSPACE] Launched Remote Overseer Cockpit", C["neon_cyan"])
+        except Exception as e:
+            self._append_log(f"[WORKSPACE ERROR] Failed to launch remote cockpit: {e}", C["neon_red"])
+
     def _sync_overseer_panel_visibility(self):
         if not hasattr(self, "overseer_panel") or not self.overseer_panel:
             return

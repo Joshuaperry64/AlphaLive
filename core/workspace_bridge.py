@@ -73,7 +73,14 @@ class WorkspaceServer:
         self._loop.run_forever()
 
     async def _start_server(self):
-        self._server = await websockets.serve(self._handle_client, self.host, self.port)
+        while self._running:
+            try:
+                self._server = await websockets.serve(self._handle_client, self.host, self.port)
+                print(f"[WorkspaceBridge] Server active on ws://{self.host}:{self.port} (LAN: {get_local_ip()}:{self.port})", flush=True)
+                break
+            except OSError as e:
+                print(f"[WorkspaceBridge] Port {self.port} in use ({e}). Retrying in 2.0s...", flush=True)
+                await asyncio.sleep(2.0)
 
     async def _handle_client(self, websocket):
         self.clients.add(websocket)
@@ -249,6 +256,15 @@ class WorkspaceClient:
 
     def send_voice(self, text: str):
         self.send_command("voice_input", text=text)
+
+    def send_cycle(self):
+        self.send_command("trigger_cycle")
+
+    def send_task(self, goal: str):
+        self.send_command("run_task", goal=goal)
+
+    def send_restart_worker(self):
+        self.send_command("restart_worker")
 
     def disconnect(self):
         self._running = False

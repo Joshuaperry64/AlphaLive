@@ -366,17 +366,17 @@ class OverseerControlPanel(QWidget):
         """)
         self.net_bar.addWidget(self.lbl_net_status, 1)
 
-        self.btn_pair_toggle = QPushButton("🌐 MULTI-WS [SOON]")
+        self.btn_pair_toggle = QPushButton("🌐 MULTI-WS")
         self.btn_pair_toggle.setCheckable(True)
         self.btn_pair_toggle.setFixedHeight(26)
-        self.btn_pair_toggle.setToolTip("Multi-Workspace Mode (ASTER & LAN Remote Link) — Postponed / Coming Soon")
+        self.btn_pair_toggle.setToolTip("Multi-Workspace Mode (ASTER & LAN Remote Link) — Active")
         self.btn_pair_toggle.setStyleSheet("""
             QPushButton {
                 background: #0d1e33; color: #708caa; border: 1px dashed #708caa88;
                 border-radius: 4px; font-weight: bold; font-size: 8pt; padding: 0 8px;
             }
             QPushButton:hover { background: #16365c; color: #00f0ff; border-color: #00f0ff; }
-            QPushButton:checked { background: #1e3a5f; color: #eab308; border-color: #eab308; }
+            QPushButton:checked { background: #1e3a5f; color: #22c55e; border-color: #22c55e; }
         """)
         self.btn_pair_toggle.clicked.connect(self._toggle_pairing_drawer)
         self.net_bar.addWidget(self.btn_pair_toggle)
@@ -393,13 +393,13 @@ class OverseerControlPanel(QWidget):
         drawer_layout.setContentsMargins(8, 6, 8, 6)
         drawer_layout.setSpacing(5)
 
-        lbl_postponed = QLabel("⏳ [FEATURE POSTPONED // COMING SOON]\nMulti-Workspace ASTER multiseat & LAN remote pairing is currently reserved for a future update.")
-        lbl_postponed.setStyleSheet("color: #eab308; font-size: 7.5pt; font-weight: bold; font-family: Consolas; background: #231d04; border: 1px dashed #eab308; border-radius: 4px; padding: 4px 6px;")
+        lbl_postponed = QLabel("⏳ [FEATURE ACTIVE]\nMulti-Workspace ASTER multiseat & LAN remote pairing is online and awaiting connection.")
+        lbl_postponed.setStyleSheet("color: #22c55e; font-size: 7.5pt; font-weight: bold; font-family: Consolas; background: #231d04; border: 1px dashed #22c55e; border-radius: 4px; padding: 4px 6px;")
         lbl_postponed.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lbl_postponed.setWordWrap(True)
         drawer_layout.addWidget(lbl_postponed)
 
-        lbl_desc = QLabel("ASTER MULTISEAT / LAN REMOTE LINK (PLACEHOLDER):")
+        lbl_desc = QLabel("ASTER MULTISEAT / LAN REMOTE LINK:")
         lbl_desc.setStyleSheet("color: #7dd3fc; font-size: 7.5pt; font-weight: bold; font-family: Consolas;")
         drawer_layout.addWidget(lbl_desc)
 

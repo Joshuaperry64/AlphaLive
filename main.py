@@ -13,7 +13,7 @@ def _excepthook(exc_type, exc_value, exc_traceback):
 sys.excepthook = _excepthook
 
 def main():
-    print("[AlphaLive] Booting AlphaCore Autonomous Desktop Agent...")
+    if sys.stdout: print("[AlphaLive] Booting AlphaCore Autonomous Desktop Agent...")
     base_dir = os.path.dirname(os.path.abspath(__file__))
     venv_path = os.path.join(base_dir, ".venv")
     is_windowless = "pythonw" in os.path.basename(sys.executable).lower()
@@ -31,10 +31,10 @@ def main():
     venv_scripts = os.path.normcase(os.path.abspath(os.path.join(venv_path, "Scripts" if os.name == "nt" else "bin")))
     in_venv = os.path.normcase(os.path.abspath(os.path.dirname(sys.executable))) == venv_scripts
 
-    if os.path.exists(target_python) and not in_venv:
-        print(f"[AlphaLive] Routing through venv: {target_python}")
+    if os.path.exists(target_python) and not in_venv and '--aster-worker' not in sys.argv:
+        if sys.stdout: print(f"[AlphaLive] Routing through venv: {target_python}")
         try:
-            ret = subprocess.call([target_python, os.path.abspath(__file__)] + sys.argv[1:])
+            ret = subprocess.call([target_python, os.path.abspath(__file__)] + sys.argv[1:], creationflags=0x08000000 if os.name == 'nt' else 0)
             sys.exit(ret)
         except KeyboardInterrupt:
             sys.exit(0)
@@ -49,7 +49,7 @@ def main():
             from integrations.alexa_ingress import start_ingress_server_thread
             start_ingress_server_thread(host="0.0.0.0", port=8765)
         except Exception as err:
-            print(f"[AlphaLive] Warning: Could not start Ingress Listener: {err}")
+            if sys.stdout: print(f"[AlphaLive] Warning: Could not start Ingress Listener: {err}")
 
         try:
             import ctypes

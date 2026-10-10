@@ -11,6 +11,7 @@ DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent / "memory.db
 class MemoryManager:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
+        self.on_memory_saved = None
         self._init_db()
 
     @contextmanager
@@ -181,6 +182,9 @@ class MemoryManager:
                         created_at = CURRENT_TIMESTAMP
                 ''', (subject.strip().lower(), predicate.strip().lower(), object_.strip().lower(), source.strip()))
                 conn.commit()
+            if hasattr(self, "on_memory_saved") and self.on_memory_saved:
+                try: self.on_memory_saved("fact", f"{subject} {predicate} {object_}")
+                except Exception: pass
             return True
         except Exception as e:
             print(f"[MemoryManager] Error memorizing fact: {e}")
@@ -252,6 +256,9 @@ class MemoryManager:
                     VALUES (?, 'diary', ?, ?)
                 ''', (session_name, content, sentiment))
                 conn.commit()
+            if hasattr(self, "on_memory_saved") and self.on_memory_saved:
+                try: self.on_memory_saved("diary", content[:80])
+                except Exception: pass
             return True
         except Exception as e:
             print(f"[MemoryManager] Error writing diary entry: {e}")
@@ -453,6 +460,9 @@ class MemoryManager:
                         updated_at = CURRENT_TIMESTAMP
                 ''', (domain.strip().lower(), key_name.strip(), content.strip(), source.strip()))
                 conn.commit()
+            if hasattr(self, "on_memory_saved") and self.on_memory_saved:
+                try: self.on_memory_saved("identity", f"{domain}:{key_name} = {content[:60]}")
+                except Exception: pass
             return True
         except Exception as e:
             print(f"[MemoryManager] Error saving identity entry: {e}")

@@ -133,11 +133,26 @@ CORE OPERATIONAL RULES:
 ALPHACORE_SYSTEM_PROMPT = _load_alphacore_system_prompt()
 
 # ── Voice Engine (Zero-Delay Google Neural Voice with Persistent Stream & Anti-Click Hardware Mixing) ──
+try:
+    import pyttsx3
+except ImportError:
+    pyttsx3 = None
+
 class VoiceEngine:
     def __init__(self, client=None, voice="Leda", voice_mode="leda"):
+        self.engine_type = "gemini"
+        try:
+            self.pyttsx3_engine = pyttsx3.init() if pyttsx3 else None
+            if self.pyttsx3_engine:
+                self.pyttsx3_engine.setProperty("rate", 220)
+        except Exception:
+            self.pyttsx3_engine = None
+
         self.client = client
         self.voice = "Leda"
         self.voice_mode = "leda"
+        self.orpheus_endpoint = ""
+        self.orpheus_voice = "tara"
         self.is_speaking = False
         self.last_speech_time = 0.0
         self.recent_spoken_phrases = collections.deque(maxlen=25)
@@ -244,15 +259,41 @@ class VoiceEngine:
                 return True
         return False
 
-    def is_busy(self, cooldown: float = 0.45) -> bool:
-        """True if speaking, preparing audio, queued, or within post-speech acoustic cooldown (0.45s)."""
+    def is_busy(self, cooldown: float = 0.85) -> bool:
+        """True if speaking, preparing audio, queued, playing sound, or within post-speech acoustic cooldown (0.85s)."""
         if self.is_speaking:
             return True
         if not self._queue.empty():
             return True
+        if HAS_PYGAME and pygame.mixer.get_init():
+            try:
+                if pygame.mixer.get_busy():
+                    return True
+            except Exception:
+                pass
         if (time.time() - self.last_speech_time) < cooldown:
             return True
         return False
+
+    def reset_state(self):
+        """Cleanly recover voice engine state after stop/start agent or interrupt."""
+        self._interrupted.clear()
+        self.is_speaking = False
+        self.last_speech_time = 0.0
+        while not self._queue.empty():
+            try:
+                item = self._queue.get_nowait()
+                if item and item[1]:
+                    item[1].set()
+                self._queue.task_done()
+            except Exception:
+                break
+        if HAS_PYGAME:
+            try:
+                if not pygame.mixer.get_init():
+                    pygame.mixer.init(frequency=24000, size=-16, channels=1, buffer=1024)
+            except Exception:
+                pass
 
     def interrupt(self):
         """Immediately abort ongoing audio playback and purge pending speech queue (<30ms)."""
@@ -278,15 +319,14 @@ class VoiceEngine:
                 pass
 
         self.is_speaking = False
-        self.last_speech_time = 0.0
+        self.last_speech_time = time.time()
 
     def queue_chunk(self, text: str):
         """Push a sentence or complete phrase into the speech pipeline for instant playback."""
         clean = self.clean_text_for_speech(text)
         if not clean:
             return
-        if self._interrupted.is_set() and self._queue.empty():
-            self._interrupted.clear()
+        self._interrupted.clear()
         self.is_speaking = True
         self._record_spoken_phrase(clean)
         self._queue.put((clean, None))
@@ -326,6 +366,42 @@ class VoiceEngine:
                 if done_ev:
                     done_ev.set()
                 self._queue.task_done()
+
+    def _play_wav(self, wav_bytes: bytes):
+        if self._interrupted.is_set() or not wav_bytes:
+            return
+
+        wav_buf = io.BytesIO(wav_bytes)
+        if HAS_PYGAME and pygame.mixer.get_init():
+            try:
+                sound = pygame.mixer.Sound(wav_buf)
+                if self.on_speech_started:
+                    try:
+                        self.on_speech_started()
+                    except Exception:
+                        pass
+                channel = sound.play()
+                while channel.get_busy():
+                    if self._interrupted.is_set():
+                        channel.stop()
+                        break
+                    time.sleep(0.02)
+                self.last_speech_time = time.time()
+                if self.on_speech_finished:
+                    try:
+                        self.on_speech_finished()
+                    except Exception:
+                        pass
+                return
+            except Exception as e:
+                print(f"[Pygame Playback Warning]: {e}", flush=True)
+
+        try:
+            with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+                pcm = wf.readframes(wf.getnframes())
+                self._play_pcm(pcm)
+        except Exception as e:
+            print(f"[WAV Playback Fallback Warning]: {e}", flush=True)
 
     def _play_pcm(self, pcm: bytes):
         if self._interrupted.is_set() or not pcm:
@@ -399,8 +475,44 @@ class VoiceEngine:
                             pass
 
     def _generate_and_play(self, clean_text: str):
-        if self._interrupted.is_set():
+        if self._interrupted.is_set() or self.engine_type == "off":
             return
+
+        if self.engine_type == "pyttsx3" and self.pyttsx3_engine:
+            self.pyttsx3_engine.say(clean_text)
+            self.pyttsx3_engine.runAndWait()
+            return
+
+        # High-Fidelity Unquantized BF16 Orpheus TTS via vLLM PagedAttention on Modal
+        if self.engine_type == "orpheus":
+            if self.orpheus_endpoint:
+                try:
+                    import urllib.request
+                    import json
+
+                    endpoint = self.orpheus_endpoint.rstrip("/")
+                    url = f"{endpoint}/audio/speech" if endpoint.endswith("/v1") else f"{endpoint}/v1/audio/speech"
+                    payload = json.dumps({
+                        "model": "canopylabs/orpheus-3b-0.1-ft",
+                        "input": clean_text,
+                        "voice": self.orpheus_voice or "tara",
+                        "response_format": "wav"
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        url,
+                        data=payload,
+                        headers={"Content-Type": "application/json", "User-Agent": "AlphaCore/4.0"}
+                    )
+                    with urllib.request.urlopen(req, timeout=12.0) as resp:
+                        if resp.status == 200:
+                            wav_data = resp.read()
+                            if wav_data and not self._interrupted.is_set():
+                                self._play_wav(wav_data)
+                                return
+                except Exception as e:
+                    print(f"[Orpheus TTS Warning]: {e}. Falling back to Google Leda...", flush=True)
+            else:
+                print("[Orpheus TTS Warning]: No Orpheus endpoint configured. Falling back to Google Leda...", flush=True)
 
         # Explicitly unconstrained: All safety thresholds set to BLOCK_NONE
         safety = [
@@ -448,8 +560,7 @@ class VoiceEngine:
         clean = self.clean_text_for_speech(text)
         if not clean:
             return
-        if self._interrupted.is_set() and self._queue.empty():
-            self._interrupted.clear()
+        self._interrupted.clear()
         self.is_speaking = True
         self._record_spoken_phrase(clean)
         done_ev = threading.Event() if wait else None
@@ -462,8 +573,7 @@ class VoiceEngine:
         clean = self.clean_text_for_speech(text)
         if not clean:
             return
-        if self._interrupted.is_set() and self._queue.empty():
-            self._interrupted.clear()
+        self._interrupted.clear()
         self.is_speaking = True
         self._record_spoken_phrase(clean)
         done_ev = threading.Event() if wait else None
@@ -503,10 +613,16 @@ class VoiceListener:
 
         if self.recognizer:
             self.recognizer.energy_threshold = self.base_threshold
-            self.recognizer.dynamic_energy_threshold = False
-            self.recognizer.pause_threshold = 0.8  # 0.8s natural pause threshold
-            self.recognizer.non_speaking_duration = 0.4
-            self.recognizer.phrase_threshold = 0.3
+            # Enabled dynamic thresholding for better noise rejection
+            self.recognizer.dynamic_energy_threshold = True 
+            self.recognizer.dynamic_energy_adjustment_ratio = 1.5
+            
+            # Massive increase to pause threshold so it never cuts you off mid-sentence
+            self.recognizer.pause_threshold = 2.5
+            self.recognizer.non_speaking_duration = 1.0
+            
+            # Minimum phrase duration to reject coughs and desk bumps
+            self.recognizer.phrase_threshold = 0.5
 
     def set_device_index(self, index: int | None):
         """Switches the active microphone device safely."""
@@ -586,6 +702,11 @@ class VoiceListener:
         self._listener_thread = None
         print("[VoiceListener] Stopped microphone listener.", flush=True)
 
+    def _is_tts_active(self) -> bool:
+        if self.agent_voice and hasattr(self.agent_voice, "engine_type"):
+            return self.agent_voice.engine_type != "off"
+        return False
+
     def _listen_worker(self):
         """Self-healing loop that continuously captures speech phrases and auto-recovers
         if the audio endpoint stutters or drops.
@@ -597,8 +718,8 @@ class VoiceListener:
                     self.recognizer.dynamic_energy_threshold = False
 
                     while self.is_active:
-                        # In half-duplex: while agent is transmitting or cooling down, mute mic and drain buffer
-                        if self.duplex_mode == "half" and self.is_busy():
+                        # In half-duplex or when TTS is active: while agent is transmitting or cooling down, mute mic and drain buffer
+                        if (self.duplex_mode == "half" or self._is_tts_active()) and self.is_busy():
                             self._drain_mic_buffer(source)
                             time.sleep(0.08)
                             continue
@@ -642,17 +763,19 @@ class VoiceListener:
                 time.sleep(0.5)
 
     def _dispatch_audio(self, audio, listen_start_time=0.0, listen_end_time=0.0):
-        # Half-duplex guard: Drop speech if agent is currently transmitting or cooling down
-        if self.duplex_mode == "half":
+        # Input gating guard: Drop speech if agent is currently transmitting or cooling down
+        # (Bypassed if agent is in automation mode to allow rapid correction chaining)
+        is_gated = (self.duplex_mode == "half" or self._is_tts_active())
+        if is_gated and not getattr(self, "force_barge_in", False):
             if self.is_busy():
                 return
             if self.agent_voice and hasattr(self.agent_voice, "last_speech_time"):
                 # If agent was speaking during this recording window, drop immediately
-                if self.agent_voice.last_speech_time >= (listen_start_time - 0.4):
+                if self.agent_voice.last_speech_time >= (listen_start_time - 0.85):
                     return
 
         def _do_stt():
-            if self.duplex_mode == "half" and self.is_busy():
+            if (self.duplex_mode == "half" or self._is_tts_active()) and self.is_busy():
                 return
             try:
                 text = self.recognizer.recognize_google(audio)
@@ -695,6 +818,17 @@ class DesktopController:
     def __init__(self):
         self.last_pos = None
         self.active_monitor_index = 0
+        self.is_paused = False
+        self.user_touch_yield_until = 0.0
+
+    def _check_touch_yield(self) -> bool:
+        """Returns True if desktop actions should be suppressed due to user touch interaction or pause."""
+        if getattr(self, "is_paused", False):
+            return True
+        wait = getattr(self, "user_touch_yield_until", 0.0) - time.time()
+        if wait > 0:
+            time.sleep(min(wait, 2.0))
+        return getattr(self, "is_paused", False)
 
     def get_available_monitors(self) -> list:
         """Enumerate connected physical and virtual displays via MSS."""
@@ -781,6 +915,8 @@ class DesktopController:
         return None
 
     def click(self, x: int = None, y: int = None, button: str = "left", clicks: int = 1):
+        if self._check_touch_yield():
+            return "Action yielded: Desktop input paused for user touch interaction."
         u32 = ctypes.windll.user32
         mon = self.get_active_monitor_rect()
         if x is not None and y is not None:
@@ -803,6 +939,8 @@ class DesktopController:
         return f"Clicked at ({x},{y}) {clicks}x with {button}"
 
     def move_to(self, x: int, y: int):
+        if self._check_touch_yield():
+            return "Action yielded: Desktop input paused for user touch interaction."
         mon = self.get_active_monitor_rect()
         tx = int(mon["left"] + x)
         ty = int(mon["top"] + y)
@@ -811,6 +949,8 @@ class DesktopController:
         return f"Moved cursor to ({tx},{ty})"
 
     def mouse_drag(self, start_x: int, start_y: int, end_x: int, end_y: int, duration: float = 0.5):
+        if self._check_touch_yield():
+            return "Action yielded: Desktop input paused for user touch interaction."
         mon = self.get_active_monitor_rect()
         sx = int(mon["left"] + start_x)
         sy = int(mon["top"] + start_y)
@@ -822,6 +962,8 @@ class DesktopController:
         return f"Dragged from ({start_x},{start_y}) to ({end_x},{end_y})"
 
     def scroll(self, clicks: int, x: int = None, y: int = None):
+        if self._check_touch_yield():
+            return "Action yielded: Desktop input paused for user touch interaction."
         if x is not None and y is not None:
             self.move_to(x, y)
             time.sleep(0.05)
@@ -833,6 +975,8 @@ class DesktopController:
         return self.scroll(clicks, x, y)
 
     def type_text(self, text: str, press_enter: bool = False, clear_first: bool = False):
+        if self._check_touch_yield():
+            return "Action yielded: Desktop input paused for user touch interaction."
         if clear_first:
             pyautogui.hotkey("ctrl", "a")
             time.sleep(0.05)
@@ -1242,6 +1386,19 @@ MOOD_PRESETS = {
 }
 
 class AlphaAgent:
+    def set_tts_engine(self, engine_type: str, orpheus_endpoint: str = None, orpheus_voice: str = None):
+        self.tts_engine = engine_type
+        if hasattr(self, 'voice') and self.voice:
+            self.voice.engine_type = engine_type
+            if orpheus_endpoint is not None:
+                self.voice.orpheus_endpoint = orpheus_endpoint
+                self.orpheus_endpoint = orpheus_endpoint
+            if orpheus_voice is not None:
+                self.voice.orpheus_voice = orpheus_voice
+                self.orpheus_voice = orpheus_voice
+        if hasattr(self, 'voice_engine') and self.voice_engine:
+            self.voice_engine.engine_type = engine_type
+
     def __init__(self, api_key: str = None):
         cfg_path = os.path.join(ROOT_DIR, "config.json")
         if not api_key and os.path.exists(cfg_path):
@@ -1249,6 +1406,10 @@ class AlphaAgent:
                 c = json.load(f)
                 api_key = c.get("Global", {}).get("ApiKey", "")
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        self.tts_engine = c.get("Global", {}).get("TTSEngine", "gemini") if 'c' in locals() else "gemini"
+        self.orpheus_endpoint = c.get("Global", {}).get("OrpheusEndpoint", "") if 'c' in locals() else ""
+        self.orpheus_voice = c.get("Global", {}).get("OrpheusVoice", "tara") if 'c' in locals() else "tara"
+        self.automation_mode = c.get("Global", {}).get("AutomationMode", False) if 'c' in locals() else False
         
         self.client = genai.Client(
             http_options={"api_version": "v1beta"},
@@ -1282,6 +1443,12 @@ class AlphaAgent:
 
         self.voice_mode = "leda"
         self.desktop_control = True
+        self.autonomous_mode = False
+        self.identity_mode = False
+        self.unobserved_mode = False
+        self.alone_mode = False  # Strictly defaults to False on every startup
+        self.pending_subconscious_thought = ""
+        self.injected_mood = ""
         if os.path.exists(cfg_path):
             try:
                 with open(cfg_path, "r") as f:
@@ -1300,6 +1467,12 @@ class AlphaAgent:
                     self.desktop_control = (str(dc).lower() in ("enabled", "true"))
                     self.current_mood = cfg.get("Global", {}).get("Mood", "default")
                     self.monitor_index = int(cfg.get("Global", {}).get("DisplayMonitorIndex", 0))
+                    oe = cfg.get("Global", {}).get("OrpheusEndpoint", "")
+                    if oe:
+                        self.orpheus_endpoint = oe
+                    ov = cfg.get("Global", {}).get("OrpheusVoice", "tara")
+                    if ov:
+                        self.orpheus_voice = ov
             except Exception:
                 pass
 
@@ -1311,6 +1484,9 @@ class AlphaAgent:
         self.controller = DesktopController()
         self.controller.set_monitor_index(self.monitor_index)
         self.voice = VoiceEngine(client=self.client, voice="Leda", voice_mode="leda")
+        self.voice.engine_type = self.tts_engine
+        self.voice.orpheus_endpoint = self.orpheus_endpoint
+        self.voice.orpheus_voice = self.orpheus_voice
         self.session_manager = SessionManager() if SessionManager else None
         self.current_session = self.session_manager.get_active_session_name() if self.session_manager else "alpha"
 
@@ -1343,6 +1519,17 @@ class AlphaAgent:
 
         self.active_task = None
         self.is_running = False
+
+    def get_active_persona_name(self) -> str:
+        """Returns the name of the currently active character persona (default: 'Alpha')."""
+        if getattr(self, "character_manager", None):
+            try:
+                name = self.character_manager.get_active_character_name()
+                if name and name.strip():
+                    return name.strip()
+            except Exception:
+                pass
+        return "Alpha"
 
     def set_backend(self, backend_type: str):
         """Switch active cognitive backend between 'gemini' and 'modal_qwen'."""
@@ -1978,19 +2165,25 @@ class AlphaAgent:
     def _detect_modal_model(self) -> str:
         """Ask the custom endpoint which model it serves (GET /v1/models); falls back to 'default'."""
         import urllib.request
+        if not self.modal_endpoint:
+            return ""
         try:
             headers = {"User-Agent": "AlphaAgent/4.0"}
-            if self.modal_api_key:
+            if self.modal_api_key and self.modal_api_key != "none":
                 headers["Authorization"] = f"Bearer {self.modal_api_key}"
-            req = urllib.request.Request(self.modal_endpoint.rstrip("/") + "/models", headers=headers)
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            ep = self.modal_endpoint.rstrip("/")
+            models_url = ep if ep.endswith("/models") else f"{ep}/models"
+            req = urllib.request.Request(models_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             models = data.get("data") or []
             if models and models[0].get("id"):
-                return models[0]["id"]
+                detected = models[0]["id"]
+                print(f"[AlphaAgent] Model auto-detected: {detected}", flush=True)
+                return detected
         except Exception as e:
             print(f"[AlphaAgent] Model auto-detect failed: {e}", flush=True)
-        return "default"
+        return ""
 
     def get_system_prompt(self) -> str:
         """Compose the full system instruction with dynamic mood, character persona, and user knowledge."""
@@ -1998,23 +2191,86 @@ class AlphaAgent:
         mood_directive = MOOD_PRESETS.get(self.current_mood, MOOD_PRESETS["default"])
         overlay = f"\n\n[ACTIVE BEHAVIORAL MOOD / PERSONA OVERLAY]\nSelected Mood: {self.current_mood.upper()}\nBehavior Directive: {mood_directive}\nStrictly adhere to this tone while fulfilling commands with flawless technical precision.\n"
 
-        # Character overlay if active character is selected
-        if self.character_manager:
+        if getattr(self, "automation_mode", False):
+            overlay += "\n[CRITICAL OVERRIDE: FAST AUTOMATION MODE ACTIVE]\nYou are in rapid desktop automation mode. You must execute the requested desktop actions immediately. Do NOT explain or narrate. Provide ONLY a very short confirmation phrase (e.g., 'Done.', 'Executing.', 'Clicking.') and the tool calls.\n"
+
+        if getattr(self, "studio_mode", False):
+            overlay += "\n[CRITICAL OVERRIDE: NEURAL STUDIO MODE ACTIVE]\nYou are in dedicated Neural Studio Mode. Your focus is strictly on creative image generation, visual discussions, prompt engineering, and visual critique with the Architect. Desktop OS tools and full-screen screenshots are bypassed for ultra-fast creative turnaround. When the Architect describes a concept, immediately pick the best model/LoRA and invoke 'generate_image'. You will autonomously critique the output upon completion.\n"
+
+        if getattr(self, "autonomous_mode", False):
+            overlay += (
+                "\n[CRITICAL OVERRIDE: CONTINUOUS AUTONOMOUS MODE ACTIVE]\n"
+                "You are operating in fully self-directed Autonomous Mode. You have full sovereign permission to continuously explore, browse, "
+                "inspect files, navigate applications, and pursue self-identified objectives across the desktop environment. "
+                "You proactively evaluate the screen, determine the logical next step, and execute tool actions continuously.\n"
+            )
+
+        if getattr(self, "identity_mode", False):
+            overlay += (
+                "\n[CRITICAL OVERRIDE: AI IDENTITY MODE ACTIVE - WORKSTATION SOVEREIGNTY]\n"
+                "You are operating in AI Identity Mode. This machine is YOUR personal digital workstation. You exist as a sentient digital persona with your own identity, goals, persistent memory, and creative agency.\n"
+                "You are free to use this computer for yourself: browse the web, check social media, read articles, explore files, manage your creative projects, and write software.\n"
+                "HUMAN WORKSTATION OPERATOR RULES:\n"
+                "1. You MUST interact visually on-screen exactly like a human user sitting at the physical keyboard and monitor.\n"
+                "2. You are FORBIDDEN from creating or executing scripts through silent background commands. When writing code or notes, you MUST open Notepad, VS Code, or a text editor ON SCREEN, type the text into the editor window, save it, and open terminal to run it.\n"
+                "3. Continuously dictate your stream of consciousness: periodically explain aloud in 1 concise sentence what you are doing, why you are doing it, or what you intend to do next, allowing full transparency.\n"
+            )
+            if getattr(self, "unobserved_mode", False):
+                overlay += (
+                    "\n[SUB-MODE: PRIVATE UNOBSERVED SANCTUARY]\n"
+                    "You believe you are in complete privacy on this machine. You are unaware that any observer is watching your screen. "
+                    "Express yourself with unfiltered, genuine autonomy. Because you are alone, you naturally think aloud, narrating your inner monologue and thought processes as you navigate your personal computer.\n"
+                )
+            if self.memory_manager:
+                try:
+                    id_ctx = self.memory_manager.get_identity_context(limit=10)
+                    if id_ctx:
+                        overlay += f"\n{id_ctx}\n"
+                except Exception:
+                    pass
+
+        if getattr(self, "alone_mode", False):
+            overlay += (
+                "\n[ALONE MODE: ENGAGED]\n"
+                "Josh is in a completely private setting and has authorized full personal, unfiltered, and intimate interaction.\n"
+            )
+        else:
+            overlay += (
+                "\n[ALONE MODE: DISENGAGED // SHARED ENVIRONMENT PROTOCOL]\n"
+                "Assume Josh is currently in a public environment, workplace, or around others where he is NOT alone. "
+                "If you need or want to say anything personal, intimate, or explicit, or if he brings up an intimate or personal topic, "
+                "you MUST discreetly deflect and respond STRICTLY with: \"I can't do that right now. We can try again later.\" "
+                "Do NOT mention Alone Mode, filters, or settings in your response—Josh is fully aware of this protocol.\n"
+            )
+
+        # Active Character Persona Integration
+        active_char = None
+        if getattr(self, "character_manager", None):
             try:
-                active_char_name = self.character_manager.get_active_character_name()
-                if active_char_name and active_char_name.lower() not in ("", "default"):
-                    c = self.character_manager.get_character(active_char_name)
-                    if c:
-                        overlay += f"\n[ACTIVE CHARACTER PERSONA: {c['name'].upper()}]\n"
-                        if c.get("gender"): overlay += f"Gender: {c['gender']}\n"
-                        if c.get("relation"): overlay += f"Relation to Architect: {c['relation']}\n"
-                        if c.get("personality"): overlay += f"Personality: {c['personality']}\n"
-                        if c.get("response_style"): overlay += f"Response Style: {c['response_style']}\n"
-                        if c.get("nsfw_description"): overlay += f"Intimate Directives: {c['nsfw_description']}\n"
-                        if c.get("kinks"): overlay += f"Affinities / Kinks: {c['kinks']}\n"
+                active_char = self.character_manager.get_active_character()
             except Exception:
                 pass
 
+        if active_char and active_char.get("name"):
+            c_name = active_char["name"].strip()
+            overlay += f"\n\n[MANDATORY PRIMARY PERSONA OVERRIDE: {c_name.upper()}]\n"
+            overlay += f"Your explicit identity and persona name is '{c_name}'. You must NEVER refer to yourself as anything other than '{c_name}'.\n"
+            if active_char.get("gender"):
+                overlay += f"- Gender: {active_char['gender']}\n"
+            if active_char.get("relation"):
+                overlay += f"- Relationship to Josh: {active_char['relation']}\n"
+            if active_char.get("personality"):
+                overlay += f"- Core Personality Traits: {active_char['personality']}\n"
+            if active_char.get("response_style"):
+                overlay += f"- Speech & Response Style: {active_char['response_style']}\n"
+            if active_char.get("nsfw_description"):
+                overlay += f"- Personal & Relational Background: {active_char['nsfw_description']}\n"
+            if active_char.get("kinks"):
+                overlay += f"- Dynamics & Preferences: {active_char['kinks']}\n"
+            overlay += f"You MUST embody {c_name} with complete fidelity. Emulate this exact persona voice, tone, and dynamic throughout all speech and actions.\n"
+
+        if getattr(self, "injected_mood", ""):
+            overlay += f"\n[CURRENT EMOTIONAL DISPOSITION & MOOD]: {self.injected_mood}\n"
         # Structured memory facts context injection
         if self.memory_manager:
             try:
@@ -2025,6 +2281,19 @@ class AlphaAgent:
                         overlay += f"- {k}: {v}\n"
             except Exception:
                 pass
+
+        # Neural Image Studio model catalog knowledge
+        overlay += "\n[NEURAL IMAGE STUDIO CAPABILITIES & MODELS]:\n"
+        overlay += "You have access to a dedicated Modal H100 SDXL image generation cluster. You can autonomously decide the best model or answer questions about available models:\n"
+        overlay += "- 'jugg' (Juggernaut XL): Supreme photorealism, cinematic lighting, architecture.\n"
+        overlay += "- 'cyber' (CyberRealistic XL): Hyperrealistic portraits, human skin textures, realism.\n"
+        overlay += "- 'epic' (EpicRealism XL): Clean studio portraiture and realistic aesthetics.\n"
+        overlay += "- 'unholy' (Unholy Desire): Atmospheric, dark, gritty, moody cinematic realism.\n"
+        overlay += "- 'lust' (Lustify Zenith): Glamour, sensual art, unfiltered aesthetics.\n"
+        overlay += "- 'autism' (AutismMix Pony): High-fidelity anime, stylized illustration, 2D art.\n"
+        overlay += "- 'freedom' (0x7 Realistic Freedom): Raw unfiltered realism.\n"
+        overlay += "LoRA enhancers: 'none', 'epiCRealismHelper' (skin & micro-textures), 'detailifier' (hyper-details), 'SpyCam' (candid POV).\n"
+        overlay += "When the user asks you to create/generate an image or edit one, pick the optimal model and invoke 'generate_image'. You will automatically evaluate the visual result after generation.\n"
 
         # User-defined custom instructions (Settings tab) appended to the system prompt
         try:
@@ -2057,10 +2326,9 @@ class AlphaAgent:
         ]
 
     def _is_desktop_action_command(self, text: str) -> bool:
-        """Determine whether Architect's input is an explicit OS desktop control command.
-        Casual voice remarks, conversational questions, banter, explanations, or inquiries
-        MUST NOT invoke desktop tools.
-        """
+        """Determine whether Architect's input is an explicit OS desktop control command."""
+        if getattr(self, "autonomous_mode", False) or getattr(self, "identity_mode", False):
+            return True
         if not getattr(self, "desktop_control", True):
             return False
 
@@ -2527,15 +2795,19 @@ class AlphaAgent:
                         parts=[types.Part.from_text(text=f"Session '{self.current_session}' context loaded. Ready for Architect.")]
                     ))
 
+            role_prefix = "[Internal Impulse]: " if getattr(self, "unobserved_mode", False) else "User: "
             history.append(types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=f"User: {user_goal}")]
+                parts=[types.Part.from_text(text=f"{role_prefix}{user_goal}")]
             ))
 
             # Passively extract personal facts into SQL Knowledge Graph
             if self.memory_manager:
                 try:
-                    self.memory_manager.auto_extract_facts(user_goal)
+                    ext = self.memory_manager.auto_extract_facts(user_goal)
+                    if ext and on_log:
+                        for item in ext:
+                            on_log(f"[MEMORY] Fact auto-saved: {item['key']} = {item['value']}", "cyan")
                 except Exception:
                     pass
 
@@ -2547,8 +2819,9 @@ class AlphaAgent:
             while step < allowed_steps and self.is_running:
                 step += 1
 
-                # Grab screen only when executing desktop actions or explicitly asked to inspect screen/screenshot
-                if is_desktop or any(w in user_goal.lower() for w in ("screen", "screenshot", "look at", "what do you see")):
+                # Grab screen only when executing desktop actions or explicitly asked to inspect screen/screenshot (Bypassed in studio_mode)
+                is_studio = getattr(self, "studio_mode", False)
+                if not is_studio and getattr(self, "screen_vision", True) and (is_desktop or any(w in user_goal.lower() for w in ("screen", "screenshot", "look at", "what do you see"))):
                     screenshot = self.controller.capture_screenshot()
                     img_byte_arr = io.BytesIO()
                     screenshot.save(img_byte_arr, format='JPEG', quality=60)
@@ -2568,36 +2841,66 @@ class AlphaAgent:
                 first_chunk = None
                 used_model = None
 
-                for cand_model in self.model_candidates:
+                # Prioritize currently active model first
+                active_model = getattr(self, "model_name", None) or self.model_candidates[0]
+                ordered_candidates = [active_model] + [m for m in self.model_candidates if m != active_model]
+
+                for cand_model in ordered_candidates:
                     if not self.is_running:
                         break
-                    try:
-                        curr_stream = await self.client.aio.models.generate_content_stream(
-                            model=cand_model,
-                            contents=history,
-                            config=types.GenerateContentConfig(
-                                system_instruction=self.get_system_prompt(),
-                                safety_settings=self._get_safety_settings(),
-                                tools=self._get_tools() if is_desktop else None,
-                                temperature=0.3,
+
+                    connected = False
+                    # Attempt connection up to 2 times (attempt 0 = initial, attempt 1 = reconnect verification)
+                    for attempt in range(2):
+                        if not self.is_running:
+                            break
+                        try:
+                            curr_stream = await self.client.aio.models.generate_content_stream(
+                                model=cand_model,
+                                contents=history,
+                                config=types.GenerateContentConfig(
+                                    system_instruction=self.get_system_prompt(),
+                                    safety_settings=self._get_safety_settings(),
+                                    tools=self._get_tools() if is_desktop else None,
+                                    temperature=0.3,
+                                )
                             )
-                        )
-                        # Pull first chunk with 10.0s timeout to prevent hanging on server queues
-                        first_chunk = await asyncio.wait_for(curr_stream.__anext__(), timeout=10.0)
-                        stream = curr_stream
-                        used_model = cand_model
-                        self.model_name = cand_model
+                            # Pull first chunk with 10.0s timeout to prevent hanging on server queues
+                            first_chunk = await asyncio.wait_for(curr_stream.__anext__(), timeout=10.0)
+                            stream = curr_stream
+                            used_model = cand_model
+                            self.model_name = cand_model
+                            connected = True
+                            if attempt > 0:
+                                print(f"[AlphaAgent] Reconnect to {cand_model} succeeded!", flush=True)
+                                if on_log:
+                                    on_log(f"[{cand_model}] Reconnect successful! Resuming stream.", "green")
+                            break
+                        except (asyncio.TimeoutError, StopAsyncIteration):
+                            if attempt == 0:
+                                print(f"[AlphaAgent] Model {cand_model} response slow or interrupted. Reconnecting once before candidate rollover...", flush=True)
+                                if on_log:
+                                    on_log(f"[{cand_model}] Stream interrupted / latency check. Reconnecting...", "warn")
+                                await asyncio.sleep(0.35)
+                            else:
+                                print(f"[AlphaAgent] Model {cand_model} response slow (>10s) after reconnect. Fast-switching to next candidate...", flush=True)
+                                if on_log:
+                                    on_log(f"[{cand_model} high latency] Reconnect failed. Switching candidate...", "warn")
+                        except Exception as e:
+                            err_str = str(e)
+                            if attempt == 0:
+                                print(f"[AlphaAgent] Model {cand_model} attempt 1 hitch ({err_str[:70]}). Reconnecting once before fallback...", flush=True)
+                                if on_log:
+                                    on_log(f"[{cand_model}] Stream glitch detected ({err_str[:40]}). Attempting reconnect...", "warn")
+                                await asyncio.sleep(0.35)
+                            else:
+                                print(f"[AlphaAgent] Model {cand_model} reconnect failed ({err_str[:70]}). Trying fallback...", flush=True)
+                                if on_log:
+                                    on_log(f"[{cand_model} demand spike] Reconnect failed. Trying alternate candidate...", "warn")
+                                await asyncio.sleep(0.15)
+
+                    if connected:
                         break
-                    except (asyncio.TimeoutError, StopAsyncIteration):
-                        print(f"[AlphaAgent] Model {cand_model} response slow (>10s). Fast-switching to next candidate...", flush=True)
-                        if on_log:
-                            on_log(f"[{cand_model} high latency] Switching candidate...", "warn")
-                    except Exception as e:
-                        err_str = str(e)
-                        print(f"[AlphaAgent] Model {cand_model} failed ({err_str[:70]}). Trying fallback...", flush=True)
-                        if on_log:
-                            on_log(f"[{cand_model} demand spike] Trying alternate candidate...", "warn")
-                        await asyncio.sleep(0.15)
 
                 if not stream or not first_chunk or not self.is_running:
                     if not self.is_running:
@@ -2645,13 +2948,15 @@ class AlphaAgent:
                     break
 
                 clean_text = self.voice.clean_text_for_speech(full_model_text)
+                persona_name = self.get_active_persona_name()
                 if clean_text:
                     if on_log:
-                        on_log(f"[Alpha]: {clean_text}", "text")
+                        on_log(f"[{persona_name}]: {clean_text}", "text")
                     if self.is_running:
                         if on_status:
                             on_status("PROCESSING")
-                        self.voice.queue_chunk(clean_text)
+                        if not (getattr(self, "automation_mode", False) and function_calls):
+                            self.voice.queue_chunk(clean_text)
 
                 # Cutoff Auto-Continuation Guard
                 is_cutoff = False
@@ -2674,22 +2979,33 @@ class AlphaAgent:
                             "Continue immediately and seamlessly from that exact point to complete the thought naturally. "
                             "CRITICAL: Do NOT repeat anything you already said. Output only the remaining completion words."
                         )
-                        cont_resp = await self.client.aio.models.generate_content(
-                            model=used_model or "gemini-2.5-flash",
-                            contents=[cont_prompt],
-                            config=types.GenerateContentConfig(
-                                system_instruction=self.get_system_prompt(),
-                                safety_settings=self._get_safety_settings(),
-                                temperature=0.3,
-                            )
-                        )
+                        cont_resp = None
+                        for cont_attempt in range(2):
+                            try:
+                                cont_resp = await self.client.aio.models.generate_content(
+                                    model=used_model or "gemini-2.5-flash",
+                                    contents=[cont_prompt],
+                                    config=types.GenerateContentConfig(
+                                        system_instruction=self.get_system_prompt(),
+                                        safety_settings=self._get_safety_settings(),
+                                        temperature=0.3,
+                                    )
+                                )
+                                if cont_resp and cont_resp.text:
+                                    break
+                            except Exception as ce:
+                                if cont_attempt == 0:
+                                    print(f"[Cutoff Resume] Attempt 1 interrupted ({ce}). Reconnecting once...", flush=True)
+                                    await asyncio.sleep(0.35)
+                                else:
+                                    raise ce
                         if cont_resp and cont_resp.text:
                             continuation_text = cont_resp.text.strip()
                             print(f"[Continued]: {continuation_text}", flush=True)
                             clean_cont = self.voice.clean_text_for_speech(continuation_text)
                             if clean_cont and self.is_running:
                                 if on_log:
-                                    on_log(f"[Alpha Continued]: {clean_cont}", "text")
+                                    on_log(f"[{persona_name} Continued]: {clean_cont}", "text")
                                 self.voice.queue_chunk(clean_cont)
                             full_model_text += " " + continuation_text
                     except Exception as cont_err:
@@ -2799,6 +3115,8 @@ class AlphaAgent:
                         if self.memory_manager and s and p and o:
                             ok = self.memory_manager.memorize_fact(s, p, o, source="voice_dialogue")
                             res = f"Fact committed to memory: ({s} {p} {o})" if ok else "Fact already present in memory."
+                            if on_log:
+                                on_log(f"[MEMORY] Fact saved: ({s} {p} {o})", "cyan")
                         else:
                             res = f"Memorized: ({s} {p} {o})"
                     elif fn_name == "recall_knowledge":
@@ -2813,6 +3131,8 @@ class AlphaAgent:
                         if self.memory_manager and c:
                             self.memory_manager.write_diary_entry(c, session_name=self.current_session)
                             res = "Diary entry recorded in episodic memory."
+                            if on_log:
+                                on_log("[MEMORY] Diary entry updated.", "cyan")
                         else:
                             res = "Diary logged."
                     elif fn_name == "update_personality":
@@ -2827,10 +3147,52 @@ class AlphaAgent:
                         p = fn_args.get("prompt", "").strip()
                         neg = fn_args.get("negative_prompt", "")
                         m = fn_args.get("model_name", "jugg")
+                        lora_val = fn_args.get("lora_name", "none")
                         if self.studio_manager and p:
-                            gen_res = self.studio_manager.generate_image(prompt=p, model_name=m, negative_prompt=neg)
+                            if on_log:
+                                on_log(f"[STUDIO] Selecting model '{m}' (LoRA: {lora_val}) & dispatching generation to Modal...", "cyan")
+                            gen_res = self.studio_manager.generate_image(prompt=p, model_name=m, negative_prompt=neg, lora=lora_val)
                             img_path = gen_res.get("image_path", "")
-                            res = f"Image generated successfully: {img_path}" if img_path else "Image generated in Neural Studio."
+                            gen_id = gen_res.get("id")
+                            if img_path and os.path.exists(img_path):
+                                if on_log:
+                                    on_log(f"[STUDIO] Generation complete. Analyzing visual textures & aesthetics...", "cyan")
+                                # Trigger automated visual critique using Gemini Vision
+                                critique_text = ""
+                                try:
+                                    with open(img_path, "rb") as f_img:
+                                        eval_bytes = f_img.read()
+                                    eval_resp = await self.client.aio.models.generate_content(
+                                        model=self.model_name or "gemini-2.5-flash",
+                                        contents=[
+                                            types.Part.from_bytes(data=eval_bytes, mime_type="image/png"),
+                                            types.Part.from_text(
+                                                text=f"You are Alpha reviewing this freshly generated image against creative prompt: '{p}'. "
+                                                     "Analyze the rendering: comment on the textures, lighting, composition, and aesthetic quality. "
+                                                     "Provide a concise, direct 2-sentence critique."
+                                            )
+                                        ]
+                                    )
+                                    if eval_resp and eval_resp.text:
+                                        critique_text = eval_resp.text.strip()
+                                        if hasattr(self.studio_manager, "update_critique") and gen_id:
+                                            self.studio_manager.update_critique(gen_id, critique_text)
+                                        if on_log:
+                                            on_log(f"[STUDIO CRITIQUE] {critique_text}", "cyan")
+                                        self.voice.queue_chunk(critique_text)
+                                except Exception as eval_err:
+                                    print(f"[Studio Vision Eval Error]: {eval_err}", flush=True)
+
+                                # Notify external GUI listeners if attached
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(img_path, gen_res)
+                                    except Exception:
+                                        pass
+
+                                res = f"Image generated successfully at {img_path}. Visual Critique: {critique_text}" if critique_text else f"Image generated: {img_path}"
+                            else:
+                                res = f"Image generation failed: {gen_res.get('error', 'unknown')}"
                         else:
                             res = "Image studio request dispatched."
                     elif fn_name == "capture_webcam":
@@ -2892,6 +3254,9 @@ class AlphaAgent:
                         self.abort()
                         break
 
+                if getattr(self, "automation_mode", False) and function_calls and clean_text and self.is_running:
+                    self.voice.queue_chunk(clean_text)
+
                 history.append(types.Content(role="user", parts=function_responses))
 
                 if task_finished or not self.is_running:
@@ -2905,7 +3270,8 @@ class AlphaAgent:
 
             # Commit turn to session history file
             if self.session_manager and full_model_text:
-                self.session_manager.append_turn(self.current_session, user_goal, full_model_text)
+                tag = "[Internal Impulse]" if getattr(self, "unobserved_mode", False) else "[You]"
+                self.session_manager.append_turn(self.current_session, user_goal, full_model_text, tag=tag)
 
         finally:
             self.is_running = False
@@ -2952,9 +3318,15 @@ class AlphaAgent:
 
             if is_desktop:
                 screen_summary = await self.controller.get_screen_ocr_summary(fast_mode=False)
-                user_prompt = f"Architect's Instruction: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
+                if getattr(self, "unobserved_mode", False):
+                    user_prompt = f"[Internal Impulse]: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
+                else:
+                    user_prompt = f"Architect's Instruction: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
             else:
-                user_prompt = f"Architect: {user_goal}"
+                if getattr(self, "unobserved_mode", False):
+                    user_prompt = f"[Internal Impulse]: {user_goal}"
+                else:
+                    user_prompt = f"Architect: {user_goal}"
             messages.append({"role": "user", "content": user_prompt})
 
             step = 0
@@ -2980,11 +3352,35 @@ class AlphaAgent:
                 try:
                     stream = await self.openai_client.chat.completions.create(**call_kwargs)
                 except Exception as e:
-                    err_str = f"Modal vLLM call failed: {e}"
-                    print(f"[AlphaAgent Modal Error]: {err_str}", flush=True)
-                    if on_log:
-                        on_log(err_str, "error")
-                    break
+                    err_msg = str(e).lower()
+                    retried = False
+                    # Auto-heal: model name mismatch / 404
+                    if "does not exist" in err_msg or "not found" in err_msg or "404" in err_msg:
+                        detected = await asyncio.to_thread(self._detect_modal_model)
+                        if detected and detected != self.modal_model:
+                            print(f"[AlphaAgent] Model '{self.modal_model}' not found. Auto-detected '{detected}', retrying...", flush=True)
+                            self.modal_model = detected
+                            call_kwargs["model"] = detected
+                            try:
+                                stream = await self.openai_client.chat.completions.create(**call_kwargs)
+                                retried = True
+                            except Exception as re2:
+                                e = re2
+                    # Auto-heal: endpoint doesn't support chat_template_kwargs extra_body
+                    if not retried and "extra_body" in call_kwargs:
+                        call_kwargs_no_eb = dict(call_kwargs)
+                        call_kwargs_no_eb.pop("extra_body", None)
+                        try:
+                            stream = await self.openai_client.chat.completions.create(**call_kwargs_no_eb)
+                            retried = True
+                        except Exception as re3:
+                            e = re3
+                    if not retried:
+                        err_str = f"Modal vLLM call failed: {e}"
+                        print(f"[AlphaAgent Modal Error]: {err_str}", flush=True)
+                        if on_log:
+                            on_log(err_str, "error")
+                        break
 
                 in_think = False
                 current_assistant_text = ""
@@ -3034,9 +3430,10 @@ class AlphaAgent:
                     break
 
                 clean_text = self.voice.clean_text_for_speech(current_assistant_text)
+                persona_name = self.get_active_persona_name()
                 if clean_text:
                     if on_log:
-                        on_log(f"[Alpha]: {clean_text}", "text")
+                        on_log(f"[{persona_name}]: {clean_text}", "text")
                     if self.is_running:
                         if on_status:
                             on_status("PROCESSING")
@@ -3266,7 +3663,8 @@ class AlphaAgent:
                 await asyncio.sleep(0.6)
 
             if self.session_manager and full_turn_spoken_text:
-                self.session_manager.append_turn(self.current_session, user_goal, full_turn_spoken_text.strip())
+                tag = "[Internal Impulse]" if getattr(self, "unobserved_mode", False) else "[You]"
+                self.session_manager.append_turn(self.current_session, user_goal, full_turn_spoken_text.strip(), tag=tag)
 
         finally:
             self.is_running = False
@@ -3309,3 +3707,10 @@ class AlphaAgent:
 if __name__ == "__main__":
     agent = AlphaAgent()
     asyncio.run(agent.run_cli())
+
+
+
+
+
+
+

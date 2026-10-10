@@ -39,6 +39,11 @@ def main():
         except KeyboardInterrupt:
             sys.exit(0)
     else:
+        if any(arg in sys.argv for arg in ("--overseer-client", "--remote-overseer", "--overseer")):
+            import run_overseer_client
+            run_overseer_client.main()
+            return
+
         # Start Alexa Ingress Webhook Listener in background thread
         try:
             from integrations.alexa_ingress import start_ingress_server_thread

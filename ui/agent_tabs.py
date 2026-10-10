@@ -19,10 +19,10 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QComboBox, QSlider,
     QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QFrame, QSplitter, QScrollArea,
-    QFileDialog, QProgressBar, QMessageBox, QGroupBox, QTabWidget, QTabBar
+    QFileDialog, QProgressBar, QMessageBox, QGroupBox, QTabWidget, QTabBar, QDialog, QApplication
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
-from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
+from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon, QCursor
 
 try:
     import psutil
@@ -161,6 +161,10 @@ class AgentMemoryTab(QWidget):
         self.profile_widget = self._build_profile_subtab()
         self.subtabs.addTab(self.profile_widget, "PERSONAL INTELLIGENCE")
 
+        # Subtab 5: AI Identity Memory
+        self.identity_widget = self._build_identity_subtab()
+        self.subtabs.addTab(self.identity_widget, "🤖 AI IDENTITY MEMORY")
+
         root.addWidget(self.subtabs, 1)
 
         # Initial data load
@@ -171,6 +175,7 @@ class AgentMemoryTab(QWidget):
         self._load_traits()
         self._load_episodes()
         self._load_profile()
+        self._load_identity()
 
     # --- Subtab 1: Facts ---
     def _build_facts_subtab(self):
@@ -208,12 +213,24 @@ class AgentMemoryTab(QWidget):
         abl.setContentsMargins(6, 4, 6, 4)
         abl.setSpacing(6)
 
-        self.in_subj = QLineEdit(); self.in_subj.setPlaceholderText("Subject (e.g. Architect)")
-        self.in_pred = QLineEdit(); self.in_pred.setPlaceholderText("Predicate (e.g. works_with)")
-        self.in_obj  = QLineEdit(); self.in_obj.setPlaceholderText("Object (e.g. Python, AI)")
-        
-        for inp in (self.in_subj, self.in_pred, self.in_obj):
-            inp.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+        self.in_subj = QComboBox()
+        self.in_subj.setEditable(True)
+        self.in_subj.addItems(["Josh", "Alpha", "AI Identity", "System", "Environment", "User"])
+        self.in_subj.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        self.in_pred = QComboBox()
+        self.in_pred.setEditable(True)
+        self.in_pred.addItems(["likes", "dislikes", "prefers", "works_with", "created", "owns", "uses", "feels", "knows", "wants"])
+        self.in_pred.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        self.in_obj = QLineEdit()
+        self.in_obj.setPlaceholderText("Object (e.g. Python, AI, Synthwave)")
+        self.in_obj.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        self.in_source = QComboBox()
+        self.in_source.setEditable(True)
+        self.in_source.addItems(["manual_entry", "voice_dialogue", "autonomous_exploration", "screen_observation", "user_stated"])
+        self.in_source.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_dim']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
 
         btn_add = QPushButton("➕ ADD FACT")
         btn_add.setStyleSheet(f"background: {C['neon_cyan']}33; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; font-weight: bold; font-family: {FONT_FAMILY}; font-size: 9px; padding: 4px 10px;")
@@ -221,7 +238,8 @@ class AgentMemoryTab(QWidget):
 
         abl.addWidget(self.in_subj, 1)
         abl.addWidget(self.in_pred, 1)
-        abl.addWidget(self.in_obj, 1)
+        abl.addWidget(self.in_obj, 2)
+        abl.addWidget(self.in_source, 1)
         abl.addWidget(btn_add)
         l.addWidget(add_bar)
 
@@ -256,13 +274,12 @@ class AgentMemoryTab(QWidget):
         self._populate_facts_table(filtered)
 
     def _add_fact(self):
-        s = self.in_subj.text().strip()
-        p = self.in_pred.text().strip()
+        s = self.in_subj.currentText().strip()
+        p = self.in_pred.currentText().strip()
         o = self.in_obj.text().strip()
+        src = self.in_source.currentText().strip() or "manual_entry"
         if s and p and o:
-            self.mm.memorize_fact(s, p, o, source="manual_ui")
-            self.in_subj.clear()
-            self.in_pred.clear()
+            self.mm.memorize_fact(s, p, o, source=src)
             self.in_obj.clear()
             self._load_facts()
 
@@ -460,6 +477,7 @@ class AgentMemoryTab(QWidget):
         abl.setSpacing(6)
 
         self.in_prof_cat = QComboBox()
+        self.in_prof_cat.setEditable(True)
         self.in_prof_cat.addItems(["identity", "preferences", "environment", "projects", "habits", "general"])
         self.in_prof_cat.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px;")
         
@@ -468,6 +486,11 @@ class AgentMemoryTab(QWidget):
         for inp in (self.in_prof_key, self.in_prof_val):
             inp.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
 
+        self.in_prof_source = QComboBox()
+        self.in_prof_source.setEditable(True)
+        self.in_prof_source.addItems(["manual_entry", "user_stated", "inferred", "chat_history", "observation"])
+        self.in_prof_source.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_dim']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px;")
+
         btn_save = QPushButton("💾 SAVE ATTRIBUTE")
         btn_save.setStyleSheet(f"background: {C['neon_cyan']}33; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; font-weight: bold; font-family: {FONT_FAMILY}; font-size: 9px; padding: 4px 10px;")
         btn_save.clicked.connect(self._upsert_profile)
@@ -475,6 +498,7 @@ class AgentMemoryTab(QWidget):
         abl.addWidget(self.in_prof_cat)
         abl.addWidget(self.in_prof_key, 1)
         abl.addWidget(self.in_prof_val, 1)
+        abl.addWidget(self.in_prof_source, 1)
         abl.addWidget(btn_save)
         l.addWidget(add_bar)
 
@@ -492,11 +516,12 @@ class AgentMemoryTab(QWidget):
             self.table_profile.setItem(r, 5, QTableWidgetItem(str(item.get("updated_at", ""))))
 
     def _upsert_profile(self):
-        cat = self.in_prof_cat.currentText()
+        cat = self.in_prof_cat.currentText().strip() or "general"
         k = self.in_prof_key.text().strip()
         v = self.in_prof_val.text().strip()
+        src = self.in_prof_source.currentText().strip() or "manual_entry"
         if k and v:
-            self.mm.set_user_attribute(k, v, category=cat, source="manual_ui")
+            self.mm.set_user_attribute(k, v, category=cat, source=src)
             self.in_prof_key.clear()
             self.in_prof_val.clear()
             self._load_profile()
@@ -508,6 +533,128 @@ class AgentMemoryTab(QWidget):
             if key_item and key_item.text():
                 self.mm.delete_user_attribute(key_item.text())
                 self._load_profile()
+
+    # --- Subtab 5: AI Identity Memory ---
+    def _build_identity_subtab(self):
+        w = QWidget()
+        l = QVBoxLayout(w)
+        l.setContentsMargins(8, 8, 8, 8)
+        l.setSpacing(6)
+
+        top = QHBoxLayout()
+        self.identity_search = QLineEdit()
+        self.identity_search.setPlaceholderText("🔍 Filter AI Identity memory by key, content, or domain...")
+        self.identity_search.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; padding: 5px; font-family: {FONT_FAMILY}; font-size: 11px;")
+        self.identity_search.textChanged.connect(self._filter_identity)
+        top.addWidget(self.identity_search, 1)
+
+        self.identity_domain_filter = QComboBox()
+        self.identity_domain_filter.addItems(["ALL DOMAINS", "project", "goal", "diary", "thought", "fact", "preference", "general"])
+        self.identity_domain_filter.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 4px;")
+        self.identity_domain_filter.currentTextChanged.connect(self._filter_identity)
+        top.addWidget(self.identity_domain_filter)
+
+        self.btn_del_id = QPushButton("🗑 DELETE SELECTED")
+        self.btn_del_id.setStyleSheet(f"background: {C['neon_red']}22; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; padding: 5px 10px; font-family: {FONT_FAMILY}; font-size: 9px; font-weight: bold;")
+        self.btn_del_id.clicked.connect(self._delete_identity)
+        top.addWidget(self.btn_del_id)
+        l.addLayout(top)
+
+        self.table_identity = QTableWidget()
+        self.table_identity.setColumnCount(6)
+        self.table_identity.setHorizontalHeaderLabels(["ID", "Domain", "Key Name", "Content", "Source", "Created At"])
+        self.table_identity.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table_identity.horizontalHeader().setStretchLastSection(True)
+        self.table_identity.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_identity.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table_identity.setStyleSheet(table_stylesheet())
+        l.addWidget(self.table_identity, 1)
+
+        add_bar = QFrame()
+        add_bar.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px;")
+        abl = QHBoxLayout(add_bar)
+        abl.setContentsMargins(6, 4, 6, 4)
+        abl.setSpacing(6)
+
+        self.in_id_domain = QComboBox()
+        self.in_id_domain.setEditable(True)
+        self.in_id_domain.addItems(["project", "goal", "diary", "thought", "fact", "preference", "general"])
+        self.in_id_domain.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        self.in_id_key = QLineEdit()
+        self.in_id_key.setPlaceholderText("Key (e.g. current_quest, art_interest)")
+        self.in_id_key.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        self.in_id_content = QLineEdit()
+        self.in_id_content.setPlaceholderText("Content / reflection details...")
+        self.in_id_content.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        self.in_id_source = QComboBox()
+        self.in_id_source.setEditable(True)
+        self.in_id_source.addItems(["autonomous_exploration", "identity_monologue", "manual_entry", "self_reflection", "desktop_interaction"])
+        self.in_id_source.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_dim']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 3px 6px;")
+
+        btn_add = QPushButton("➕ SAVE IDENTITY")
+        btn_add.setStyleSheet(f"background: {C['neon_green']}33; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; font-weight: bold; font-family: {FONT_FAMILY}; font-size: 9px; padding: 4px 10px;")
+        btn_add.clicked.connect(self._add_identity)
+
+        abl.addWidget(self.in_id_domain, 1)
+        abl.addWidget(self.in_id_key, 1)
+        abl.addWidget(self.in_id_content, 2)
+        abl.addWidget(self.in_id_source, 1)
+        abl.addWidget(btn_add)
+        l.addWidget(add_bar)
+
+        return w
+
+    def _load_identity(self):
+        entries = self.mm.get_all_identity_entries(limit=250)
+        self._all_identity = entries
+        self._populate_identity_table(entries)
+
+    def _populate_identity_table(self, entries):
+        self.table_identity.setRowCount(len(entries))
+        for r, item in enumerate(entries):
+            self.table_identity.setItem(r, 0, QTableWidgetItem(str(item.get("id", ""))))
+            self.table_identity.setItem(r, 1, QTableWidgetItem(str(item.get("domain", ""))))
+            self.table_identity.setItem(r, 2, QTableWidgetItem(str(item.get("key_name", ""))))
+            self.table_identity.setItem(r, 3, QTableWidgetItem(str(item.get("content", ""))))
+            self.table_identity.setItem(r, 4, QTableWidgetItem(str(item.get("source", ""))))
+            self.table_identity.setItem(r, 5, QTableWidgetItem(str(item.get("created_at", ""))))
+
+    def _filter_identity(self):
+        q = self.identity_search.text().strip().lower()
+        dom = self.identity_domain_filter.currentText()
+        entries = getattr(self, "_all_identity", [])
+        if dom != "ALL DOMAINS":
+            entries = [e for e in entries if str(e.get("domain", "")).lower() == dom.lower()]
+        if q:
+            entries = [
+                e for e in entries
+                if q in str(e.get("key_name", "")).lower()
+                or q in str(e.get("content", "")).lower()
+                or q in str(e.get("domain", "")).lower()
+            ]
+        self._populate_identity_table(entries)
+
+    def _add_identity(self):
+        dom = self.in_id_domain.currentText().strip() or "general"
+        key = self.in_id_key.text().strip()
+        cnt = self.in_id_content.text().strip()
+        src = self.in_id_source.currentText().strip() or "manual_entry"
+        if key and cnt:
+            self.mm.save_identity_entry(domain=dom, key_name=key, content=cnt, source=src)
+            self.in_id_key.clear()
+            self.in_id_content.clear()
+            self._load_identity()
+
+    def _delete_identity(self):
+        row = self.table_identity.currentRow()
+        if row >= 0:
+            id_item = self.table_identity.item(row, 0)
+            if id_item and id_item.text().isdigit():
+                self.mm.delete_identity_entry(int(id_item.text()))
+                self._load_identity()
 
 
 # =============================================================================
@@ -546,651 +693,511 @@ class ImageUpscaleWorker(QThread):
         except Exception as e:
             self.error.emit(str(e))
 
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal()
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
+
+class FullScreenImageViewer(QDialog):
+    """Zero-distraction fullscreen image viewer with Single & Quad-View (2x2) FIFO scrolling pipeline."""
+    def __init__(self, studio_tab, parent=None):
+        super().__init__(parent)
+        self.studio_tab = studio_tab
+        self.setWindowTitle("Neural Studio Viewport - Fullscreen")
+        self.setStyleSheet("background-color: #03060c;")
+        self.setWindowState(Qt.WindowState.WindowFullScreen)
+        
+        self.is_quad_view = False
+        self.current_path = None
+        self.quad_offset = 0
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
+
+        # Top Overlay Control HUD
+        hud = QHBoxLayout()
+        hud.setContentsMargins(10, 4, 10, 4)
+        
+        self.lbl_hud_title = QLabel("FULLSCREEN VIEWPORT")
+        self.lbl_hud_title.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
+        self.lbl_hud_title.setStyleSheet(f"color: {C['neon_cyan']}; background: transparent;")
+        hud.addWidget(self.lbl_hud_title)
+        hud.addStretch()
+
+        self.btn_toggle_quad = QPushButton("? QUAD VIEW (2x2)")
+        self.btn_toggle_quad.setFixedSize(140, 26)
+        self.btn_toggle_quad.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_toggle_quad.setStyleSheet(f"background: #09172e; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_toggle_quad.clicked.connect(self.toggle_quad_view)
+        hud.addWidget(self.btn_toggle_quad)
+
+        btn_close = QPushButton("? CLOSE (ESC)")
+        btn_close.setFixedSize(100, 26)
+        btn_close.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        btn_close.setStyleSheet(f"background: #1f0a14; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px;")
+        btn_close.clicked.connect(self.close)
+        hud.addWidget(btn_close)
+        root.addLayout(hud)
+
+        # Container Widget for views
+        self.view_container = QWidget()
+        self.view_layout = QVBoxLayout(self.view_container)
+        self.view_layout.setContentsMargins(0, 0, 0, 0)
+        root.addWidget(self.view_container, 1)
+
+        # 1. Single View Label
+        self.single_label = QLabel()
+        self.single_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.single_label.setStyleSheet("background-color: #03060c;")
+        self.view_layout.addWidget(self.single_label)
+
+        # 2. Quad View Widget (2x2 Grid)
+        self.quad_widget = QWidget()
+        self.quad_grid = QGridLayout(self.quad_widget)
+        self.quad_grid.setContentsMargins(0, 0, 0, 0)
+        self.quad_grid.setSpacing(6)
+
+        self.quad_labels = []
+        positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
+        for i, (r, c) in enumerate(positions):
+            lbl = ClickableLabel()
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setStyleSheet(f"background-color: #050a14; border: 1px solid {C['border']}; border-radius: 6px;")
+            lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            lbl.clicked.connect(lambda idx=i: self._on_quad_label_clicked(idx))
+            self.quad_grid.addWidget(lbl, r, c)
+            self.quad_labels.append(lbl)
+
+        self.quad_widget.hide()
+        self.view_layout.addWidget(self.quad_widget)
+
+    def toggle_quad_view(self):
+        self.is_quad_view = not self.is_quad_view
+        if self.is_quad_view:
+            self.single_label.hide()
+            self.quad_widget.show()
+            self.btn_toggle_quad.setText("? SINGLE VIEW")
+            self.btn_toggle_quad.setStyleSheet(f"background: {C['neon_magenta']}33; color: {C['neon_magenta']}; border: 1px solid {C['neon_magenta']}; font-weight: bold; border-radius: 4px;")
+            self.lbl_hud_title.setText("FULLSCREEN ? 4-SLOT QUAD SCROLL (Newest Top-Left)")
+            self._render_quad()
+        else:
+            self.quad_widget.hide()
+            self.single_label.show()
+            self.btn_toggle_quad.setText("? QUAD VIEW (2x2)")
+            self.btn_toggle_quad.setStyleSheet(f"background: #09172e; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+            self.lbl_hud_title.setText("FULLSCREEN VIEWPORT")
+            if self.current_path:
+                self.update_image(self.current_path)
+
+    def _render_quad(self):
+        hist = self.studio_tab.image_history
+        if not hist: return
+        screen_size = QApplication.primaryScreen().size()
+        half_w = (screen_size.width() - 30) // 2
+        half_h = (screen_size.height() - 70) // 2
+
+        for i in range(4):
+            idx = self.quad_offset + i
+            if idx < len(hist):
+                p = hist[idx].get("image_path")
+                if p and os.path.exists(p):
+                    pix = QPixmap(p)
+                    scaled = pix.scaled(half_w, half_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                    self.quad_labels[i].setPixmap(scaled)
+                    self.quad_labels[i].setToolTip(f"Slot {i+1}: {os.path.basename(p)} (Click to view single)")
+                else:
+                    self.quad_labels[i].clear()
+                    self.quad_labels[i].setText("Slot Empty")
+            else:
+                self.quad_labels[i].clear()
+                self.quad_labels[i].setText("Awaiting Generation")
+
+    def _on_quad_label_clicked(self, slot_idx: int):
+        hist = self.studio_tab.image_history
+        idx = self.quad_offset + slot_idx
+        if idx < len(hist):
+            self.studio_tab._load_image_by_index(idx)
+            self.toggle_quad_view()
+
+    def update_image(self, img_path):
+        self.current_path = img_path
+        if self.is_quad_view:
+            self.quad_offset = 0
+            self._render_quad()
+        else:
+            if img_path and os.path.exists(img_path):
+                pix = QPixmap(img_path)
+                screen_size = QApplication.primaryScreen().size()
+                scaled = pix.scaled(screen_size.width(), screen_size.height() - 40, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.single_label.setPixmap(scaled)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_F11):
+            self.close()
+        elif event.key() in (Qt.Key.Key_Q, Qt.Key.Key_4):
+            self.toggle_quad_view()
+        elif event.key() == Qt.Key.Key_Left:
+            if self.is_quad_view:
+                if self.quad_offset + 1 < len(self.studio_tab.image_history):
+                    self.quad_offset += 1
+                    self._render_quad()
+            else:
+                self.studio_tab._prev_image()
+        elif event.key() == Qt.Key.Key_Right:
+            if self.is_quad_view:
+                if self.quad_offset > 0:
+                    self.quad_offset -= 1
+                    self._render_quad()
+            else:
+                self.studio_tab._next_image()
+        else:
+            super().keyPressEvent(event)
+
 class AgentStudioTab(QWidget):
-    """Neural Image Studio with SDXL Checkpoints, LoRA, Upscaling, & RLHF Feedback."""
+    """Overhauled Neural Image Studio with primary viewport focus, batch slideshow, filmstrip, and vision critique."""
     def __init__(self, main_win, parent=None):
         super().__init__(parent)
         self.main_win = main_win
-        self.sm = main_win.agent.studio_mgr
+        self.sm = main_win.agent.studio_mgr if hasattr(main_win, 'agent') and main_win.agent else None
         self.current_img_path = None
         self.current_gen_id = None
-        self.current_rating = 0
-        self._gen_worker = None
-        self._upscale_worker = None
+        self.image_history = []
+        self.current_idx = 0
+        self.fullscreen_viewer = None
+
+        # Connect agent hook for live generation updates
+        if hasattr(self.main_win, 'agent') and self.main_win.agent:
+            self.main_win.agent.on_image_generated = self.on_image_generated
+
+        self._slideshow_timer = QTimer(self)
+        self._slideshow_timer.timeout.connect(self._next_image)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
+        root.setSpacing(8)
 
-        # Header bar
+        # 1. Header Bar with telemetry & actions
         hdr = QHBoxLayout()
-        title = QLabel("🎨 NEURAL IMAGE STUDIO")
-        title.setFont(QFont(FONT_FAMILY, 10, QFont.Weight.Bold))
+        title = QLabel("? NEURAL IMAGE STUDIO")
+        title.setFont(QFont(FONT_FAMILY, 11, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C['neon_cyan']};")
         hdr.addWidget(title)
-        
-        self.cluster_badge = QLabel("⚡ Modal H100 SDXL Cluster & Adaptive RLHF Learning")
-        self.cluster_badge.setStyleSheet(f"color: {C['text_dim']}; font-family: {FONT_FAMILY}; font-size: 9px;")
-        hdr.addWidget(self.cluster_badge)
+
+        self.lbl_pipeline_status = QLabel("Modal H100 Cluster ? Ready")
+        self.lbl_pipeline_status.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
+        self.lbl_pipeline_status.setStyleSheet(f"color: {C['text_dim']}; background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 3px 8px;")
+        hdr.addWidget(self.lbl_pipeline_status)
         hdr.addStretch()
 
-        self.btn_open_folder = QPushButton("📂 OPEN OUTPUTS")
+        self.btn_toggle_controls = QPushButton("? MANUAL CONTROLS")
+        self.btn_toggle_controls.setFixedHeight(28)
+        self.btn_toggle_controls.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_toggle_controls.setStyleSheet(f"background: {C['border']}; color: {C['text_bright']}; border-radius: 4px; padding: 0 10px;")
+        self.btn_toggle_controls.clicked.connect(self._toggle_controls_drawer)
+        hdr.addWidget(self.btn_toggle_controls)
+
+        self.btn_open_folder = QPushButton("?? OPEN OUTPUTS")
         self.btn_open_folder.setFixedHeight(28)
         self.btn_open_folder.setFont(QFont(FONT_FAMILY, 8))
-        self.btn_open_folder.setStyleSheet(f"""
-            QPushButton {{
-                background: transparent; color: {C['text_dim']};
-                border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;
-            }}
-            QPushButton:hover {{ border-color: {C['neon_blue']}; color: {C['text_bright']}; }}
-        """)
+        self.btn_open_folder.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;")
         self.btn_open_folder.clicked.connect(self._open_output_folder)
         hdr.addWidget(self.btn_open_folder)
         root.addLayout(hdr)
 
-        # Main Splitter (Left: Controls, Right: Viewport + RLHF)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
+        # 2. Progress Bar
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setFixedHeight(4)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setStyleSheet(f"QProgressBar {{ background-color: {C['bg_deep']}; border: none; }} QProgressBar::chunk {{ background-color: {C['neon_cyan']}; }}")
+        root.addWidget(self.progress_bar)
 
-        # --- Left: Controls Panel (Scrollable) ---
-        left_scroll = QScrollArea()
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_scroll.setStyleSheet("background: transparent; border: none;")
+        # 3. Collapsible Manual Controls Drawer (Hidden by default, AI manages it)
+        self.controls_drawer = QFrame()
+        self.controls_drawer.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 8px;")
+        cd_layout = QVBoxLayout(self.controls_drawer)
         
-        left_widget = QWidget()
-        ll = QVBoxLayout(left_widget)
-        ll.setContentsMargins(0, 0, 10, 0)
-        ll.setSpacing(8)
-
-        # Model Selector
-        ll.addWidget(QLabel("TARGET MODEL / CHECKPOINT"))
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("Model:"))
         self.combo_model = QComboBox()
         for k, v in MODEL_CATALOG.items():
             self.combo_model.addItem(f"{v['name']} ({k})", k)
-        self.combo_model.setStyleSheet(f"""
-            QComboBox {{
-                background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
-                font-family: '{FONT_FAMILY}'; font-size: 10px;
-            }}
-        """)
-        ll.addWidget(self.combo_model)
+        row1.addWidget(self.combo_model, 2)
 
-        # LoRA Selector + Scale
-        lora_row = QHBoxLayout()
+        row1.addWidget(QLabel("LoRA:"))
         self.combo_lora = QComboBox()
         for k, v in LORA_CATALOG.items():
             self.combo_lora.addItem(v, k)
-        self.combo_lora.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px; font-family: '{FONT_FAMILY}'; font-size: 10px;")
-        lora_row.addWidget(self.combo_lora, 2)
+        row1.addWidget(self.combo_lora, 2)
 
         self.spin_lora_scale = QDoubleSpinBox()
         self.spin_lora_scale.setRange(0.0, 2.0)
         self.spin_lora_scale.setValue(0.8)
-        self.spin_lora_scale.setSingleStep(0.05)
-        self.spin_lora_scale.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_yellow']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px; font-family: '{FONT_FAMILY}'; font-size: 10px;")
-        lora_row.addWidget(self.spin_lora_scale, 1)
+        row1.addWidget(self.spin_lora_scale, 1)
+        cd_layout.addLayout(row1)
 
-        ll.addWidget(QLabel("LORA ENHANCEMENT"))
-        ll.addLayout(lora_row)
+        row2 = QHBoxLayout()
+        self.txt_prompt = QLineEdit()
+        self.txt_prompt.setPlaceholderText("Enter prompt to manually trigger generation...")
+        self.txt_prompt.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; padding: 6px; border: 1px solid {C['border']}; border-radius: 4px;")
+        row2.addWidget(self.txt_prompt, 4)
 
-        # Character Persona Association
-        ll.addWidget(QLabel("Character Persona (Optional):"))
-        self.combo_char = QComboBox()
-        self.combo_char.addItem("None", "")
-        self.combo_char.addItems(["Alpha", "Luci", "Eden", "Lacey"])
-        self.combo_char.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px; font-family: '{FONT_FAMILY}'; font-size: 10px;")
-        ll.addWidget(self.combo_char)
+        self.btn_generate = QPushButton("? GENERATE")
+        self.btn_generate.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px; padding: 6px 14px;")
+        self.btn_generate.clicked.connect(self._on_manual_generate)
+        row2.addWidget(self.btn_generate, 1)
+        cd_layout.addLayout(row2)
 
-        # Positive Prompt
-        ll.addWidget(QLabel("CREATIVE PROMPT"))
-        self.txt_prompt = QTextEdit()
-        self.txt_prompt.setFixedHeight(85)
-        self.txt_prompt.setPlaceholderText("Describe the visual concept, subject, atmosphere, and lighting...")
-        self.txt_prompt.setStyleSheet(f"""
-            QTextEdit {{
-                background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
-                font-family: '{FONT_FAMILY}'; font-size: 11px;
-            }}
-            QTextEdit:focus {{ border: 1px solid {C['neon_cyan']}; }}
-        """)
-        ll.addWidget(self.txt_prompt)
-        
-        self.btn_refine = QPushButton("✨ Refine with Learned AI Rules")
-        self.btn_refine.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['neon_blue']}18; color: {C['neon_blue']}; border: 1px solid {C['neon_blue']}; border-radius: 4px; padding: 6px;
-                font-size: 10px; font-weight: bold;
-            }}
-            QPushButton:hover {{ background: {C['neon_blue']}33; }}
-        """)
-        self.btn_refine.clicked.connect(self._on_refine_clicked)
-        ll.addWidget(self.btn_refine)
+        self.controls_drawer.hide()
+        root.addWidget(self.controls_drawer)
 
-        # Negative Prompt
-        ll.addWidget(QLabel("NEGATIVE PROMPT (ELEMENTS TO EXCLUDE)"))
-        self.txt_neg_prompt = QTextEdit()
-        self.txt_neg_prompt.setFixedHeight(55)
-        self.txt_neg_prompt.setPlainText(DEFAULT_NEGATIVE_PROMPT)
-        self.txt_neg_prompt.setStyleSheet(f"""
-            QTextEdit {{
-                background: {C['bg_deep']}; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;
-                font-family: '{FONT_FAMILY}'; font-size: 10px;
-            }}
-        """)
-        ll.addWidget(self.txt_neg_prompt)
+        # 4. Viewport Navigation Toolbar
+        nav_bar = QHBoxLayout()
+        nav_bar.setSpacing(6)
 
-        # Parameters Group
-        params_box = QGroupBox("GENERATION PARAMETERS")
-        params_box.setStyleSheet(f"QGroupBox {{ color: {C['text_dim']}; font-size: 9px; font-weight: bold; border: 1px solid {C['border']}; border-radius: 4px; padding-top: 10px; }}")
-        p_layout = QGridLayout(params_box)
-        p_layout.setContentsMargins(8, 12, 8, 8)
-        p_layout.setSpacing(8)
-
-        self.combo_res = QComboBox()
-        self.combo_res.addItem("1024x1024 (Square)", (1024, 1024))
-        self.combo_res.addItem("896x1152 (Portrait)", (896, 1152))
-        self.combo_res.addItem("1152x896 (Landscape)", (1152, 896))
-        self.combo_res.addItem("768x1024 (Tall)", (768, 1024))
-        self.combo_res.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px; font-family: {FONT_FAMILY}; font-size: 10px;")
-        p_layout.addWidget(self.combo_res, 0, 0, 1, 2)
-
-        p_layout.addWidget(QLabel("Steps:"), 1, 0)
-        self.slider_steps = QSlider(Qt.Orientation.Horizontal)
-        self.slider_steps.setRange(15, 60)
-        self.slider_steps.setValue(30)
-        self.lbl_steps_val = QLabel("30")
-        self.lbl_steps_val.setStyleSheet(f"color: {C['neon_yellow']}; font-weight: bold;")
-        self.slider_steps.valueChanged.connect(lambda v: self.lbl_steps_val.setText(str(v)))
-        p_layout.addWidget(self.slider_steps, 1, 1)
-        p_layout.addWidget(self.lbl_steps_val, 1, 2)
-
-        p_layout.addWidget(QLabel("CFG Scale:"), 2, 0)
-        self.slider_guidance = QSlider(Qt.Orientation.Horizontal)
-        self.slider_guidance.setRange(10, 150)
-        self.slider_guidance.setValue(70)
-        self.lbl_guidance_val = QLabel("7.0")
-        self.lbl_guidance_val.setStyleSheet(f"color: {C['neon_yellow']}; font-weight: bold;")
-        self.slider_guidance.valueChanged.connect(lambda v: self.lbl_guidance_val.setText(f"{v/10.0:.1f}"))
-        p_layout.addWidget(self.slider_guidance, 2, 1)
-        p_layout.addWidget(self.lbl_guidance_val, 2, 2)
-
-        p_layout.addWidget(QLabel("Seed:"), 3, 0)
-        self.in_seed = QLineEdit("-1")
-        self.in_seed.setPlaceholderText("-1 = Random")
-        self.in_seed.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 3px; font-size: 10px;")
-        p_layout.addWidget(self.in_seed, 3, 1, 1, 2)
-
-        ll.addWidget(params_box)
-
-        # Action Buttons
-        self.btn_generate = QPushButton("🚀 GENERATE ON MODAL")
-        self.btn_generate.setFixedHeight(42)
-        self.btn_generate.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['neon_cyan']}; color: #000; border: none; border-radius: 6px;
-                padding: 10px; font-weight: bold; font-size: 11px;
-            }}
-            QPushButton:hover {{ background: #ffffff; }}
-            QPushButton:disabled {{ background: {C['border']}; color: {C['text_dim']}; }}
-        """)
-        self.btn_generate.clicked.connect(self._on_generate_clicked)
-        ll.addWidget(self.btn_generate)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setStyleSheet(f"""
-            QProgressBar {{
-                background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px;
-                height: 18px; text-align: center; color: {C['text_bright']}; font-size: 10px;
-            }}
-            QProgressBar::chunk {{
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {C['neon_blue']}, stop:1 {C['neon_cyan']});
-                border-radius: 3px;
-            }}
-        """)
-        ll.addWidget(self.progress_bar)
-        
-        self.lbl_progress_status = QLabel("Ready. Enter prompt and launch.")
-        self.lbl_progress_status.setStyleSheet(f"color: {C['text_dim']}; font-family: {FONT_FAMILY}; font-size: 9px;")
-        ll.addWidget(self.lbl_progress_status)
-
-        left_scroll.setWidget(left_widget)
-        splitter.addWidget(left_scroll)
-
-        # --- Right: Viewport & RLHF Feedback Panel ---
-        right_widget = QWidget()
-        rl = QVBoxLayout(right_widget)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(10)
-
-        # Viewport Header
-        vp_hdr = QHBoxLayout()
-        self.lbl_image_title = QLabel("VIEWPORT   NO IMAGE LOADED")
+        self.lbl_image_title = QLabel("VIEWPORT ? NO IMAGE")
         self.lbl_image_title.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
         self.lbl_image_title.setStyleSheet(f"color: {C['neon_cyan']};")
-        vp_hdr.addWidget(self.lbl_image_title)
-        vp_hdr.addStretch()
-        
-        self.lbl_meta_badge = QLabel("Dimensions: --")
-        self.lbl_meta_badge.setStyleSheet(f"background: {C['bg_card']}; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px; font-family: '{FONT_FAMILY}'; font-size: 9px;")
-        vp_hdr.addWidget(self.lbl_meta_badge)
-        rl.addLayout(vp_hdr)
+        nav_bar.addWidget(self.lbl_image_title)
+        nav_bar.addStretch()
 
-        # Viewport Frame
+        self.btn_prev = QPushButton("? PREV")
+        self.btn_prev.setFixedSize(65, 26)
+        self.btn_prev.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_prev.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_prev.clicked.connect(self._prev_image)
+        nav_bar.addWidget(self.btn_prev)
+
+        self.lbl_counter = QLabel("[ 0 / 0 ]")
+        self.lbl_counter.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.lbl_counter.setStyleSheet(f"color: {C['neon_yellow']}; padding: 0 4px;")
+        nav_bar.addWidget(self.lbl_counter)
+
+        self.btn_next = QPushButton("NEXT ?")
+        self.btn_next.setFixedSize(65, 26)
+        self.btn_next.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_next.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_next.clicked.connect(self._next_image)
+        nav_bar.addWidget(self.btn_next)
+
+        self.btn_slideshow = QPushButton("? PLAY")
+        self.btn_slideshow.setFixedSize(65, 26)
+        self.btn_slideshow.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_slideshow.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_slideshow.clicked.connect(self._toggle_slideshow)
+        nav_bar.addWidget(self.btn_slideshow)
+
+        self.btn_save = QPushButton("?? SAVE")
+        self.btn_save.setFixedSize(65, 26)
+        self.btn_save.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_save.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_green']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_save.clicked.connect(self._save_current_image)
+        nav_bar.addWidget(self.btn_save)
+
+        self.btn_fullscreen = QPushButton("? FULLSCREEN")
+        self.btn_fullscreen.setFixedSize(95, 26)
+        self.btn_fullscreen.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_fullscreen.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_purple']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_fullscreen.clicked.connect(self._open_fullscreen)
+        nav_bar.addWidget(self.btn_fullscreen)
+        root.addLayout(nav_bar)
+
+        # 5. Primary Viewport Frame
         vp_frame = QFrame()
         vp_frame.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 6px;")
         vpl = QVBoxLayout(vp_frame)
-        vpl.setContentsMargins(0, 0, 0, 0)
-        self.img_viewport = QLabel()
+        vpl.setContentsMargins(4, 4, 4, 4)
+
+        self.img_viewport = ClickableLabel()
         self.img_viewport.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.img_viewport.setText("Generated visual output will be displayed here.")
+        self.img_viewport.setText("Awaiting generation... Click to view full screen.")
+        self.img_viewport.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.img_viewport.setToolTip("Click image to view in Fullscreen mode (Use Left/Right arrows to navigate)")
         self.img_viewport.setStyleSheet(f"color: {C['text_dim']}; font-family: {FONT_FAMILY}; font-size: 11px;")
+        self.img_viewport.clicked.connect(self._open_fullscreen)
         vpl.addWidget(self.img_viewport)
-        rl.addWidget(vp_frame, 1)
+        root.addWidget(vp_frame, 1)
 
-        # Upscaler Controls (Nested under viewport)
-        up_row = QHBoxLayout()
-        self.combo_upscaler = QComboBox()
-        for k, v in UPSCALER_CATALOG.items():
-            self.combo_upscaler.addItem(v, k)
-        self.combo_upscaler.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px; font-family: {FONT_FAMILY}; font-size: 9px;")
-        up_row.addWidget(self.combo_upscaler, 1)
+        # 6. Thumbnail Filmstrip (Recent Outputs / Batch Carousel)
+        filmstrip_label = QLabel("RECENT GENERATIONS & BATCH CAROUSEL")
+        filmstrip_label.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        filmstrip_label.setStyleSheet(f"color: {C['text_dim']}; margin-top: 4px;")
+        root.addWidget(filmstrip_label)
 
-        self.btn_upscale = QPushButton("✨ Upscale 4x")
-        self.btn_upscale.setFixedHeight(26)
-        self.btn_upscale.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['neon_purple']}22; color: {C['neon_purple']};
-                border: 1px solid {C['neon_purple']}; border-radius: 4px; padding: 3px 8px;
-                font-weight: bold; font-size: 9px;
-            }}
-            QPushButton:hover {{ background: {C['neon_purple']}; color: #000; }}
-            QPushButton:disabled {{ background: transparent; color: {C['text_dim']}; border-color: {C['border']}; }}
-        """)
-        self.btn_upscale.clicked.connect(self._on_upscale_clicked)
-        self.btn_upscale.setEnabled(False)
-        up_row.addWidget(self.btn_upscale)
-        rl.addLayout(up_row)
+        self.filmstrip_scroll = QScrollArea()
+        self.filmstrip_scroll.setFixedHeight(76)
+        self.filmstrip_scroll.setWidgetResizable(True)
+        self.filmstrip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.filmstrip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.filmstrip_scroll.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px;")
 
-        # Automated Critique Readout
-        self.critique_card = QFrame()
-        self.critique_card.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 6px;")
-        ccl = QVBoxLayout(self.critique_card)
-        ccl.setContentsMargins(8, 8, 8, 8)
-        
-        self.lbl_critique_hdr = QLabel("🤖 AI VISUAL CRITIQUE")
-        self.lbl_critique_hdr.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-size: 9px;")
-        ccl.addWidget(self.lbl_critique_hdr)
-        
-        self.lbl_critique_text = QLabel("Awaiting generation to perform automated composition & dynamic range analysis.")
+        self.filmstrip_widget = QWidget()
+        self.filmstrip_layout = QHBoxLayout(self.filmstrip_widget)
+        self.filmstrip_layout.setContentsMargins(4, 4, 4, 4)
+        self.filmstrip_layout.setSpacing(6)
+        self.filmstrip_layout.addStretch()
+        self.filmstrip_scroll.setWidget(self.filmstrip_widget)
+        root.addWidget(self.filmstrip_scroll)
+
+        # 7. AI Visual Critique Banner
+        crit_card = QFrame()
+        crit_card.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 6px;")
+        ccl = QVBoxLayout(crit_card)
+        ccl.setContentsMargins(6, 6, 6, 6)
+        ccl.setSpacing(2)
+
+        lbl_crit_title = QLabel("? AI VISUAL CRITIQUE & AUTONOMOUS LEARNING ?")
+        lbl_crit_title.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        lbl_crit_title.setStyleSheet(f"color: {C['neon_cyan']};")
+        ccl.addWidget(lbl_crit_title)
+
+        self.lbl_critique_text = QLabel("Visual critique is performed automatically via Gemini Vision upon generation completion.")
         self.lbl_critique_text.setWordWrap(True)
-        self.lbl_critique_text.setStyleSheet(f"color: {C['text_bright']}; font-family: '{FONT_FAMILY}'; font-size: 10px;")
+        self.lbl_critique_text.setStyleSheet(f"color: {C['text_bright']}; font-family: {FONT_FAMILY}; font-size: 9.5pt;")
         ccl.addWidget(self.lbl_critique_text)
-        rl.addWidget(self.critique_card)
-
-        # RLHF Feedback Frame
-        fb_frame = QFrame()
-        fb_frame.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border_bright']}; border-radius: 6px;")
-        fbl = QVBoxLayout(fb_frame)
-        fbl.setContentsMargins(10, 10, 10, 10)
-        fbl.setSpacing(8)
-
-        fb_hdr = QHBoxLayout()
-        fb_hdr.addWidget(QLabel("⭐ USER EVALUATION & RLHF PROMPT LEARNING"))
-        fb_hdr.addStretch()
-        
-        self.btn_good = QPushButton("👍 Good Output (+1)")
-        self.btn_good.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['neon_green']}15; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px;
-                font-weight: bold; font-size: 10px;
-            }}
-            QPushButton:hover {{ background: {C['neon_green']}33; }}
-        """)
-        self.btn_good.clicked.connect(lambda: self._set_rating(1))
-        fb_hdr.addWidget(self.btn_good)
-        
-        self.btn_bad = QPushButton("👎 Bad Output (-1)")
-        self.btn_bad.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['neon_red']}15; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px;
-                font-weight: bold; font-size: 10px;
-            }}
-            QPushButton:hover {{ background: {C['neon_red']}33; }}
-        """)
-        self.btn_bad.clicked.connect(lambda: self._set_rating(-1))
-        fb_hdr.addWidget(self.btn_bad)
-        fbl.addLayout(fb_hdr)
-
-        tags_row = QHBoxLayout()
-        from PyQt6.QtWidgets import QCheckBox
-        self.cb_tag_anatomy = QCheckBox("Hands / Anatomy"); self.cb_tag_anatomy.setStyleSheet(f"color: {C['text_bright']}; font-size: 10px;")
-        self.cb_tag_lighting = QCheckBox("Lighting & Fog"); self.cb_tag_lighting.setStyleSheet(f"color: {C['text_bright']}; font-size: 10px;")
-        self.cb_tag_colors = QCheckBox("Colors & Contrast"); self.cb_tag_colors.setStyleSheet(f"color: {C['text_bright']}; font-size: 10px;")
-        self.cb_tag_composition = QCheckBox("Composition"); self.cb_tag_composition.setStyleSheet(f"color: {C['text_bright']}; font-size: 10px;")
-        self.cb_tag_style = QCheckBox("Style Match"); self.cb_tag_style.setStyleSheet(f"color: {C['text_bright']}; font-size: 10px;")
-        
-        tags_row.addWidget(self.cb_tag_anatomy)
-        tags_row.addWidget(self.cb_tag_lighting)
-        tags_row.addWidget(self.cb_tag_colors)
-        tags_row.addWidget(self.cb_tag_composition)
-        tags_row.addWidget(self.cb_tag_style)
-        tags_row.addStretch()
-        fbl.addLayout(tags_row)
-
-        fb_input_row = QHBoxLayout()
-        self.in_feedback_notes = QLineEdit()
-        self.in_feedback_notes.setPlaceholderText("Specific notes on what worked or what to adjust...")
-        self.in_feedback_notes.setStyleSheet(f"background: {C['bg_card']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px; font-size: 10px;")
-        fb_input_row.addWidget(self.in_feedback_notes, 1)
-
-        self.btn_save_feedback = QPushButton("💾 Train AI")
-        self.btn_save_feedback.setStyleSheet(f"""
-            QPushButton {{
-                background: {C['neon_blue']}22; color: {C['neon_blue']}; border: 1px solid {C['neon_blue']}; border-radius: 4px; padding: 6px 12px;
-                font-weight: bold; font-size: 10px;
-            }}
-            QPushButton:hover {{ background: {C['neon_blue']}44; }}
-        """)
-        self.btn_save_feedback.clicked.connect(self._on_save_feedback)
-        fb_input_row.addWidget(self.btn_save_feedback)
-        fbl.addLayout(fb_input_row)
-
-        self.lbl_feedback_status = QLabel("Provide review to continuously calibrate prompt weights.")
-        self.lbl_feedback_status.setStyleSheet(f"color: {C['text_dim']}; font-size: 9px;")
-        fbl.addWidget(self.lbl_feedback_status)
-        rl.addWidget(fb_frame)
-
-        # Tabbed Panel at Bottom: History & Learned Rules
-        bottom_tabs = QTabWidget()
-        bottom_tabs.setFixedHeight(180)
-        bottom_tabs.setStyleSheet(f"""
-            QTabWidget::pane {{ border: 1px solid {C['border']}; background: {C['bg_card']}; }}
-            QTabBar::tab {{ background: {C['bg_dark']}; color: {C['text_dim']}; padding: 4px 10px; font-size: 9px; font-weight: bold; border: 1px solid {C['border']}; }}
-            QTabBar::tab:selected {{ background: {C['bg_card']}; color: {C['neon_cyan']}; border-bottom: 2px solid {C['neon_cyan']}; font-size: 10px; border: none; }}
-        """)
-        
-        self.history_list = QListWidget()
-        self.history_list.setStyleSheet(f"background: transparent; border: none; font-family: {FONT_FAMILY}; font-size: 10px; padding: 4px;")
-        self.history_list.itemClicked.connect(self._on_history_clicked)
-        bottom_tabs.addTab(self.history_list, "RECENT GENERATIONS")
-
-        self.learnings_table = QTableWidget()
-        self.learnings_table.setColumnCount(4)
-        self.learnings_table.setHorizontalHeaderLabels(["Tag", "Rule Type", "Rating Weight", "Learned Rule"])
-        self.learnings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self.learnings_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
-        self.learnings_table.setStyleSheet(table_stylesheet())
-        bottom_tabs.addTab(self.learnings_table, "🧠 ADAPTIVE PROMPT RULES")
-
-        rl.addWidget(bottom_tabs)
-        splitter.addWidget(right_widget)
-
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 2)
-        root.addWidget(splitter, 1)
+        root.addWidget(crit_card)
 
         self._refresh_history()
-        self._refresh_learnings()
+
+    def _toggle_controls_drawer(self):
+        if self.controls_drawer.isVisible():
+            self.controls_drawer.hide()
+            self.btn_toggle_controls.setText("? MANUAL CONTROLS")
+            self.btn_toggle_controls.setStyleSheet(f"background: {C['border']}; color: {C['text_bright']}; border-radius: 4px; padding: 0 10px;")
+        else:
+            self.controls_drawer.show()
+            self.btn_toggle_controls.setText("? HIDE CONTROLS")
+            self.btn_toggle_controls.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px; padding: 0 10px;")
 
     def _open_output_folder(self):
-        folder = ROOT_DIR / "outputs" / "generated_images"
+        folder = ROOT_DIR / "history" / "images"
         if not folder.exists():
             folder.mkdir(parents=True, exist_ok=True)
         import subprocess
         subprocess.Popen(f'explorer "{folder}"', shell=True)
 
-    def _on_refine_clicked(self):
-        p = self.txt_prompt.toPlainText().strip()
-        if not p:
-            self.lbl_progress_status.setText("Error: Prompt cannot be empty.")
-            return
-        
-        self.lbl_progress_status.setText("Refining prompt with active learning rules...")
-        
-        model_key = self.combo_model.currentData()
-        refined_p, refined_neg = self.sm.refine_prompt(p, model_name=model_key)
-        
-        self.txt_prompt.setPlainText(refined_p)
-        self.txt_neg_prompt.setPlainText(refined_neg)
-        self.lbl_progress_status.setText("Prompt refined with active learning rules from memory.db.")
-        self.main_win.signals.log_message.emit("Image prompt refined via Neural Studio heuristics.", C['neon_cyan'])
-
-    def _on_generate_clicked(self):
-        p = self.txt_prompt.toPlainText().strip()
-        if not p:
-            self.lbl_progress_status.setText("Error: Prompt cannot be empty.")
-            return
-        
-        model_key = self.combo_model.currentData()
-        lora_key = self.combo_lora.currentData()
-        lora_scale = self.spin_lora_scale.value()
-        char_name = self.combo_char.currentText() if self.combo_char.currentText() != "None" else ""
-        neg = self.txt_neg_prompt.toPlainText().strip()
-        res_tuple = self.combo_res.currentData()
-        steps = self.slider_steps.value()
-        cfg = self.slider_guidance.value() / 10.0
-        
-        try:
-            seed = int(self.in_seed.text().strip() or "-1")
-        except ValueError:
-            seed = -1
-
-        self.btn_generate.setEnabled(False)
-        self.btn_generate.setText("🚀 RENDERING ON MODAL...")
-        self.progress_bar.setValue(0)
-        self.lbl_progress_status.setText("Spinning up generation worker...")
-        self._reset_feedback_ui()
-
-        kwargs = {
-            "prompt": p,
-            "negative_prompt": neg,
-            "model_name": model_key,
-            "lora_name": lora_key,
-            "lora_scale": lora_scale,
-            "steps": steps,
-            "cfg_scale": cfg,
-            "width": res_tuple[0],
-            "height": res_tuple[1],
-            "seed": seed,
-            "character_name": char_name
-        }
-
-        self._gen_worker = ImageGenWorker(self.sm, kwargs)
-        self._gen_worker.finished.connect(self._on_gen_finished)
-        self._gen_worker.error.connect(self._on_gen_error)
-        self._gen_worker.start()
-
-    def _on_gen_progress(self, pct: int):
-        self.progress_bar.setValue(pct)
-        if pct < 100:
-            self.lbl_progress_status.setText(f"Modal cluster computing... {pct}%")
-
-    def _on_gen_finished(self, res: dict):
-        self.btn_generate.setEnabled(True)
-        self.btn_generate.setText("🚀 GENERATE ON MODAL")
-        self.progress_bar.setValue(100)
-        self.lbl_progress_status.setText("Generation complete! Ready for evaluation.")
-
-        if res.get("status") == "success":
-            img_p = res.get("image_path")
-            self.current_img_path = img_p
-            self.current_gen_id = res.get("generation_id")
-            
-            if img_p and os.path.exists(img_p):
-                pix = QPixmap(img_p)
-                scaled = pix.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                self.img_viewport.setPixmap(scaled)
-                self.btn_upscale.setEnabled(True)
-                
-                # Update meta info
-                file_name = os.path.basename(img_p)
-                self.lbl_image_title.setText(f"VIEWPORT   {file_name.upper()}")
-                self.lbl_meta_badge.setText(f"Output dimensions 1024x1024 | Seed: {res.get('seed')} | Steps: {res.get('steps')}")
-                
-                # Display AI critique
-                self.lbl_critique_text.setText(res.get("ai_critique", "Aesthetic balance confirmed."))
-                self._refresh_history()
-        else:
-            err = res.get("error", "Unknown error")
-            self.lbl_progress_status.setText(f"Generation error: {err}")
-            self.lbl_critique_text.setText("Generation failed. Check logs.")
-
-    def _on_gen_error(self, err_msg: str):
-        self.btn_generate.setEnabled(True)
-        self.btn_generate.setText("🚀 GENERATE ON MODAL")
-        self.lbl_progress_status.setText(f"Pipeline error: {err_msg}")
-        self.lbl_critique_text.setText("Generation pipeline crashed.")
-
-    def _on_upscale_clicked(self):
-        if not self.current_img_path or not os.path.exists(self.current_img_path):
-            self.lbl_progress_status.setText("Error: No image loaded to upscale.")
-            return
-
-        upscaler = self.combo_upscaler.currentData()
-        self.btn_upscale.setEnabled(False)
-        self.btn_upscale.setText("✨ UPSCALING...")
-        self.lbl_progress_status.setText(f"Initializing {upscaler} 4x super-resolution...")
-
-        self._upscale_worker = ImageUpscaleWorker(self.sm, self.current_img_path, upscaler)
-        self._upscale_worker.finished.connect(self._on_upscale_finished)
-        self._upscale_worker.error.connect(self._on_upscale_error)
-        self._upscale_worker.start()
-
-    def _on_upscale_progress(self, pct: int):
-        pass
-
-    def _on_upscale_finished(self, res: dict):
-        self.btn_upscale.setEnabled(True)
-        self.btn_upscale.setText("✨ Upscale 4x")
-
-        if res.get("status") == "success":
-            out_p = res.get("upscaled_path")
-            self.current_img_path = out_p
-            if out_p and os.path.exists(out_p):
-                pix = QPixmap(out_p)
-                scaled = pix.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                self.img_viewport.setPixmap(scaled)
-                
-                size_kb = os.path.getsize(out_p) // 1024
-                self.lbl_meta_badge.setText(f"Upscaled 4096x4096 | {size_kb} KB")
-                self.lbl_progress_status.setText("Super-resolution 4x complete!")
-                self.lbl_critique_text.setText("Super-resolution textures sharpened.")
-                self._refresh_history()
-        else:
-            self.lbl_progress_status.setText(f"Upscale error: {res.get('error', 'unknown')}")
-
-    def _on_upscale_error(self, err: str):
-        self.btn_upscale.setEnabled(True)
-        self.btn_upscale.setText("✨ Upscale 4x")
-        self.lbl_progress_status.setText(f"Upscale error: {err}")
-
-    def _set_rating(self, rating: int):
-        self.current_rating = rating
-        if rating > 0:
-            self.btn_good.setStyleSheet(f"background: {C['neon_green']}33; color: {C['neon_green']}; font-weight: bold; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px;")
-            self.btn_bad.setStyleSheet(f"background: {C['bg_card']}; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;")
-            self.lbl_feedback_status.setText("Rated: POSITIVE (+1). Click 'Train AI' to adapt positive prompt weights.")
-        else:
-            self.btn_good.setStyleSheet(f"background: {C['bg_card']}; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px;")
-            self.btn_bad.setStyleSheet(f"background: {C['neon_red']}33; color: {C['neon_red']}; font-weight: bold; border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px;")
-            self.lbl_feedback_status.setText("Rated: NEGATIVE (-1). Click 'Train AI' to reinforce negative filter rules.")
-
-    def _reset_feedback_ui(self):
-        self.current_rating = 0
-        self.btn_good.setStyleSheet(f"background: {C['neon_green']}15; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 6px; font-weight: bold;")
-        self.btn_bad.setStyleSheet(f"background: {C['neon_red']}15; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 6px; font-weight: bold;")
-        self.cb_tag_anatomy.setChecked(False)
-        self.cb_tag_lighting.setChecked(False)
-        self.cb_tag_colors.setChecked(False)
-        self.cb_tag_composition.setChecked(False)
-        self.cb_tag_style.setChecked(False)
-        self.in_feedback_notes.clear()
-        self.lbl_feedback_status.setText("Provide review to continuously calibrate prompt weights.")
-
-    def _on_save_feedback(self):
-        if not self.current_gen_id:
-            self.lbl_feedback_status.setText("Error: No active generation loaded to evaluate.")
-            return
-
-        tags = []
-        if self.cb_tag_anatomy.isChecked(): tags.append("anatomy")
-        if self.cb_tag_lighting.isChecked(): tags.append("lighting")
-        if self.cb_tag_colors.isChecked(): tags.append("colors")
-        if self.cb_tag_composition.isChecked(): tags.append("composition")
-        if self.cb_tag_style.isChecked(): tags.append("style")
-        
-        tags_str = ", ".join(tags)
-        notes = self.in_feedback_notes.text().strip()
-
-        success = self.sm.record_feedback(self.current_gen_id, rating=self.current_rating, feedback_tags=tags_str, user_feedback=notes)
-        if success:
-            self.lbl_feedback_status.setText("Feedback saved! Learned weights updated in memory.db.")
-            self._refresh_learnings()
-            self._refresh_history()
-        else:
-            self.lbl_feedback_status.setText("Error recording feedback to database.")
-
     def _refresh_history(self):
-        self.history_list.clear()
-        hist = self.sm.get_history(limit=50)
-        for item in hist:
-            gen_id = item.get("id")
-            prompt_snip = item.get("prompt", "")[:45]
-            time_str = str(item.get("created_at", ""))[:16]
-            rating = item.get("rating", 0)
-            
-            rating_symbol = "⭐" if rating > 0 else ("🚫" if rating < 0 else "⬜")
-            
-            list_item = QListWidgetItem(f"{rating_symbol} #{gen_id} [{time_str}] {prompt_snip}...")
-            list_item.setData(Qt.ItemDataRole.UserRole, item)
-            self.history_list.addItem(list_item)
+        if not self.sm: return
+        self.image_history = self.sm.get_history(limit=50)
+        self._refresh_filmstrip()
+        if self.image_history:
+            self._load_image_by_index(0)
 
-    def _on_history_clicked(self, item):
-        data = item.data(Qt.ItemDataRole.UserRole)
-        if not data: return
-        
+    def _refresh_filmstrip(self):
+        while self.filmstrip_layout.count() > 1:
+            item = self.filmstrip_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for idx, item in enumerate(self.image_history[:30]):
+            p = item.get("image_path")
+            if p and os.path.exists(p):
+                btn = QPushButton()
+                btn.setFixedSize(56, 56)
+                pix = QPixmap(p).scaled(54, 54, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                btn.setIcon(QIcon(pix))
+                btn.setIconSize(QSize(54, 54))
+                btn.setStyleSheet(f"border: 1px solid {C['border']}; border-radius: 4px; background: {C['bg_deep']};")
+                btn.clicked.connect(lambda _, i=idx: self._load_image_by_index(i))
+                self.filmstrip_layout.insertWidget(idx, btn)
+
+    def _load_image_by_index(self, idx: int):
+        if not self.image_history or idx < 0 or idx >= len(self.image_history):
+            return
+        self.current_idx = idx
+        data = self.image_history[idx]
         img_p = data.get("image_path")
-        self.current_gen_id = data.get("id")
         self.current_img_path = img_p
-        
+        self.current_gen_id = data.get("id")
+
         if img_p and os.path.exists(img_p):
             pix = QPixmap(img_p)
             scaled = pix.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.img_viewport.setPixmap(scaled)
-            self.btn_upscale.setEnabled(True)
-            
+
             basename = os.path.basename(img_p)
-            self.lbl_image_title.setText(f"VIEWPORT   {basename.upper()}")
-            self.lbl_meta_badge.setText(f"Model: {data.get('model_name')} | Seed: {data.get('seed')} | Steps: {data.get('steps')}")
+            dim = data.get("dimensions", "--")
+            model = data.get("model_name", "SDXL")
+            self.lbl_image_title.setText(f"VIEWPORT ? {basename.upper()} ({model.upper()} | {dim})")
+            self.lbl_counter.setText(f"[ {self.current_idx + 1} / {len(self.image_history)} ]")
             self.lbl_critique_text.setText(data.get("ai_critique") or "No critique recorded.")
-            self.lbl_progress_status.setText("Prior generation loaded.")
-            self._reset_feedback_ui()
+
+            # Live update fullscreen viewer if open
+            if self.fullscreen_viewer and self.fullscreen_viewer.isVisible():
+                self.fullscreen_viewer.update_image(img_p)
+
+    def _next_image(self):
+        if not self.image_history: return
+        nxt = (self.current_idx + 1) % len(self.image_history)
+        self._load_image_by_index(nxt)
+
+    def _prev_image(self):
+        if not self.image_history: return
+        prv = (self.current_idx - 1 + len(self.image_history)) % len(self.image_history)
+        self._load_image_by_index(prv)
+
+    def _toggle_slideshow(self):
+        if self._slideshow_timer.isActive():
+            self._slideshow_timer.stop()
+            self.btn_slideshow.setText("? PLAY")
+            self.btn_slideshow.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
         else:
-            self.img_viewport.setText("Image file no longer found on disk.")
-            self.btn_upscale.setEnabled(False)
+            self._slideshow_timer.start(2500)
+            self.btn_slideshow.setText("? PAUSE")
+            self.btn_slideshow.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px;")
 
-    def _refresh_learnings(self):
-        learnings = self.sm.get_learnings()
-        self.learnings_table.setRowCount(len(learnings))
-        for r, item in enumerate(learnings):
-            self.learnings_table.setItem(r, 0, QTableWidgetItem(str(item.get("tag", ""))))
-            
-            rule_type = str(item.get("rule_type", ""))
-            type_item = QTableWidgetItem(rule_type)
-            if rule_type == "negative_filter":
-                type_item.setForeground(QColor(C['neon_red']))
-            else:
-                type_item.setForeground(QColor(C['neon_green']))
-            self.learnings_table.setItem(r, 1, type_item)
-            
-            weight_item = QTableWidgetItem(f"{item.get('rating_weight', 0):.2f}")
-            weight_item.setForeground(QColor(C['neon_yellow']))
-            self.learnings_table.setItem(r, 2, weight_item)
-            
-            self.learnings_table.setItem(r, 3, QTableWidgetItem(str(item.get("rule_text", ""))))
+    def _save_current_image(self):
+        if not self.current_img_path or not os.path.exists(self.current_img_path):
+            QMessageBox.warning(self, "No Image", "No image is currently displayed to save.")
+            return
+        dest, _ = QFileDialog.getSaveFileName(self, "Save Image Output", os.path.basename(self.current_img_path), "Images (*.png *.jpg *.jpeg)")
+        if dest:
+            import shutil
+            shutil.copy2(self.current_img_path, dest)
+            self.lbl_pipeline_status.setText(f"Saved to: {os.path.basename(dest)}")
 
+    def _open_fullscreen(self):
+        if not self.current_img_path or not os.path.exists(self.current_img_path):
+            return
+        if not self.fullscreen_viewer:
+            self.fullscreen_viewer = FullScreenImageViewer(self, self)
+        self.fullscreen_viewer.update_image(self.current_img_path)
+        self.fullscreen_viewer.showFullScreen()
+
+    def on_image_generated(self, img_path: str, gen_res: dict):
+        """Called automatically by AlphaAgent upon generation completion."""
+        self.lbl_pipeline_status.setText(f"New generation received: {os.path.basename(img_path)}")
+        self._refresh_history()
+        self._load_image_by_index(0)
+
+    def _on_manual_generate(self):
+        prompt = self.txt_prompt.text().strip()
+        if not prompt or not self.sm: return
+        self.lbl_pipeline_status.setText("Dispatching manual generation to Modal...")
+        self.btn_generate.setEnabled(False)
+        m = self.combo_model.currentData()
+        l = self.combo_lora.currentData()
+
+        def _work():
+            res = self.sm.generate_image(prompt=prompt, model_name=m, lora=l)
+            p = res.get("image_path")
+            if p and os.path.exists(p):
+                QTimer.singleShot(0, lambda: self.on_image_generated(p, res))
+            QTimer.singleShot(0, lambda: self.btn_generate.setEnabled(True))
+            QTimer.singleShot(0, lambda: self.lbl_pipeline_status.setText("Ready"))
+
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Left:
+            self._prev_image()
+        elif event.key() == Qt.Key.Key_Right:
+            self._next_image()
+        else:
+            super().keyPressEvent(event)
 
 # =============================================================================
 # 3. CHARACTERS TAB
@@ -1407,6 +1414,8 @@ class AgentCharactersTab(QWidget):
         self.cm.set_active_character_name(name)
         self.main_win.agent.active_character = name
         self.reload_characters()
+        if hasattr(self.main_win, "_on_persona_activated"):
+            self.main_win._on_persona_activated(name)
         self.main_win.signals.log_message.emit(f"[PERSONA] Active character switched to: {name.upper()}", C['neon_green'])
 
     def _save_character(self):

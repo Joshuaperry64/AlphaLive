@@ -264,7 +264,20 @@ class ImageStudioManager:
                 conn.commit()
             return True
         except Exception as e:
-            print(f"[ImageStudioManager] Error recording feedback: {e}")
+            print(f"[ImageStudioManager] Feedback record error: {e}")
+            return False
+
+    def update_critique(self, generation_id: int, ai_critique: str) -> bool:
+        """Updates AI critique for a specific generation without altering RLHF ratings."""
+        try:
+            with self._get_conn() as conn:
+                conn.execute(
+                    'UPDATE image_generations SET ai_critique = ? WHERE id = ?',
+                    (ai_critique, generation_id)
+                )
+                conn.commit()
+            return True
+        except Exception as e:
             return False
 
     def _adapt_learnings(self, conn: sqlite3.Connection, gen_data: Dict[str, Any], rating: int, tags: str, feedback: str):
@@ -638,3 +651,5 @@ class ImageStudioManager:
         except Exception as e:
             print(f"[ImageStudioManager] Error fetching history: {e}")
             return []
+
+

@@ -81,6 +81,21 @@ class MemoryManager:
             ''')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_user_profile_cat ON user_profile(category)')
             cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profile_key ON user_profile(key_name)')
+
+            # 5. AI Identity Memory (Isolated sovereign memory for AI Identity Mode)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS identity_memory (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    domain TEXT NOT NULL DEFAULT 'project',
+                    key_name TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source TEXT DEFAULT 'ai_identity',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_id_domain ON identity_memory(domain)')
+            cursor.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_id_domain_key ON identity_memory(domain, key_name)')
             conn.commit()
 
             # Seed initial profile attributes if empty
@@ -422,6 +437,69 @@ class MemoryManager:
                 extracted.append({"key": key, "category": cat, "value": val, "predicate": kg_pred})
 
         return extracted
+
+    # --- AI Identity Memory Operations ---
+
+    def save_identity_entry(self, domain: str, key_name: str, content: str, source: str = "ai_identity") -> bool:
+        """Upsert an isolated memory entry for AI Identity Mode."""
+        try:
+            with self._get_conn() as conn:
+                conn.execute('''
+                    INSERT INTO identity_memory (domain, key_name, content, source, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(domain, key_name) DO UPDATE SET
+                        content = excluded.content,
+                        source = excluded.source,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (domain.strip().lower(), key_name.strip(), content.strip(), source.strip()))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error saving identity entry: {e}")
+            return False
+
+    def get_all_identity_entries(self, domain: str = None, limit: int = 250) -> list:
+        """Fetch AI Identity memory entries, optionally filtered by domain."""
+        try:
+            with self._get_conn() as conn:
+                if domain and domain.lower() not in ("all", "all domains"):
+                    rows = conn.execute('''
+                        SELECT id, domain, key_name, content, source, created_at, updated_at
+                        FROM identity_memory
+                        WHERE domain = ?
+                        ORDER BY updated_at DESC LIMIT ?
+                    ''', (domain.strip().lower(), limit)).fetchall()
+                else:
+                    rows = conn.execute('''
+                        SELECT id, domain, key_name, content, source, created_at, updated_at
+                        FROM identity_memory
+                        ORDER BY updated_at DESC LIMIT ?
+                    ''', (limit,)).fetchall()
+                return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"[MemoryManager] Error fetching identity entries: {e}")
+            return []
+
+    def delete_identity_entry(self, entry_id: int) -> bool:
+        """Delete an identity memory entry by ID."""
+        try:
+            with self._get_conn() as conn:
+                conn.execute('DELETE FROM identity_memory WHERE id = ?', (entry_id,))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Error deleting identity entry: {e}")
+            return False
+
+    def get_identity_context(self, limit: int = 15) -> str:
+        """Format recent AI Identity memory entries for prompt injection."""
+        entries = self.get_all_identity_entries(limit=limit)
+        if not entries:
+            return ""
+        lines = ["[AI IDENTITY SOVEREIGN PERSISTENT MEMORY]:"]
+        for e in entries:
+            lines.append(f"- [{e['domain'].upper()}] {e['key_name']}: {e['content']}")
+        return "\n".join(lines)
 
 # Optional quick-test block
 if __name__ == "__main__":

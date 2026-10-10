@@ -12,3 +12,5 @@ token.json
 alphacore.txt
 *.db
 *.sqlite
+.pytest_cache/
+scratch/

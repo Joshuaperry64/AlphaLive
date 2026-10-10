@@ -131,12 +131,12 @@ class SessionManager:
                 return False
         return False
 
-    def append_turn(self, session_name: str, user_text: str, alpha_text: str):
+    def append_turn(self, session_name: str, user_text: str, alpha_text: str, tag: str = "[You]"):
         """Append user & Alpha turn to the session log and trigger memory learning."""
         clean = self.sanitize_name(session_name)
         file = self.get_session_file(clean)
 
-        entry = f"[You]: {user_text.strip()}\n[Alpha]: {alpha_text.strip()}\n\n"
+        entry = f"{tag}: {user_text.strip()}\n[Alpha]: {alpha_text.strip()}\n\n"
         try:
             with open(file, "a", encoding="utf-8") as f:
                 f.write(entry)
@@ -208,3 +208,27 @@ class SessionManager:
         )
 
         return "\n\n".join(context_blocks)
+
+    def get_recent_turns(self, session_name: str, max_turns: int = 20) -> List[Dict[str, str]]:
+        """Parse recent conversational turns for GUI console replay upon session reload."""
+        clean = self.sanitize_name(session_name)
+        file = self.get_session_file(clean)
+        if not file.exists():
+            return []
+
+        try:
+            with open(file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+
+            pattern = re.compile(r"(\[(?:You|Alpha|[A-Za-z0-9_\-]+)\]):\s*(.*?)(?=\n\[(?:You|Alpha|[A-Za-z0-9_\-]+)\]:|\Z)", re.DOTALL)
+            matches = list(pattern.finditer(content))
+            turns = []
+            for m in matches[-max_turns:]:
+                sender = m.group(1).strip("[]")
+                text = m.group(2).strip()
+                if text:
+                    turns.append({"sender": sender, "text": text})
+            return turns
+        except Exception as e:
+            print(f"[SessionManager] Error parsing turns from {file}: {e}")
+            return []

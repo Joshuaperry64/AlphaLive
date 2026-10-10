@@ -1,10 +1,10 @@
 """
 Modal deployment script for serving SamCrowdwave/Qwen2.5-32B-Instruct-abliterated-AWQ
-on an NVIDIA A100 (40GB VRAM) instance optimized for AlphaCore and autonomous agent workflows.
+on an NVIDIA A100 (80GB VRAM) instance optimized for AlphaCore and autonomous agent workflows.
 
 Model: SamCrowdwave/Qwen2.5-32B-Instruct-abliterated-AWQ (~18GB 4-bit AWQ)
-Target GPU: A100-40GB
-Context Length: 32,768 tokens (allocates ~18GB for weights, ~16GB for KV cache, safely fitting 40GB)
+Target GPU: A100-80GB (SXM for maximum bandwidth and KV cache capacity)
+Context Length: 32,768 tokens (Safely maps across extended sequences on 80GB VRAM)
 
 Optimizations:
   1. --quantization awq_marlin: Direct Marlin kernel execution for maximum AWQ speed.
@@ -27,7 +27,7 @@ MODEL_ALIAS = "qwen2.5-32b-instruct-awq"
 VLLM_PORT = 8000
 MINUTES = 60
 
-# Max sequence length: 32768 tokens ensures ample KV cache headroom on 40GB VRAM.
+# Max sequence length: 32768 tokens running safely with deep KV cache headroom on 80GB VRAM.
 MAX_MODEL_LEN = 32768
 MAX_NUM_SEQS = 8
 
@@ -90,7 +90,7 @@ def download_weights():
 # --- Server Function ---
 @app.function(
     image=vllm_image,
-    gpu="A100-40GB",
+    gpu="A100-80GB",
     timeout=20 * MINUTES,
     scaledown_window=10 * MINUTES,
     max_containers=1,
@@ -112,7 +112,6 @@ def serve():
         MODEL_NAME,
         "--served-model-name",
         MODEL_ALIAS,
-        MODEL_NAME,
         "--host",
         "0.0.0.0",
         "--port",
@@ -139,8 +138,8 @@ def serve():
     print("[AlphaCore] Launching 32B vLLM engine:")
     print(" ".join(cmd))
     
-    # Executing cleanly without shadowing the 'vllm' module namespace
-    subprocess.Popen(" ".join(cmd), shell=True)
+    # Executing cleanly and blocking to keep the web server container alive
+    subprocess.run(cmd)
 
 
 # --- Health Verification & Connection Info ---

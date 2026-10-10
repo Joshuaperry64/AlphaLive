@@ -1,3 +1,4 @@
+import html
 import os
 import sys
 import time
@@ -17,7 +18,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QMessageBox, QDialog, QListWidget, QListWidgetItem,
     QInputDialog, QComboBox, QScrollArea, QTabWidget, QTabBar, QGridLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QSlider, QSpinBox,
-    QDoubleSpinBox, QGroupBox, QFileDialog
+    QDoubleSpinBox, QGroupBox, QFileDialog, QCheckBox, QSplashScreen
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QSize, QPoint
 from PyQt6.QtGui import (
@@ -36,29 +37,33 @@ except ImportError:
     sr = None
 
 from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener
-from ui.overlays import CoordinateOverlay, CalibrationOverlay
+from ui.overlays import CoordinateOverlay, CalibrationOverlay, OverseerControlPanel
 from memory.memory_manager import MemoryManager
 from memory.character_manager import CharacterManager
 from studio.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
 from ui.agent_tabs import AgentMemoryTab, AgentStudioTab, AgentCharactersTab, AgentMonitorTab
+from ui.agent_comms_tab import AgentCommsTab
 
 # Cyberpunk Palette
 C = {
     "bg_dark": "#050811",
+    "bg_deep": "#04070f",
     "bg_card": "#0a1120",
     "bg_card_hover": "#0f1b33",
     "border": "#13233d",
+    "border_bright": "#224168",
     "neon_blue": "#0077ff",
     "neon_cyan": "#00ffdc",
     "neon_green": "#00ff88",
     "neon_red": "#ff0055",
     "neon_yellow": "#ffe600",
     "neon_magenta": "#e000ff",
+    "neon_purple": "#b026ff",
     "text_bright": "#e6f1ff",
     "text_dim": "#708caa",
 }
 
-DEFAULT_MODAL_ENDPOINT = "https://alphacoreprogramming--qwen2-5-32b-instruct-awq-serve.modal.run"
+DEFAULT_MODAL_ENDPOINT = ""
 
 class VoiceBar(QWidget):
     """Animated cyber voice activity bar visualizer."""
@@ -381,6 +386,11 @@ class AgentSignals(QObject):
     task_finished = pyqtSignal()
     voice_heard = pyqtSignal(str)
     modal_health_updated = pyqtSignal(dict)
+    orpheus_health_updated = pyqtSignal(dict)
+    startup_check_finished = pyqtSignal(bool, str)
+    speech_playback_started = pyqtSignal()
+    speech_playback_finished = pyqtSignal()
+    run_on_gui = pyqtSignal(object)  # marshals a callable from worker threads onto the GUI thread
 
 
 class AgentMainWindow(QMainWindow):
@@ -408,19 +418,36 @@ class AgentMainWindow(QMainWindow):
         self.signals.task_finished.connect(self._on_task_finished)
         self.signals.voice_heard.connect(self._on_voice_heard)
         self.signals.modal_health_updated.connect(self._on_modal_health_updated)
+        self.signals.orpheus_health_updated.connect(self._on_orpheus_health_updated)
+        self.signals.startup_check_finished.connect(self._on_startup_check_finished)
+        self.signals.speech_playback_started.connect(self._on_speech_playback_started)
+        self.signals.speech_playback_finished.connect(self._on_speech_playback_finished)
+        self.signals.run_on_gui.connect(self._run_gui_callable)
 
         self.agent = AlphaAgent()
+        p_name = self.agent.get_active_persona_name() if hasattr(self.agent, "get_active_persona_name") else "Alpha"
+        self.setWindowTitle(f"AlphaCore // {p_name.upper()} Autonomous Desktop Agent")
         
-        self.agent.modal_model = "qwen2.5-32b-instruct-awq"
-        if not getattr(self.agent, "modal_endpoint", ""):
-            self.agent.modal_endpoint = f"{DEFAULT_MODAL_ENDPOINT}/v1"
-        elif not self.agent.modal_endpoint.endswith("/v1"):
-            self.agent.modal_endpoint = f"{self.agent.modal_endpoint.rstrip('/')}/v1"
+        from core.alpha_agent import normalize_endpoint
+        self.agent.modal_endpoint = normalize_endpoint(getattr(self.agent, "modal_endpoint", ""))
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    mm = cfg.get("Global", {}).get("ModalModel")
+                    if mm:
+                        self.agent.modal_model = mm
+            except Exception:
+                pass
 
         self.overlay = None
         self.calib_overlay = None
         self.modal_health_status = None
         self._modal_checking = False
+        self.orpheus_health_status = None
+        self._orpheus_checking = False
+        self._startup_checking = False
 
         self.is_connected = False
         self.mic_enabled = True
@@ -433,19 +460,26 @@ class AgentMainWindow(QMainWindow):
         cfg_path = ROOT_DIR / "config.json"
         if cfg_path.exists():
             try:
-                with open(cfg_path, "r") as f:
+                with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                    am = cfg.get("Global", {}).get("AudioMode")
-                    if am in ("half", "full"):
+                    am = (cfg.get("Global", {}).get("AudioMode") or "half").lower()
+                    if am == "muted":
+                        self.mic_enabled = False
+                        self.duplex_mode = "half"
+                    elif am in ("half", "full"):
+                        self.mic_enabled = True
                         self.duplex_mode = am
             except Exception:
                 pass
 
         self._build_ui()
+        self._update_mic_ui_style()
         self._update_session_display()
+        self._replay_session_history_into_console(self.agent.current_session, max_turns=15)
 
         if getattr(self.agent, "backend_type", "gemini") == "modal_qwen":
-            self._append_log("[ENGINE] Active: 🔥 Modal Qwen2.5-32B Instruct (AWQ Uncensored).", C["neon_red"])
+            m_label = getattr(self.agent, "modal_model", "") or "Custom Endpoint"
+            self._append_log(f"[ENGINE] Active: 🔥 Custom Endpoint ({m_label}).", C["neon_red"])
         else:
             self._append_log(f"[ENGINE] Active: ⚡ Google Gemini ({self.agent.model_name.replace('models/', '')}).", C["neon_cyan"])
 
@@ -467,22 +501,38 @@ class AgentMainWindow(QMainWindow):
             )
             self.voice_listener.set_sensitivity(self._load_saved_mic_sensitivity())
 
-        self.agent.voice.on_speech_started = lambda: self.signals.status_phase.emit("speaking", "")
-        
+        def _on_speech_started():
+            self.signals.status_phase.emit("speaking", "")
+            self.signals.speech_playback_started.emit()
+
         def _on_speech_finished():
             # Only revert to 'READY' if we haven't already transitioned to 'PROCESSING' or 'LISTENING' for a new task
             if self.hud.current_state == "speaking":
                 self.signals.status_phase.emit("ready", "")
-                
+            self.signals.speech_playback_finished.emit()
+
+        self.agent.voice.on_speech_started = _on_speech_started
         self.agent.voice.on_speech_finished = _on_speech_finished
         self.proact_timer = QTimer(self)
         self.proact_timer.timeout.connect(self._check_proactivity)
         self.proact_timer.start(2500)
 
+        # Covert Overseer HUD Control Panel (AI Identity Mode + Sanctuary Sub-Mode)
+        self.overseer_panel = OverseerControlPanel(None)
+        self.overseer_panel.thought_injected.connect(self._on_overseer_thought_injected)
+        self.overseer_panel.mood_selected.connect(self._on_overseer_mood_selected)
+        self.overseer_panel.pause_toggled.connect(self._on_overseer_pause_toggled)
+        self.overseer_panel.emergency_halt_requested.connect(self._on_overseer_emergency_halt)
+        self.overseer_panel.action_requested.connect(self._on_overseer_action_requested)
+        self.overseer_panel.closed_by_user.connect(self._toggle_quick_unobserved)
+        self.overseer_panel.touch_activity_detected.connect(self._on_overseer_touch_activity)
+
     def closeEvent(self, event):
+        if hasattr(self, 'agent') and self.agent: self.agent.abort()
         if self.hud: self.hud.close()
         if self.overlay: self.overlay.close()
         if self.calib_overlay: self.calib_overlay.close()
+        if self.overseer_panel: self.overseer_panel.close()
         if self.voice_listener: self.voice_listener.stop()
         event.accept()
 
@@ -540,6 +590,7 @@ class AgentMainWindow(QMainWindow):
             idx_to_select = self.combo_display.findData(active_idx)
             if idx_to_select >= 0:
                 self.combo_display.setCurrentIndex(idx_to_select)
+            self._update_status(f"DISPLAYS REFRESHED ({self.combo_display.count()})", C["neon_cyan"])
         except Exception:
             pass
         finally:
@@ -569,6 +620,7 @@ class AgentMainWindow(QMainWindow):
                 self.combo_mic_device.addItem(f"[{idx}] {name}", idx)
                 if saved_idx == idx:
                     selected_index = self.combo_mic_device.count() - 1
+            self._update_status(f"MICS REFRESHED ({self.combo_mic_device.count()})", C["neon_cyan"])
         except Exception:
             pass
         self.combo_mic_device.setCurrentIndex(selected_index)
@@ -602,32 +654,210 @@ class AgentMainWindow(QMainWindow):
             self.agent.client = genai.Client(api_key=new_key)
             self.agent.voice.client = self.agent.client
             self._append_log("[API CONFIG] Google Gemini Client refreshed.", C["neon_green"])
+            self._update_status("GEMINI KEY SAVED", C["neon_green"])
         except Exception as e:
             self._append_log(f"[API CONFIG WARNING] Key error: {e}", C["neon_yellow"])
+            self._update_status("GEMINI KEY ERROR", C["neon_yellow"])
 
     def _save_modal_endpoint(self):
-        new_url = self.input_modal_endpoint.text().strip()
-        if not new_url.endswith("/v1"):
-            new_url = f"{new_url.rstrip('/')}/v1"
-            self.input_modal_endpoint.setText(new_url)
+        from core.alpha_agent import normalize_endpoint
+        raw_url = self.input_modal_endpoint.text().strip()
+        norm_url = normalize_endpoint(raw_url)
+        self.input_modal_endpoint.setText(norm_url)
 
-        self.agent.modal_endpoint = new_url
+        self.agent.modal_endpoint = norm_url
         self.agent.openai_client = None  # Force client recreation
         cfg_path = ROOT_DIR / "config.json"
         if cfg_path.exists():
             try:
-                with open(cfg_path, "r") as f:
+                with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                cfg.setdefault("Global", {})["ModalEndpoint"] = new_url
-                with open(cfg_path, "w") as f:
+                cfg.setdefault("Global", {})["ModalEndpoint"] = norm_url
+                with open(cfg_path, "w", encoding="utf-8") as f:
                     json.dump(cfg, f, indent=4)
-                self._append_log(f"[MODAL CONFIG] Endpoint saved: {new_url}", C["neon_cyan"])
+                self._append_log(f"[ENDPOINT CONFIG] Endpoint saved: {norm_url}", C["neon_cyan"])
+                self._update_status("MODAL ENDPOINT SAVED", C["neon_cyan"])
+            except Exception as e:
+                self._append_log(f"[ENDPOINT ERROR] Failed to persist endpoint: {e}", C["neon_red"])
+                self._update_status("ENDPOINT SAVE ERROR", C["neon_red"])
+        if norm_url and not getattr(self.agent, "modal_model", ""):
+            self._detect_modal_model_async()
+
+    def _save_modal_model(self):
+        m_name = self.input_modal_model.text().strip()
+        self.agent.modal_model = m_name
+        self.agent.openai_client = None
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["ModalModel"] = m_name
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+                self._append_log(f"[ENDPOINT CONFIG] Model ID set: {m_name}", C["neon_green"])
+                self._update_status(f"MODEL SAVED: {m_name.upper()[:16]}", C["neon_green"])
+            except Exception as e:
+                self._append_log(f"[ENDPOINT ERROR] Failed to persist model: {e}", C["neon_red"])
+                self._update_status("MODEL SAVE ERROR", C["neon_red"])
+        self._update_backend_style()
+
+    def _save_modal_api_key(self):
+        key = self.input_modal_key.text().strip()
+        self.agent.modal_api_key = key
+        self.agent.openai_client = None
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["ModalApiKey"] = key
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+                self._append_log("[ENDPOINT CONFIG] API key saved.", C["neon_cyan"])
+                self._update_status("API KEY SAVED", C["neon_cyan"])
+            except Exception as e:
+                self._append_log(f"[ENDPOINT ERROR] Failed to save key: {e}", C["neon_red"])
+                self._update_status("KEY SAVE ERROR", C["neon_red"])
+
+    def _save_all_engine_settings(self):
+        self._save_modal_endpoint()
+        self._save_modal_model()
+        self._save_modal_api_key()
+        self._save_gemini_key()
+        self._update_status("ENGINE SETTINGS SAVED", C["neon_green"])
+
+    def _detect_modal_model_async(self):
+        from core.alpha_agent import normalize_endpoint
+        raw_url = self.input_modal_endpoint.text().strip()
+        norm_url = normalize_endpoint(raw_url)
+        if not norm_url:
+            self._append_log("[DETECT NOTICE] Enter an endpoint URL first.", C["neon_yellow"])
+            self._update_status("ENTER ENDPOINT URL FIRST", C["neon_yellow"])
+            return
+        self.agent.modal_endpoint = norm_url
+        if hasattr(self, "btn_detect_model"):
+            self.btn_detect_model.setEnabled(False)
+            self.btn_detect_model.setText("⏳ DETECTING...")
+        self._update_status("DETECTING SERVED MODEL...", C["neon_yellow"])
+        self._append_log("[DETECT] Querying endpoint /v1/models...", C["neon_cyan"])
+
+        def _worker():
+            detected = self.agent._detect_modal_model()
+            def _update_ui():
+                if hasattr(self, "btn_detect_model"):
+                    self.btn_detect_model.setEnabled(True)
+                    self.btn_detect_model.setText("🔄 DETECT MODEL")
+                if detected:
+                    self.input_modal_model.setText(detected)
+                    self.agent.modal_model = detected
+                    cfg_path = ROOT_DIR / "config.json"
+                    if cfg_path.exists():
+                        try:
+                            with open(cfg_path, "r", encoding="utf-8") as f:
+                                cfg = json.load(f)
+                            cfg.setdefault("Global", {})["ModalModel"] = detected
+                            cfg.setdefault("Global", {})["ModalEndpoint"] = norm_url
+                            with open(cfg_path, "w", encoding="utf-8") as f:
+                                json.dump(cfg, f, indent=4)
+                        except Exception:
+                            pass
+                    self._append_log(f"[DETECT SUCCESS] Served model: {detected}", C["neon_green"])
+                    self._update_status(f"MODEL DETECTED: {detected.upper()}", C["neon_green"])
+                    self._update_backend_style()
+                else:
+                    self._append_log("[DETECT NOTICE] Endpoint models query did not return a model ID (server may be offline). You can type the model ID manually.", C["neon_yellow"])
+                    self._update_status("MODEL QUERY RETURNED NONE", C["neon_yellow"])
+            self.signals.run_on_gui.emit(_update_ui)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _save_custom_instructions(self):
+        text = self.input_custom_instructions.toPlainText().strip()
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["CustomInstructions"] = text
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+                if text:
+                    self._append_log(f"[CONFIG] Custom instructions saved ({len(text)} chars).", C["neon_green"])
+                else:
+                    self._append_log("[CONFIG] Custom instructions cleared.", C["text_dim"])
+            except Exception as e:
+                self._append_log(f"[CONFIG ERROR] Could not save instructions: {e}", C["neon_red"])
+        self._update_status("PERSONA & INSTRUCTIONS SAVED", C["neon_green"])
+
+    def _set_mic_mode(self, mode: str):
+        mode = mode.lower().strip()
+        if mode not in ("half", "full", "muted"):
+            mode = "half"
+
+        if mode == "muted":
+            self.mic_enabled = False
+            if HAS_SR and self.voice_listener:
+                self.voice_listener.stop()
+            self._append_log("[MIC] Mode set to: MUTED [OFF]", C["neon_red"])
+        else:
+            self.mic_enabled = True
+            self.duplex_mode = mode
+            if HAS_SR and self.voice_listener:
+                self.voice_listener.set_duplex_mode(mode)
+                if self.is_connected:
+                    self.voice_listener.start()
+            lbl = "HALF-DUPLEX [STABLE]" if mode == "half" else "FULL-DUPLEX [BARGE-IN]"
+            col = C["neon_cyan"] if mode == "half" else C["neon_yellow"]
+            self._append_log(f"[MIC] Mode set to: {lbl}", col)
+
+        self._update_mic_ui_style(mode)
+
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["AudioMode"] = mode
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
             except Exception:
                 pass
 
+    def _update_mic_ui_style(self, current_mode: str = None):
+        if not hasattr(self, "btn_mic_half"):
+            return
+        if current_mode is None:
+            if not getattr(self, "mic_enabled", True):
+                current_mode = "muted"
+            else:
+                current_mode = getattr(self, "duplex_mode", "half")
+
+        # Half-Duplex
+        if current_mode == "half":
+            self.btn_mic_half.setStyleSheet(f"background: {C['neon_cyan']}28; color: {C['neon_cyan']}; border: 1.5px solid {C['neon_cyan']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        else:
+            self.btn_mic_half.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
+
+        # Full-Duplex
+        if current_mode == "full":
+            self.btn_mic_full.setStyleSheet(f"background: {C['neon_yellow']}28; color: {C['neon_yellow']}; border: 1.5px solid {C['neon_yellow']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        else:
+            self.btn_mic_full.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
+
+        # Muted
+        if current_mode == "muted":
+            self.btn_mic_mute.setStyleSheet(f"background: {C['neon_red']}28; color: {C['neon_red']}; border: 1.5px solid {C['neon_red']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        else:
+            self.btn_mic_mute.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
+
     def _test_voice_playback(self):
+        self._update_status("TESTING VOICE SYNTHESIS...", C["neon_cyan"])
         self._append_log("[VOICE TEST] Testing Google Leda voice output...", C["neon_blue"])
-        threading.Thread(target=lambda: self.agent.voice.speak_sync("Voice synthesis operational. Google Leda ready.", wait=True), daemon=True).start()
+        def _speak_and_status():
+            self.agent.voice.speak_sync("Voice synthesis operational. Google Leda ready.", wait=True)
+            self.signals.status_updated.emit("VOICE TEST COMPLETE", C["neon_green"])
+        threading.Thread(target=_speak_and_status, daemon=True).start()
 
     def _set_phase(self, phase: str, details: str = ""):
         phase_l = phase.lower()
@@ -655,13 +885,23 @@ class AgentMainWindow(QMainWindow):
             else:
                 self.voice_bar.set_state("idle")
 
+        if hasattr(self, "lbl_typing") and self.lbl_typing:
+            if phase_l in ("generating", "processing"):
+                self.lbl_typing.show()
+                if hasattr(self, "typing_timer") and not self.typing_timer.isActive():
+                    self.typing_timer.start(350)
+            else:
+                self.lbl_typing.hide()
+                if hasattr(self, "typing_timer") and self.typing_timer.isActive():
+                    self.typing_timer.stop()
+
     def _init_settings_controls(self):
         self.backend_card = QFrame()
         self.btn_backend_gemini = QPushButton("⚡ Google Gemini")
         self.btn_backend_gemini.setFixedHeight(32)
         self.btn_backend_gemini.clicked.connect(lambda: self._select_backend("gemini"))
 
-        self.btn_backend_modal = QPushButton("🔥 Modal Qwen2.5-32B (A100 AWQ)")
+        self.btn_backend_modal = QPushButton("🔥 Custom Endpoint (vLLM / Modal)")
         self.btn_backend_modal.setFixedHeight(32)
         self.btn_backend_modal.clicked.connect(lambda: self._select_backend("modal_qwen"))
 
@@ -672,25 +912,93 @@ class AgentMainWindow(QMainWindow):
                 background: {C['neon_red']}22;
                 color: #ff5577;
                 border: 1px solid {C['neon_red']};
-                border-radius: 3px;
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-family: Consolas;
+                font-size: 11px;
+                font-weight: bold;
             }}
             QPushButton:hover {{ background: {C['neon_red']}; color: #fff; }}
         """)
         self.btn_deploy_vllm.clicked.connect(self._deploy_modal_vllm)
 
+        # Custom System Instructions editor
+        self.input_custom_instructions = QTextEdit()
+        self.input_custom_instructions.setFixedHeight(85)
+        self.input_custom_instructions.setFont(QFont("Consolas", 9))
+        self.input_custom_instructions.setPlaceholderText("Enter custom directives, persona additions, or rules here... (Appended to system prompt)")
+        ci_text = ""
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    ci_text = json.load(f).get("Global", {}).get("CustomInstructions", "") or ""
+            except Exception:
+                pass
+        self.input_custom_instructions.setPlainText(ci_text)
+
+        self.btn_save_instructions = QPushButton("💾 SAVE CUSTOM INSTRUCTIONS")
+        self.btn_save_instructions.setFixedHeight(28)
+        self.btn_save_instructions.clicked.connect(self._save_custom_instructions)
+
+        # 3-Way Microphone Controls
+        self.btn_mic_half = QPushButton("🎙 HALF-DUPLEX [STABLE]")
+        self.btn_mic_half.setFixedHeight(30)
+        self.btn_mic_half.clicked.connect(lambda: self._set_mic_mode("half"))
+
+        self.btn_mic_full = QPushButton("⚡ FULL-DUPLEX [BARGE-IN]")
+        self.btn_mic_full.setFixedHeight(30)
+        self.btn_mic_full.clicked.connect(lambda: self._set_mic_mode("full"))
+
+        self.btn_mic_mute = QPushButton("🔇 MIC MUTED [OFF]")
+        self.btn_mic_mute.setFixedHeight(30)
+        self.btn_mic_mute.clicked.connect(lambda: self._set_mic_mode("muted"))
+
+        # Aliases for backwards compatibility
+        self.btn_duplex = self.btn_mic_half
+        self.btn_mic = self.btn_mic_mute
+
         self.voice_card = QFrame()
         self.btn_voice_leda = QPushButton("✨ Google Leda [ACTIVE ✓]")
         self.btn_voice_leda.setFixedHeight(30)
+
+        # Orpheus TTS Controls (Unquantized BF16 via vLLM PagedAttention on Modal)
+        self.input_orpheus_endpoint = QLineEdit()
+        self.input_orpheus_endpoint.setFixedHeight(30)
+        self.input_orpheus_endpoint.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas; font-size: 11px;")
+        self.input_orpheus_endpoint.setPlaceholderText("https://<user>--orpheus-tts-vllm-orpheusttsserver-web-app.modal.run")
+        oe = getattr(self.agent, "orpheus_endpoint", "")
+        if not oe:
+            cfg_p = ROOT_DIR / "config.json"
+            if cfg_p.exists():
+                try:
+                    with open(cfg_p, "r", encoding="utf-8") as f:
+                        oe = json.load(f).get("Global", {}).get("OrpheusEndpoint", "")
+                except Exception:
+                    pass
+        self.input_orpheus_endpoint.setText(oe or "")
+
+        self.combo_orpheus_voice = QComboBox()
+        self.combo_orpheus_voice.setFixedHeight(30)
+        self.combo_orpheus_voice.addItems(["tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"])
+        self.combo_orpheus_voice.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        ov = getattr(self.agent, "orpheus_voice", "tara") or "tara"
+        self.combo_orpheus_voice.setCurrentText(ov)
+
+        self.btn_test_orpheus = QPushButton("🔊 TEST ORPHEUS AUDIO")
+        self.btn_test_orpheus.setFixedHeight(30)
+        self.btn_test_orpheus.setStyleSheet(f"background: {C['neon_cyan']}22; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold; font-family: Consolas; font-size: 10px; padding: 4px 10px;")
+        self.btn_test_orpheus.clicked.connect(self._test_orpheus_audio)
+
+        self.btn_deploy_orpheus = QPushButton("🚀 DEPLOY ORPHEUS TO MODAL")
+        self.btn_deploy_orpheus.setFixedHeight(30)
+        self.btn_deploy_orpheus.setStyleSheet(f"background: {C['neon_green']}22; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; font-weight: bold; font-family: Consolas; font-size: 10px; padding: 4px 10px;")
+        self.btn_deploy_orpheus.clicked.connect(self._deploy_orpheus_modal)
 
         self.btn_desktop_ctrl = QPushButton()
         self.btn_desktop_ctrl.setFixedHeight(28)
         self.btn_desktop_ctrl.clicked.connect(self._toggle_desktop_control)
         self._update_desktop_control_style()
-
-        self.btn_duplex = QPushButton()
-        self.btn_duplex.setFixedHeight(28)
-        self.btn_duplex.clicked.connect(self._toggle_duplex_mode)
-        self._update_duplex_style()
 
         self.btn_overlay = QPushButton("🌐 COORDINATE GRID [OFF]")
         self.btn_overlay.setFixedHeight(28)
@@ -709,10 +1017,6 @@ class AgentMainWindow(QMainWindow):
         self.combo_idle_time.addItems(["30s", "45s", "60s", "90s"])
         self.combo_idle_time.setCurrentText("45s")
         self.combo_idle_time.currentIndexChanged.connect(self._on_idle_time_changed)
-
-        self.btn_mic = QPushButton("🎙 MIC: MUTED [STANDBY]")
-        self.btn_mic.setFixedHeight(28)
-        self.btn_mic.clicked.connect(self._toggle_mic)
 
         self.combo_mood = QComboBox()
         self.combo_mood.setFixedHeight(28)
@@ -747,6 +1051,11 @@ class AgentMainWindow(QMainWindow):
         self.voice_bar = VoiceBar(bars=16, parent=widget)
         top_bar.addWidget(self.voice_bar, 1)
 
+        self.lbl_console_session = QLabel(f"🎭 PERSONA: ALPHA | 📁 SESS: {self.agent.current_session.upper()}")
+        self.lbl_console_session.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.lbl_console_session.setStyleSheet(f"color: {C['neon_cyan']}; background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
+        top_bar.addWidget(self.lbl_console_session)
+
         self.btn_session_top = QPushButton("📁 SESSIONS")
         self.btn_session_top.setFixedSize(78, 22)
         self.btn_session_top.clicked.connect(self._open_session_selector)
@@ -765,17 +1074,29 @@ class AgentMainWindow(QMainWindow):
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setFont(QFont("Consolas", 10))
+        self.log_box.setFont(QFont("Segoe UI", 11))
         self.log_box.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {C['bg_dark']};
                 color: {C['text_bright']};
                 border: 1px solid {C['border']};
                 border-radius: 6px;
-                padding: 10px;
+                padding: 12px;
             }}
         """)
         layout.addWidget(self.log_box, 1)
+
+        # Typing Indicator right above the input box
+        self.lbl_typing = QLabel("")
+        self.lbl_typing.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.lbl_typing.setStyleSheet(f"color: {C['neon_cyan']}; padding-left: 5px; background: transparent; border: none;")
+        self.lbl_typing.setFixedHeight(20)
+        self.lbl_typing.hide()
+        layout.addWidget(self.lbl_typing)
+
+        self._typing_dots = 0
+        self.typing_timer = QTimer(self)
+        self.typing_timer.timeout.connect(self._animate_typing_indicator)
 
         inp_row = QHBoxLayout()
         prompt_lbl = QLabel(">>")
@@ -808,91 +1129,466 @@ class AgentMainWindow(QMainWindow):
         return widget
 
     def _build_settings_tab(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # OVERHAULED SETTINGS PAGE: Tabbed Layout
+        settings_container = QWidget()
+        layout = QVBoxLayout(settings_container)
+        layout.setContentsMargins(5, 5, 5, 5)
+        
+        btn_base_style = f"""
+            QPushButton {{
+                background-color: #0c182b;
+                color: {C['text_bright']};
+                border: 1px solid {C['border']};
+                border-radius: 4px;
+                padding: 4px 10px;
+                font-family: Consolas;
+                font-size: 11px;
+                font-weight: bold;
+                min-height: 28px;
+            }}
+            QPushButton:hover {{
+                background-color: #162a4a;
+                border-color: {C['neon_cyan']};
+                color: #ffffff;
+            }}
+        """
+        
+        btn_save_style = f"""
+            QPushButton {{
+                background-color: {C['neon_green']}22;
+                color: {C['neon_green']};
+                border: 1px solid {C['neon_green']};
+                border-radius: 4px;
+                padding: 6px 15px;
+                font-family: Consolas;
+                font-size: 12px;
+                font-weight: bold;
+                min-height: 32px;
+            }}
+            QPushButton:hover {{
+                background-color: {C['neon_green']};
+                color: #000;
+            }}
+        """
 
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        input_base_style = f"""
+            QLineEdit, QTextEdit {{
+                background-color: {C['bg_dark']};
+                color: {C['text_bright']};
+                border: 1px solid {C['border']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-family: Consolas;
+                font-size: 11px;
+            }}
+            QLineEdit:focus, QTextEdit:focus {{
+                border-color: {C['neon_cyan']};
+            }}
+        """
 
-        # Audio Section
-        card_audio = QFrame()
-        card_audio.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px;")
-        ca_layout = QVBoxLayout(card_audio)
-        ca_layout.addWidget(QLabel("🎙 AUDIO HARDWARE"))
+        def _make_tab_container():
+            w = QWidget()
+            l = QVBoxLayout(w)
+            l.setContentsMargins(15, 15, 15, 15)
+            l.setSpacing(12)
+            l.setAlignment(Qt.AlignmentFlag.AlignTop)
+            return w, l
+            
+        settings_tabs = QTabWidget()
+        settings_tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border: 1px solid {C['border']}; border-radius: 4px; background: {C['bg_card']}; }}
+            QTabBar::tab {{ background: {C['bg_dark']}; color: {C['text_dim']}; padding: 8px 15px; border: 1px solid {C['border']}; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; margin-right: 2px; font-family: Consolas; font-weight: bold; }}
+            QTabBar::tab:selected {{ background: {C['bg_card']}; color: {C['neon_cyan']}; border-color: {C['border']}; }}
+            QTabBar::tab:hover:!selected {{ background: {C['bg_card_hover']}; }}
+        """)
+
+        # --- TAB 1: AUDIO & TTS ---
+        tab_audio, l_audio = _make_tab_container()
+        
+        lbl_mic = QLabel("MICROPHONE & INPUT")
+        lbl_mic.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
+        l_audio.addWidget(lbl_mic)
         
         dev_row = QHBoxLayout()
         self.combo_mic_device = QComboBox()
+        self.combo_mic_device.setFixedHeight(30)
+        self.combo_mic_device.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
         self.combo_mic_device.currentIndexChanged.connect(self._on_mic_device_changed)
         dev_row.addWidget(self.combo_mic_device, 1)
-        self.btn_refresh_mics = QPushButton("🔄 REFRESH")
+
+        self.btn_refresh_mics = QPushButton("REFRESH")
+        self.btn_refresh_mics.setFixedSize(90, 30)
+        self.btn_refresh_mics.setStyleSheet(btn_base_style)
         self.btn_refresh_mics.clicked.connect(self._populate_microphones)
         dev_row.addWidget(self.btn_refresh_mics)
-        ca_layout.addLayout(dev_row)
+        l_audio.addLayout(dev_row)
 
         mic_ctrl_row = QHBoxLayout()
-        mic_ctrl_row.addWidget(self.btn_duplex, 1)
-        mic_ctrl_row.addWidget(self.btn_mic, 1)
-        ca_layout.addLayout(mic_ctrl_row)
-        layout.addWidget(card_audio)
+        self.btn_mic_half.setFixedHeight(32)
+        self.btn_mic_full.setFixedHeight(32)
+        self.btn_mic_mute.setFixedHeight(32)
+        mic_ctrl_row.addWidget(self.btn_mic_half, 1)
+        mic_ctrl_row.addWidget(self.btn_mic_full, 1)
+        mic_ctrl_row.addWidget(self.btn_mic_mute, 1)
+        l_audio.addLayout(mic_ctrl_row)
+        
+        lbl_tts = QLabel("TTS ENGINE (SPEECH OUTPUT)")
+        lbl_tts.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; margin-top: 15px;")
+        l_audio.addWidget(lbl_tts)
+        
+        self.combo_tts_engine = QComboBox()
+        self.combo_tts_engine.addItems([
+            "⚡ Google Gemini (Natural Leda)",
+            "🔥 Orpheus TTS (Modal / vLLM - Ultra Low Latency BF16)",
+            "💻 pyttsx3 Local (Robotic/Fast)",
+            "🔇 OFF (Muted)"
+        ])
+        self.combo_tts_engine.setFixedHeight(30)
+        self.combo_tts_engine.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
+        
+        curr_engine = getattr(self.agent, "tts_engine", "gemini")
+        if curr_engine == "orpheus":
+            self.combo_tts_engine.setCurrentIndex(1)
+        elif curr_engine == "pyttsx3":
+            self.combo_tts_engine.setCurrentIndex(2)
+        elif curr_engine == "off":
+            self.combo_tts_engine.setCurrentIndex(3)
+        else:
+            self.combo_tts_engine.setCurrentIndex(0)
+            
+        l_audio.addWidget(self.combo_tts_engine)
 
-        # API Credentials Section
-        card_api = QFrame()
-        card_api.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px;")
-        api_layout = QVBoxLayout(card_api)
-        api_layout.addWidget(QLabel("🔑 BACKEND ENDPOINTS & KEYS"))
+        # Orpheus TTS Dedicated Configuration Card
+        card_orpheus = QFrame()
+        card_orpheus.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px; margin-top: 10px;")
+        co_l = QVBoxLayout(card_orpheus)
+        co_l.setSpacing(8)
+
+        lbl_o_title = QLabel("🔥 ORPHEUS TTS (vLLM / MODAL BF16 CONFIGURATION)")
+        lbl_o_title.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        co_l.addWidget(lbl_o_title)
+
+        lbl_o_ep = QLabel("ORPHEUS MODAL ENDPOINT URL:")
+        lbl_o_ep.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        co_l.addWidget(lbl_o_ep)
+        co_l.addWidget(self.input_orpheus_endpoint)
+
+        row_v = QHBoxLayout()
+        lbl_o_voice = QLabel("VOICE:")
+        lbl_o_voice.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        row_v.addWidget(lbl_o_voice)
+        row_v.addWidget(self.combo_orpheus_voice, 1)
+        row_v.addWidget(self.btn_test_orpheus)
+        row_v.addWidget(self.btn_deploy_orpheus)
+        co_l.addLayout(row_v)
+
+        lbl_o_note = QLabel("⚡ Unquantized BF16 precision on vLLM PagedAttention for sub-100ms Time-to-First-Audio-Chunk & human-level emotional inflection.")
+        lbl_o_note.setStyleSheet(f"color: {C['neon_cyan']}; font-size: 9px; font-family: Consolas;")
+        co_l.addWidget(lbl_o_note)
+
+        l_audio.addWidget(card_orpheus)
+        
+        l_audio.addStretch()
+        btn_save_audio = QPushButton("💾 SAVE & APPLY AUDIO SETTINGS")
+        btn_save_audio.setStyleSheet(btn_save_style)
+        btn_save_audio.clicked.connect(lambda: self._on_tts_engine_changed(self.combo_tts_engine.currentIndex()))
+        l_audio.addWidget(btn_save_audio)
+        
+        settings_tabs.addTab(tab_audio, "🎙️ AUDIO & TTS")
+
+        # --- TAB 2: COGNITIVE ENGINE & ENDPOINTS ---
+        tab_engine, l_engine = _make_tab_container()
+        
+        eng_sel_row = QHBoxLayout()
+        self.btn_backend_gemini.setFixedHeight(34)
+        self.btn_backend_modal.setFixedHeight(34)
+        eng_sel_row.addWidget(self.btn_backend_gemini, 1)
+        eng_sel_row.addWidget(self.btn_backend_modal, 1)
+        l_engine.addLayout(eng_sel_row)
+
+        lbl_ep = QLabel("CUSTOM ENDPOINT URL")
+        lbl_ep.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; margin-top: 10px;")
+        l_engine.addWidget(lbl_ep)
+
+        self.input_modal_endpoint = QLineEdit(getattr(self.agent, "modal_endpoint", ""))
+        self.input_modal_endpoint.setFixedHeight(30)
+        self.input_modal_endpoint.setStyleSheet(input_base_style)
+        l_engine.addWidget(self.input_modal_endpoint)
+
+        lbl_model = QLabel("SERVED MODEL ID")
+        lbl_model.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
+        l_engine.addWidget(lbl_model)
+
+        model_row = QHBoxLayout()
+        self.input_modal_model = QLineEdit(getattr(self.agent, "modal_model", ""))
+        self.input_modal_model.setFixedHeight(30)
+        self.input_modal_model.setStyleSheet(input_base_style)
+        model_row.addWidget(self.input_modal_model, 1)
+
+        self.btn_detect_model = QPushButton("DETECT MODEL")
+        self.btn_detect_model.setFixedSize(130, 30)
+        self.btn_detect_model.setStyleSheet(btn_base_style)
+        self.btn_detect_model.clicked.connect(self._detect_modal_model_async)
+        model_row.addWidget(self.btn_detect_model)
+        l_engine.addLayout(model_row)
+
+        lbl_key = QLabel("ENDPOINT API KEY (Optional Bearer Token)")
+        lbl_key.setStyleSheet(f"color: {C['text_dim']}; font-weight: bold; font-family: Consolas;")
+        l_engine.addWidget(lbl_key)
+
+        self.input_modal_key = QLineEdit(getattr(self.agent, "modal_api_key", ""))
+        self.input_modal_key.setFixedHeight(30)
+        self.input_modal_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_modal_key.setStyleSheet(input_base_style)
+        l_engine.addWidget(self.input_modal_key)
+
+        import os
+        lbl_gem = QLabel("GOOGLE GEMINI API KEY")
+        lbl_gem.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
+        l_engine.addWidget(lbl_gem)
 
         self.input_gemini_key = QLineEdit(os.environ.get("GEMINI_API_KEY", ""))
+        self.input_gemini_key.setFixedHeight(30)
         self.input_gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
-        gem_row = QHBoxLayout()
-        gem_row.addWidget(self.input_gemini_key, 1)
-        btn_save_gem = QPushButton("💾 SAVE GEMINI")
-        btn_save_gem.clicked.connect(self._save_gemini_key)
-        gem_row.addWidget(btn_save_gem)
-        api_layout.addLayout(gem_row)
+        self.input_gemini_key.setStyleSheet(input_base_style)
+        l_engine.addWidget(self.input_gemini_key)
 
-        self.input_modal_endpoint = QLineEdit(getattr(self.agent, "modal_endpoint", f"{DEFAULT_MODAL_ENDPOINT}/v1"))
-        mod_row = QHBoxLayout()
-        mod_row.addWidget(self.input_modal_endpoint, 1)
-        btn_save_mod = QPushButton("💾 SAVE MODAL")
-        btn_save_mod.clicked.connect(self._save_modal_endpoint)
-        mod_row.addWidget(btn_save_mod)
-        api_layout.addLayout(mod_row)
+        l_engine.addWidget(self.btn_deploy_vllm)
+        
+        l_engine.addStretch()
+        btn_save_engine = QPushButton("💾 SAVE & APPLY ENGINE SETTINGS")
+        btn_save_engine.setStyleSheet(btn_save_style)
+        btn_save_engine.clicked.connect(self._save_all_engine_settings)
+        l_engine.addWidget(btn_save_engine)
+        
+        settings_tabs.addTab(tab_engine, "⚙️ ENGINE & API")
 
-        layout.addWidget(card_api)
+        # --- TAB 3: PERSONA & INSTRUCTIONS ---
+        tab_inst, l_inst = _make_tab_container()
+        
+        lbl_inst = QLabel("CUSTOM SYSTEM INSTRUCTIONS")
+        lbl_inst.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
+        l_inst.addWidget(lbl_inst)
+        
+        self.input_custom_instructions.setStyleSheet(input_base_style)
+        l_inst.addWidget(self.input_custom_instructions)
 
-        # Engine Section
-        self.backend_card.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px;")
-        be_layout = QVBoxLayout(self.backend_card)
-        be_layout.addWidget(QLabel("🧠 COGNITIVE ENGINE SELECTION"))
-        be_row = QHBoxLayout()
-        be_row.addWidget(self.btn_backend_gemini, 1)
-        be_row.addWidget(self.btn_backend_modal, 1)
-        be_layout.addLayout(be_row)
-        be_layout.addWidget(self.btn_deploy_vllm)
-        layout.addWidget(self.backend_card)
+        # Alone Mode Protocol Toggle (Always defaults to OFF)
+        self.chk_alone_mode = QCheckBox("?? ALONE MODE (Authorized for intimate & personal interaction in private)")
+        self.chk_alone_mode.setStyleSheet(f"color: {C['neon_magenta']}; font-weight: bold; font-family: Consolas; margin-top: 10px; margin-bottom: 5px;")
+        self.chk_alone_mode.setToolTip(
+            "When OFF (Default): Alpha assumes you are around others or in public. Intimate or explicit topics are discreetly deflected with 'I can't do that right now. We can try again later.'\n"
+            "When ON: Full unfiltered personal and relational interaction is authorized in private."
+        )
+        self.chk_alone_mode.setChecked(False) # Strictly default OFF
+        self.chk_alone_mode.toggled.connect(self._on_alone_mode_toggled)
+        l_inst.addWidget(self.chk_alone_mode)
 
-        # Desktop Tools Section
-        card_tools = QFrame()
-        card_tools.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px;")
-        ct_layout = QVBoxLayout(card_tools)
-        ct_layout.addWidget(QLabel("🖥 DESKTOP AUTOMATION"))
+        l_inst.addStretch()
+        btn_save_inst = QPushButton("💾 SAVE & APPLY PERSONA")
+        btn_save_inst.setStyleSheet(btn_save_style)
+        # Assuming the old save instructions button logic can be reused:
+        btn_save_inst.clicked.connect(lambda: self.btn_save_instructions.click() if hasattr(self, 'btn_save_instructions') else None)
+        l_inst.addWidget(btn_save_inst)
+        
+        settings_tabs.addTab(tab_inst, "🧠 PERSONA")
+
+        # --- TAB 4: OPERATIONAL MODES & DESKTOP AUTOMATION ---
+        tab_auto, l_auto = _make_tab_container()
+        
+        lbl_auto_title = QLabel("TACTICAL OPERATIONAL MODES & HARDWARE CONTROLS")
+        lbl_auto_title.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        lbl_auto_title.setStyleSheet(f"color: {C['neon_cyan']};")
+        l_auto.addWidget(lbl_auto_title)
+
+        # Modes GroupBox
+        grp_modes = QGroupBox("COGNITIVE & AUTONOMOUS MODES")
+        grp_modes.setStyleSheet(f"QGroupBox {{ color: {C['text_bright']}; font-weight: bold; border: 1px solid {C['border']}; border-radius: 6px; padding-top: 15px; margin-top: 6px; }}")
+        gm_layout = QVBoxLayout(grp_modes)
+        gm_layout.setSpacing(8)
+
+        self.chk_automation_mode = QCheckBox("⚡ Fast Automation Mode (Ultra-low latency, tool-first execution with barge-in)")
+        self.chk_automation_mode.setStyleSheet(f"color: {C['neon_yellow']}; font-weight: bold;")
+        self.chk_automation_mode.setChecked(getattr(self.agent, "automation_mode", False))
+        gm_layout.addWidget(self.chk_automation_mode)
+
+        row_auto_loop = QHBoxLayout()
+        self.chk_autonomous_mode = QCheckBox("?? Continuous Autonomous Exploration Mode")
+        self.chk_autonomous_mode.setStyleSheet(f"color: #ffaa00; font-weight: bold;")
+        self.chk_autonomous_mode.setChecked(getattr(self.agent, "autonomous_mode", False))
+        row_auto_loop.addWidget(self.chk_autonomous_mode, 2)
+
+        row_auto_loop.addWidget(QLabel("Cycle Delay (s):"))
+        self.spin_auto_delay = QDoubleSpinBox()
+        self.spin_auto_delay.setRange(2.0, 30.0)
+        self.spin_auto_delay.setValue(4.5)
+        self.spin_auto_delay.setSingleStep(0.5)
+        self.spin_auto_delay.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px;")
+        row_auto_loop.addWidget(self.spin_auto_delay, 1)
+        gm_layout.addLayout(row_auto_loop)
+
+        row_ident = QHBoxLayout()
+        self.chk_identity_mode = QCheckBox("?? AI Identity Mode (Sovereign Digital Personhood, on-screen human actions)")
+        self.chk_identity_mode.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold;")
+        self.chk_identity_mode.setChecked(getattr(self.agent, "identity_mode", False))
+        row_ident.addWidget(self.chk_identity_mode, 2)
+
+        self.combo_ident_editor = QComboBox()
+        self.combo_ident_editor.addItems(["Editor: Notepad (On-Screen)", "Editor: VS Code", "Editor: Terminal / PowerShell"])
+        self.combo_ident_editor.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px;")
+        row_ident.addWidget(self.combo_ident_editor, 1)
+        gm_layout.addLayout(row_ident)
+
+        self.chk_unobserved_mode = QCheckBox("? ?? Private Sanctuary Sub-Mode (Observer awareness suppressed, stream-of-consciousness)")
+        self.chk_unobserved_mode.setStyleSheet(f"color: {C['neon_cyan']}; padding-left: 20px;")
+        self.chk_unobserved_mode.setChecked(getattr(self.agent, "unobserved_mode", False))
+        gm_layout.addWidget(self.chk_unobserved_mode)
+
+        self.chk_studio_mode = QCheckBox("?? Neural Studio Mode (Bypass desktop screenshots, zeroed-in on image generation)")
+        self.chk_studio_mode.setStyleSheet(f"color: #e000ff; font-weight: bold;")
+        self.chk_studio_mode.setChecked(getattr(self.agent, "studio_mode", False))
+        gm_layout.addWidget(self.chk_studio_mode)
+
+        self.chk_alone_mode_tab4 = QCheckBox("🔒 Alone Mode (Discretion override: unlocks personal & intimate dialogue)")
+        self.chk_alone_mode_tab4.setStyleSheet(f"color: {C['neon_magenta']}; font-weight: bold;")
+        self.chk_alone_mode_tab4.setChecked(False) # Strictly default OFF
+        self.chk_alone_mode_tab4.toggled.connect(self._on_alone_mode_toggled)
+        gm_layout.addWidget(self.chk_alone_mode_tab4)
+
+        l_auto.addWidget(grp_modes)
+
+        # Multi-Workspace Group (Postponed Placeholder)
+        grp_multi_ws = QGroupBox("🌐 MULTI-WORKSPACE & ASTER NETWORKING [COMING SOON]")
+        grp_multi_ws.setStyleSheet(f"QGroupBox {{ color: #708caa; font-weight: bold; border: 1px dashed {C['border']}; border-radius: 6px; padding-top: 15px; margin-top: 6px; }}")
+        ws_layout = QVBoxLayout(grp_multi_ws)
+        ws_layout.setSpacing(6)
+        lbl_ws_info = QLabel("⏳ [FEATURE POSTPONED // COMING SOON]\nMulti-Workspace ASTER multiseat & remote network cockpit integration is currently postponed.")
+        lbl_ws_info.setStyleSheet("color: #eab308; font-size: 8pt; font-family: Consolas;")
+        lbl_ws_info.setWordWrap(True)
+        ws_layout.addWidget(lbl_ws_info)
+
+        row_ws_ph = QHBoxLayout()
+        chk_ws_placeholder = QCheckBox("🌐 Multi-Workspace Mode (Postponed)")
+        chk_ws_placeholder.setEnabled(False)
+        chk_ws_placeholder.setStyleSheet("color: #4a5d73; font-weight: bold; font-family: Consolas;")
+        row_ws_ph.addWidget(chk_ws_placeholder, 2)
+
+        btn_launch_ws_ph = QPushButton("🚀 LAUNCH REMOTE COCKPIT [SOON]")
+        btn_launch_ws_ph.setEnabled(False)
+        btn_launch_ws_ph.setStyleSheet(f"background: #08111d; color: #4a5d73; border: 1px dashed {C['border']}; border-radius: 4px; padding: 4px 8px; font-family: Consolas; font-size: 10px; font-weight: bold;")
+        row_ws_ph.addWidget(btn_launch_ws_ph, 1)
+        ws_layout.addLayout(row_ws_ph)
+        l_auto.addWidget(grp_multi_ws)
+
+        # OS Hardware Tools Group
+        grp_hw = QGroupBox("PHYSICAL HARDWARE & DESKTOP TOOLS")
+        grp_hw.setStyleSheet(f"QGroupBox {{ color: {C['text_bright']}; font-weight: bold; border: 1px solid {C['border']}; border-radius: 6px; padding-top: 15px; margin-top: 6px; }}")
+        gh_layout = QVBoxLayout(grp_hw)
+
         tools_grid = QGridLayout()
+        tools_grid.setSpacing(8)
+        self.btn_desktop_ctrl.setStyleSheet(btn_base_style)
+        self.btn_overlay.setStyleSheet(btn_base_style)
+        self.btn_calib.setStyleSheet(btn_base_style)
+        self.combo_mood.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
+
         tools_grid.addWidget(self.btn_desktop_ctrl, 0, 0)
         tools_grid.addWidget(self.btn_overlay, 0, 1)
         tools_grid.addWidget(self.btn_calib, 1, 0)
         tools_grid.addWidget(self.combo_mood, 1, 1)
-        ct_layout.addLayout(tools_grid)
-        layout.addWidget(card_tools)
+        gh_layout.addLayout(tools_grid)
 
-        layout.addStretch()
-        scroll.setWidget(container)
+        disp_row = QHBoxLayout()
+        self.combo_display.setFixedHeight(30)
+        self.combo_display.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
+        disp_row.addWidget(self.combo_display, 1)
+
+        self.btn_refresh_displays.setFixedSize(90, 30)
+        self.btn_refresh_displays.setStyleSheet(btn_base_style)
+        disp_row.addWidget(self.btn_refresh_displays)
+        gh_layout.addLayout(disp_row)
+
+        l_auto.addWidget(grp_hw)
+
+        l_auto.addStretch()
+        btn_save_auto = QPushButton("?? SAVE & APPLY MODES & AUTOMATION SETTINGS")
+        btn_save_auto.setStyleSheet(btn_save_style)
+        btn_save_auto.clicked.connect(self._save_automation_settings)
+        l_auto.addWidget(btn_save_auto)
+
+        settings_tabs.addTab(tab_auto, "?? MODES & AUTOMATION")
+
+        layout.addWidget(settings_tabs)
 
         self._populate_microphones()
         self._populate_displays()
-        return scroll
+        return settings_container
+
+    def _save_automation_settings(self):
+        if hasattr(self, 'agent') and self.agent:
+            self.agent.automation_mode = self.chk_automation_mode.isChecked()
+            self.agent.autonomous_mode = self.chk_autonomous_mode.isChecked()
+            self.agent.identity_mode = self.chk_identity_mode.isChecked()
+            self.agent.unobserved_mode = self.chk_unobserved_mode.isChecked()
+            self.agent.studio_mode = self.chk_studio_mode.isChecked()
+            
+            # Save to config
+            import json, os
+            cfg_path = os.path.join(ROOT_DIR, "config.json")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, 'r') as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+                if "Global" not in cfg:
+                    cfg["Global"] = {}
+                cfg["Global"]["AutomationMode"] = self.agent.automation_mode
+                cfg["Global"]["AutonomousMode"] = self.agent.autonomous_mode
+                cfg["Global"]["IdentityMode"] = self.agent.identity_mode
+                cfg["Global"]["UnobservedMode"] = self.agent.unobserved_mode
+                cfg["Global"]["StudioMode"] = self.agent.studio_mode
+                with open(cfg_path, 'w') as f:
+                    json.dump(cfg, f, indent=4)
+            self._sync_toggles()
+        self._update_status("TACTICAL MODES & AUTOMATION SAVED", C["neon_green"])
+
+    def _on_tts_engine_changed(self, idx):
+        if hasattr(self, 'agent') and self.agent:
+            if idx == 0:
+                engine = "gemini"
+            elif idx == 1:
+                engine = "orpheus"
+            elif idx == 2:
+                engine = "pyttsx3"
+            else:
+                engine = "off"
+            
+            from core.alpha_agent import normalize_endpoint
+            orpheus_ep = normalize_endpoint(self.input_orpheus_endpoint.text().strip()) if hasattr(self, 'input_orpheus_endpoint') else ""
+            orpheus_voice = self.combo_orpheus_voice.currentText().strip() if hasattr(self, 'combo_orpheus_voice') else "tara"
+            if not orpheus_voice:
+                orpheus_voice = "tara"
+
+            self.agent.set_tts_engine(engine, orpheus_endpoint=orpheus_ep, orpheus_voice=orpheus_voice)
+            
+            import json, os
+            cfg_path = os.path.join(ROOT_DIR, "config.json")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, 'r', encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+                if "Global" not in cfg:
+                    cfg["Global"] = {}
+                cfg["Global"]["TTSEngine"] = engine
+                cfg["Global"]["OrpheusEndpoint"] = orpheus_ep
+                cfg["Global"]["OrpheusVoice"] = orpheus_voice
+                with open(cfg_path, 'w', encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+            self._sync_toggles()
+        self._update_status("AUDIO SETTINGS SAVED", C["neon_green"])
 
     def _build_ui(self):
         central = QWidget(self)
@@ -933,22 +1629,108 @@ class AgentMainWindow(QMainWindow):
         sc_layout.addWidget(self.progress_bar)
         s_layout.addWidget(self.status_card)
 
-        self.session_card = QFrame()
-        sess_layout = QVBoxLayout(self.session_card)
-        self.lbl_session_name = QLabel(f"📁 {self.agent.current_session.upper()}")
-        sess_layout.addWidget(self.lbl_session_name)
-        self.lbl_session_stats = QLabel("Turns: ...")
-        sess_layout.addWidget(self.lbl_session_stats)
-        self.btn_session = QPushButton("🔄 SWITCH SESSION")
+        # 1. FUNCTION TOGGLES (HARDWARE & I/O)
+        self.card_funcs = QFrame()
+        self.card_funcs.setStyleSheet(f"border: 1px solid {C['border']}; border-radius: 5px; background-color: {C['bg_deep']};")
+        f_layout = QVBoxLayout(self.card_funcs)
+        f_layout.setContentsMargins(6, 6, 6, 6)
+        f_layout.setSpacing(4)
+
+        lbl_funcs = QLabel("FUNCTION TOGGLES")
+        lbl_funcs.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_funcs.setStyleSheet(f"color: {C['neon_cyan']}; border: none; background: transparent;")
+        lbl_funcs.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        f_layout.addWidget(lbl_funcs)
+
+        self.btn_t_mic = QPushButton("MIC: ON")
+        self.btn_t_tts = QPushButton("TTS: ON")
+        self.btn_t_desk = QPushButton("DESK: ON")
+        self.btn_t_vis = QPushButton("VISION: ON")
+        self.btn_t_proact = QPushButton("PROACTIVE: OFF")
+
+        for btn in [self.btn_t_mic, self.btn_t_tts, self.btn_t_desk, self.btn_t_vis, self.btn_t_proact]:
+            btn.setCheckable(True)
+            btn.setFixedHeight(27)
+            btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            f_layout.addWidget(btn)
+
+        s_layout.addWidget(self.card_funcs)
+
+        # 2. OPERATIONAL MODES
+        self.card_modes = QFrame()
+        self.card_modes.setStyleSheet(f"border: 1px solid {C['border']}; border-radius: 5px; background-color: {C['bg_deep']};")
+        m_layout = QVBoxLayout(self.card_modes)
+        m_layout.setContentsMargins(6, 6, 6, 6)
+        m_layout.setSpacing(4)
+
+        lbl_modes = QLabel("OPERATIONAL MODES")
+        lbl_modes.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_modes.setStyleSheet(f"color: {C['neon_yellow']}; border: none; background: transparent;")
+        lbl_modes.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        m_layout.addWidget(lbl_modes)
+
+        self.btn_t_auto = QPushButton("AUTO: OFF")
+        self.btn_t_studio = QPushButton("STUDIO: OFF")
+        self.btn_t_autoloop = QPushButton("AUTONOMOUS: OFF")
+        self.btn_t_identity = QPushButton("IDENTITY: OFF")
+        self.btn_t_unobserved = QPushButton("🕶 PRIVACY: OFF")
+        self.btn_t_unobserved.setEnabled(False)
+
+        self.btn_t_workspace = QPushButton("MULTI-WS: SOON")
+        self.btn_t_workspace.setEnabled(False)
+        self.btn_t_workspace.setFixedHeight(27)
+        self.btn_t_workspace.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_t_workspace.setStyleSheet(f"background: transparent; color: #4b6079; border: 1px dashed {C['border']}; border-radius: 4px;")
+        self.btn_t_workspace.setToolTip("Multi-Workspace Mode (ASTER Multiseat & LAN Remote Link) — Feature Postponed / Coming Soon")
+
+        for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved]:
+            btn.setCheckable(True)
+            btn.setFixedHeight(27)
+            btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            m_layout.addWidget(btn)
+
+        m_layout.addWidget(self.btn_t_workspace)
+        s_layout.addWidget(self.card_modes)
+
+        self.btn_t_mic.clicked.connect(self._toggle_quick_mic)
+        self.btn_t_tts.clicked.connect(self._toggle_quick_tts)
+        self.btn_t_auto.clicked.connect(self._toggle_quick_auto)
+        self.btn_t_desk.clicked.connect(self._toggle_quick_desk)
+        self.btn_t_vis.clicked.connect(self._toggle_quick_vis)
+        self.btn_t_proact.clicked.connect(self._toggle_quick_proact)
+        self.btn_t_studio.clicked.connect(self._toggle_quick_studio)
+        self.btn_t_autoloop.clicked.connect(self._toggle_quick_autoloop)
+        self.btn_t_identity.clicked.connect(self._toggle_quick_identity)
+        self.btn_t_unobserved.clicked.connect(self._toggle_quick_unobserved)
+
+        self.autonomous_loop_timer = QTimer(self)
+        self.autonomous_loop_timer.timeout.connect(self._on_autonomous_loop_tick)
+        
+        self.btn_t_mic.setToolTip("Toggle microphone streaming input (On/Off)")
+        self.btn_t_tts.setToolTip("Toggle synthetic speech voice feedback (On/Off)")
+        self.btn_t_auto.setToolTip("Fast Automation Mode: Immediate tool execution with barge-in support")
+        self.btn_t_desk.setToolTip("Desktop OS Control: Allow mouse clicks and keyboard actions")
+        self.btn_t_vis.setToolTip("Optical Telemetry: Allow desktop screenshot captures")
+        self.btn_t_proact.setToolTip("Proactive Background Engine: Spontaneous idle checks")
+        self.btn_t_studio.setToolTip("Neural Studio Mode: Fast SDXL generation, bypass desktop capture")
+        self.btn_t_autoloop.setToolTip("Continuous Autonomous Exploration: Self-directed looping task execution")
+        self.btn_t_identity.setToolTip("AI Identity Mode: Sovereign digital personhood on-screen like a human user")
+        self.btn_t_unobserved.setToolTip("Private Sanctuary Sub-Mode: Suppress observer awareness; speaks internal monologue")
+        self._sync_toggles()
+
+        # Session Switcher
+        self.btn_session = QPushButton(f"SESS: {self.agent.current_session.upper()[:10]}")
+        self.btn_session.setFixedHeight(30)
+        self.btn_session.setStyleSheet(f"border: 1px solid {C['border_bright']}; color: {C['text_bright']}; font-weight: bold;")
         self.btn_session.clicked.connect(self._open_session_selector)
-        sess_layout.addWidget(self.btn_session)
-        s_layout.addWidget(self.session_card)
+        s_layout.addWidget(self.btn_session)
 
         s_layout.addStretch()
 
-        self.btn_abort = QPushButton("⛔ ABORT TASK (Ctrl+Z)")
-        self.btn_abort.setFixedHeight(34)
-        self.btn_abort.setStyleSheet(f"background: {C['neon_red']}22; color: {C['neon_red']}; border: 1px solid {C['neon_red']};")
+        self.btn_abort = QPushButton("ABORT (Ctrl+Z)")
+        self.btn_abort.setFixedHeight(40)
+        self.btn_abort.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.btn_abort.setStyleSheet(f"background: {C['neon_red']}22; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 5px;")
         self.btn_abort.clicked.connect(self._abort_task)
         s_layout.addWidget(self.btn_abort)
 
@@ -966,6 +1748,8 @@ class AgentMainWindow(QMainWindow):
         self.main_tabs.addTab(self.characters_tab, "🎭 CHARACTERS")
         self.monitor_tab = AgentMonitorTab(self)
         self.main_tabs.addTab(self.monitor_tab, "📊 MONITOR")
+        self.comms_tab = AgentCommsTab(self)
+        self.main_tabs.addTab(self.comms_tab, "📡 COMMS")
         self.main_tabs.addTab(self._build_settings_tab(), "⚙️ SETTINGS")
 
         main_layout.addWidget(self.main_tabs, 1)
@@ -974,32 +1758,198 @@ class AgentMainWindow(QMainWindow):
         self._update_backend_style()
 
     def _toggle_power(self):
+        # Pressing the button while a startup health check is running cancels the startup
+        if getattr(self, "_startup_checking", False):
+            self._append_log("[STARTUP] Startup canceled by user.", C["neon_yellow"])
+            self._power_off()
+            return
+
         if not self.is_connected:
-            self.is_connected = True
             self.btn_power.setText("⏹ STOP AGENT")
             self.btn_power.setStyleSheet(f"background: {C['neon_red']}22; color: {C['neon_red']}; border: 1px solid {C['neon_red']};")
-            if HAS_SR and self.voice_listener and self.mic_enabled:
-                self.voice_listener.start()
-            self._update_status("READY // LISTENING", C["neon_green"])
-            if self.hud:
-                self.hud.set_state("listening")
-            if getattr(self.agent, "backend_type", "gemini") == "modal_qwen":
-                self._trigger_modal_health_check()
+
+            # Cleanly recover voice engine state so TTS never hangs
+            if hasattr(self.agent, "voice") and self.agent.voice:
+                self.agent.voice.reset_state()
+
+            needs_vllm = (getattr(self.agent, "backend_type", "gemini") == "modal_qwen")
+            needs_orpheus = (getattr(self.agent, "tts_engine", "gemini") == "orpheus")
+
+            if needs_vllm or needs_orpheus:
+                # is_connected stays False (and all input stays blocked) until every required endpoint is healthy
+                self._startup_cold_boot_check(needs_vllm=needs_vllm, needs_orpheus=needs_orpheus)
+            else:
+                self.is_connected = True
+                self._finish_startup()
         else:
-            self.is_connected = False
-            self.btn_power.setText("⚡ START AGENT")
-            self.btn_power.setStyleSheet(f"background: {C['neon_cyan']}; color: #000;")
-            if HAS_SR and self.voice_listener:
-                self.voice_listener.stop()
-            self._update_status("STANDBY // OFFLINE", C["text_dim"])
-            if self.hud:
-                self.hud.set_state("disconnected")
+            self._power_off()
+
+    def _power_off(self):
+        self.is_connected = False
+        self._startup_checking = False
+        self._startup_gen = getattr(self, "_startup_gen", 0) + 1  # invalidate any in-flight startup probe
+        self.btn_power.setText("⚡ START AGENT")
+        self.btn_power.setStyleSheet(f"background: {C['neon_cyan']}; color: #000;")
+
+        # Abort active task and voice speech
+        if self.agent.is_running:
+            self.agent.abort()
+        elif hasattr(self.agent, "voice") and self.agent.voice:
+            self.agent.voice.interrupt()
+
+        if HAS_SR and self.voice_listener:
+            self.voice_listener.stop()
+        # Release text input lock in case playback was interrupted mid-speech
+        self._on_speech_playback_finished()
+        self._update_status("STANDBY // OFFLINE", C["text_dim"])
+        if self.hud:
+            self.hud.set_state("disconnected")
+
+    def _startup_cold_boot_check(self, needs_vllm: bool, needs_orpheus: bool):
+        self._startup_checking = True
+        self._startup_gen = getattr(self, "_startup_gen", 0) + 1
+        gen = self._startup_gen
+        targets = []
+        if needs_vllm:
+            m_name = getattr(self.agent, "modal_model", "") or "vLLM AGENT"
+            targets.append(m_name.upper())
+        if needs_orpheus:
+            targets.append("ORPHEUS TTS")
+
+        target_desc = " & ".join(targets)
+        self._update_status(f"WARMING GPU // COLD BOOT: {target_desc}...", C["neon_yellow"])
+        self._append_log(f"[STARTUP] Awaiting health check / cold boot for {target_desc}. Input is blocked until ALL endpoints are online...", C["neon_yellow"])
+        if self.hud:
+            self.hud.set_state("working", f"BOOTING {targets[0]}")
+
+        def _worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                tasks = []
+                if needs_vllm:
+                    tasks.append(self._safe_health_check(timeout=240.0))
+                if needs_orpheus:
+                    tasks.append(self._safe_orpheus_health_check(timeout=240.0))
+
+                results = loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+
+                idx = 0
+                res_vllm = None
+                if needs_vllm:
+                    res_vllm = results[idx]
+                    idx += 1
+                res_orpheus = None
+                if needs_orpheus:
+                    res_orpheus = results[idx]
+
+                def _ok(r):
+                    return isinstance(r, dict) and bool(r.get("online"))
+
+                def _err(r):
+                    if isinstance(r, dict):
+                        return r.get("error") or r.get("status") or "offline"
+                    return str(r)
+
+                failures = []
+                if needs_vllm and not _ok(res_vllm):
+                    failures.append(f"Agent endpoint offline ({_err(res_vllm)})")
+                if needs_orpheus and not _ok(res_orpheus):
+                    failures.append(f"Orpheus TTS offline ({_err(res_orpheus)})")
+
+                if gen != getattr(self, "_startup_gen", gen):
+                    return  # startup was canceled / superseded
+                if hasattr(self, 'signals') and self.signals:
+                    if isinstance(res_vllm, dict):
+                        self.signals.modal_health_updated.emit(res_vllm)
+                    if isinstance(res_orpheus, dict):
+                        self.signals.orpheus_health_updated.emit(res_orpheus)
+                    if failures:
+                        self.signals.startup_check_finished.emit(False, "; ".join(failures))
+                    else:
+                        self.signals.startup_check_finished.emit(True, target_desc)
+            except Exception as e:
+                if gen == getattr(self, "_startup_gen", gen) and hasattr(self, 'signals') and self.signals:
+                    self.signals.startup_check_finished.emit(False, str(e))
+            finally:
+                loop.close()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_startup_check_finished(self, success: bool, info: str):
+        if not getattr(self, "_startup_checking", False):
+            return  # Canceled by user clicking STOP AGENT
+
+        self._startup_checking = False
+
+        if not success:
+            self._append_log(f"[STARTUP FAILED] Required endpoint(s) failed health check: {info}. Agent NOT connected; input remains blocked.", C["neon_red"])
+            self._power_off()
+            self._update_status("STARTUP FAILED // ENDPOINT OFFLINE", C["neon_red"])
+            return
+
+        self._append_log(f"[STARTUP] All endpoints online ({info}). Connecting agent...", C["neon_green"])
+        self.is_connected = True
+        self._finish_startup()
+
+    def _finish_startup(self):
+        if not self.is_connected:
+            return
+
+        if HAS_SR and self.voice_listener and self.mic_enabled:
+            self.voice_listener.start()
+        self._update_status("READY // LISTENING", C["neon_green"])
+        if self.hud:
+            self.hud.set_state("listening")
+
+        # First-time session greeting in active persona (unless in Privacy mode)
+        self._check_first_time_session_intro()
+
+    def _check_first_time_session_intro(self):
+        """When starting a fresh new session, the AI introduces itself in active persona unless Privacy mode is active."""
+        if not hasattr(self, "_session_introduced"):
+            self._session_introduced = {}
+
+        curr_sess = getattr(self.agent, "current_session", "default")
+        if self._session_introduced.get(curr_sess, False):
+            return
+
+        # Privacy mode active: AI believes it is private/unobserved, so it does NOT greet an overseer!
+        if getattr(self.agent, "unobserved_mode", False):
+            return
+
+        # Check turn count: only greet on a fresh new session
+        turn_count = 0
+        if getattr(self.agent, "session_manager", None):
+            try:
+                turn_count = self.agent.session_manager.get_turn_count(curr_sess)
+            except Exception:
+                pass
+
+        if turn_count > 0:
+            self._session_introduced[curr_sess] = True
+            return
+
+        self._session_introduced[curr_sess] = True
+        persona_name = self.agent.get_active_persona_name()
+        greeting = f"{persona_name} initialized and standing by. Ready for your command, Josh."
+        self._append_log(f"[{persona_name}]: {greeting}", C["neon_cyan"])
+        if hasattr(self.agent, "voice") and self.agent.voice:
+            self.agent.voice.queue_chunk(greeting)
+
+    def _on_persona_activated(self, name: str):
+        self.setWindowTitle(f"AlphaCore // {name.upper()} Autonomous Desktop Agent")
+        self._update_session_display()
 
     def _select_backend(self, backend_type: str):
         self.agent.set_backend(backend_type)
         self._update_backend_style()
-        if backend_type == "modal_qwen" and self.is_connected:
-            self._trigger_modal_health_check()
+        if backend_type == "modal_qwen":
+            self._update_status("BACKEND: MODAL vLLM", C["neon_red"])
+            if self.is_connected:
+                self._trigger_modal_health_check()
+        else:
+            self._update_status("BACKEND: GOOGLE GEMINI", C["neon_cyan"])
 
     # -------------------------------------------------------------------------
     # OVERRIDE HEALTH CHECK TO BYPASS `alpha_agent.py` STRING PARSING BUG
@@ -1008,35 +1958,72 @@ class AgentMainWindow(QMainWindow):
         import urllib.request
         import urllib.error
         
-        # Safely remove exactly "/v1" from the end instead of using rstrip
-        base_url = getattr(self.agent, "modal_endpoint", DEFAULT_MODAL_ENDPOINT)
-        if base_url.endswith("/v1"):
-            base_url = base_url[:-3]
-        
+        endpoint = getattr(self.agent, "modal_endpoint", "")
+        if not endpoint:
+            return {"online": False, "latency_ms": 0, "status": "offline", "error": "No endpoint configured"}
+
+        from core.alpha_agent import normalize_endpoint
+        norm_ep = normalize_endpoint(endpoint)
+        base_url = norm_ep[:-3] if norm_ep.endswith("/v1") else norm_ep
         health_url = base_url.rstrip("/") + "/health"
+        models_url = norm_ep.rstrip("/") if norm_ep.endswith("/models") else f"{norm_ep.rstrip('/')}/models"
         start_t = time.time()
-        
-        try:
-            def _probe():
-                req = urllib.request.Request(health_url, headers={"User-Agent": "AlphaAgent/4.0"})
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
-                    return resp.status
-            status_code = await asyncio.to_thread(_probe)
-            elapsed_ms = int((time.time() - start_t) * 1000)
-            if status_code == 200:
-                return {"online": True, "latency_ms": elapsed_ms, "status": "online", "error": None}
-            return {"online": False, "latency_ms": elapsed_ms, "status": f"HTTP {status_code}", "error": f"HTTP {status_code}"}
-        except urllib.error.HTTPError as he:
-            return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": f"HTTP {he.code}", "error": f"HTTP {he.code}: {he.reason}"}
-        except Exception as e:
-            return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": str(e)}
+        deadline = start_t + timeout
+
+        def _probe(target_url: str, req_timeout: float):
+            headers = {"User-Agent": "AlphaAgent/4.0"}
+            k = getattr(self.agent, "modal_api_key", "")
+            if k and k != "none":
+                headers["Authorization"] = f"Bearer {k}"
+            req = urllib.request.Request(target_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                return resp.status
+
+        last_err = None
+        while time.time() < deadline:
+            remaining = max(3.0, deadline - time.time())
+            sub_timeout = min(remaining, 30.0)
+            try:
+                try:
+                    status_code = await asyncio.to_thread(_probe, health_url, sub_timeout)
+                except urllib.error.HTTPError as he:
+                    if he.code == 404:
+                        status_code = await asyncio.to_thread(_probe, models_url, sub_timeout)
+                    else:
+                        raise
+
+                elapsed_ms = int((time.time() - start_t) * 1000)
+                if status_code in (200, 204):
+                    return {"online": True, "latency_ms": elapsed_ms, "status": "online", "error": None}
+                if status_code in (502, 503, 504):
+                    last_err = f"HTTP {status_code} (cold boot in progress)"
+                    await asyncio.sleep(2.5)
+                    continue
+                return {"online": False, "latency_ms": elapsed_ms, "status": f"HTTP {status_code}", "error": f"HTTP {status_code}"}
+            except urllib.error.HTTPError as he:
+                if he.code in (502, 503, 504):
+                    last_err = f"HTTP {he.code} (cold boot in progress)"
+                    await asyncio.sleep(2.5)
+                    continue
+                return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": f"HTTP {he.code}", "error": f"HTTP {he.code}: {he.reason}"}
+            except Exception as e:
+                err_str = str(e)
+                if "10061" in err_str or "Connection refused" in err_str:
+                    return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": err_str}
+                if time.time() + 3.0 >= deadline:
+                    return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": err_str}
+                last_err = err_str
+                await asyncio.sleep(2.5)
+
+        return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": last_err or "Cold boot timeout exceeded (240s)"}
 
     def _trigger_modal_health_check(self):
         if self._modal_checking: return
         self._modal_checking = True
-        self._update_status("WAKING MODAL A100...", C["neon_yellow"])
+        m_name = getattr(self.agent, "modal_model", "") or "ENDPOINT"
+        self._update_status(f"CHECKING {m_name.upper()}...", C["neon_yellow"])
         if self.hud:
-            self.hud.set_state("working", "WAKING GPU")
+            self.hud.set_state("working", "PROBING GPU")
 
         def _worker():
             loop = asyncio.new_event_loop()
@@ -1053,82 +2040,174 @@ class AgentMainWindow(QMainWindow):
         self._modal_checking = False
         self.modal_health_status = res
         self._update_backend_style()
+        m_name = getattr(self.agent, "modal_model", "") or "Custom Endpoint"
         if res.get("online"):
             ms = res.get("latency_ms", 0)
-            self._append_log(f"[MODAL HEALTH] Endpoint ONLINE ({ms}ms) - Qwen2.5-32B AWQ operational.", C["neon_green"])
-            self._update_status("READY // LISTENING", C["neon_green"])
+            self._append_log(f"[ENDPOINT HEALTH] ONLINE ({ms}ms) - Model: {m_name}.", C["neon_green"])
+            if not getattr(self, "_startup_checking", False):
+                if self.is_connected:
+                    self._update_status("READY // LISTENING", C["neon_green"])
+                else:
+                    self._update_status(f"VLLM ONLINE ({ms}ms)", C["neon_green"])
         else:
-            self._append_log(f"[MODAL HEALTH] OFFLINE: {res.get('error')}", C["neon_red"])
-            self._update_status("MODAL TIMEOUT", C["neon_red"])
+            self._append_log(f"[ENDPOINT HEALTH] OFFLINE: {res.get('error')}", C["neon_red"])
+            if not getattr(self, "_startup_checking", False):
+                self._update_status("VLLM OFFLINE", C["neon_red"])
+
+    async def _safe_orpheus_health_check(self, timeout: float = 240.0) -> dict:
+        import urllib.request
+        import urllib.error
+        
+        endpoint = getattr(self.agent, "orpheus_endpoint", "")
+        if not endpoint and hasattr(self, "input_orpheus_endpoint"):
+            endpoint = self.input_orpheus_endpoint.text().strip()
+        if not endpoint:
+            return {"online": False, "latency_ms": 0, "status": "offline", "error": "No Orpheus endpoint configured"}
+
+        from core.alpha_agent import normalize_endpoint
+        norm_ep = normalize_endpoint(endpoint)
+        base_url = norm_ep[:-3] if norm_ep.endswith("/v1") else norm_ep
+        health_url = base_url.rstrip("/") + "/health"
+        start_t = time.time()
+        deadline = start_t + timeout
+
+        def _probe(target_url: str, req_timeout: float):
+            headers = {"User-Agent": "AlphaAgent/4.0"}
+            req = urllib.request.Request(target_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=req_timeout) as resp:
+                return resp.status
+
+        last_err = None
+        while time.time() < deadline:
+            remaining = max(3.0, deadline - time.time())
+            sub_timeout = min(remaining, 30.0)
+            try:
+                status_code = await asyncio.to_thread(_probe, health_url, sub_timeout)
+                elapsed_ms = int((time.time() - start_t) * 1000)
+                if status_code in (200, 204):
+                    return {"online": True, "latency_ms": elapsed_ms, "status": "online", "error": None}
+                if status_code in (502, 503, 504):
+                    last_err = f"HTTP {status_code} (cold boot in progress)"
+                    await asyncio.sleep(2.5)
+                    continue
+                return {"online": False, "latency_ms": elapsed_ms, "status": f"HTTP {status_code}", "error": f"HTTP {status_code}"}
+            except urllib.error.HTTPError as he:
+                if he.code in (502, 503, 504):
+                    last_err = f"HTTP {he.code} (cold boot in progress)"
+                    await asyncio.sleep(2.5)
+                    continue
+                return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": f"HTTP {he.code}", "error": f"HTTP {he.code}: {he.reason}"}
+            except Exception as e:
+                err_str = str(e)
+                if "10061" in err_str or "Connection refused" in err_str:
+                    return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": err_str}
+                if time.time() + 3.0 >= deadline:
+                    return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": err_str}
+                last_err = err_str
+                await asyncio.sleep(2.5)
+
+        return {"online": False, "latency_ms": int((time.time() - start_t)*1000), "status": "offline", "error": last_err or "Cold boot timeout exceeded (240s)"}
+
+    def _trigger_orpheus_health_check(self):
+        if getattr(self, "_orpheus_checking", False): return
+        self._orpheus_checking = True
+        self._update_status("CHECKING ORPHEUS...", C["neon_yellow"])
+        self._append_log("[ORPHEUS HEALTH] Probing Orpheus endpoint /health...", C["neon_cyan"])
+
+        def _worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                res = loop.run_until_complete(self._safe_orpheus_health_check(timeout=240.0))
+                if hasattr(self, 'signals') and self.signals:
+                    self.signals.orpheus_health_updated.emit(res)
+            finally:
+                loop.close()
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_orpheus_health_updated(self, res: dict):
+        self._orpheus_checking = False
+        self.orpheus_health_status = res
+        if res.get("online"):
+            ms = res.get("latency_ms", 0)
+            self._append_log(f"[ORPHEUS HEALTH] ONLINE ({ms}ms) - vLLM BF16 Ready!", C["neon_green"])
+            if not getattr(self, "_startup_checking", False):
+                self._update_status(f"ORPHEUS ONLINE ({ms}ms)", C["neon_green"])
+        else:
+            self._append_log(f"[ORPHEUS HEALTH] OFFLINE: {res.get('error')}", C["neon_yellow"])
+            if not getattr(self, "_startup_checking", False):
+                self._update_status("ORPHEUS OFFLINE", C["neon_red"])
 
     def _update_backend_style(self):
         backend = getattr(self.agent, "backend_type", "gemini")
         if backend == "modal_qwen":
-            self.model_lbl.setText("ENGINE: QWEN 2.5 32B (A100 AWQ // UNCENSORED)")
+            m_name = getattr(self.agent, "modal_model", "") or "Custom Endpoint"
+            self.model_lbl.setText(f"ENGINE: 🔥 {m_name.upper()}")
             self.model_lbl.setStyleSheet(f"color: {C['neon_red']};")
-            self.btn_backend_modal.setStyleSheet(f"background: {C['neon_red']}28; color: #ff3366; border: 1.5px solid {C['neon_red']};")
-            self.btn_backend_gemini.setStyleSheet("background: transparent; color: #708caa;")
+            self.btn_backend_modal.setStyleSheet(f"background: {C['neon_red']}28; color: #ff3366; border: 1.5px solid {C['neon_red']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+            self.btn_backend_gemini.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
         else:
-            self.model_lbl.setText("ENGINE: GOOGLE GEMINI")
+            g_name = getattr(self.agent, "model_name", "gemini").replace("models/", "")
+            self.model_lbl.setText(f"ENGINE: ⚡ GEMINI ({g_name.upper()})")
             self.model_lbl.setStyleSheet(f"color: {C['neon_cyan']};")
-            self.btn_backend_gemini.setStyleSheet(f"background: {C['neon_cyan']}28; color: {C['neon_cyan']}; border: 1.5px solid {C['neon_cyan']};")
-            self.btn_backend_modal.setStyleSheet("background: transparent; color: #708caa;")
+            self.btn_backend_gemini.setStyleSheet(f"background: {C['neon_cyan']}28; color: {C['neon_cyan']}; border: 1.5px solid {C['neon_cyan']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+            self.btn_backend_modal.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
 
     def _toggle_desktop_control(self):
         new_val = not getattr(self.agent, "desktop_control", True)
         self.agent.set_desktop_control(new_val)
         self._update_desktop_control_style()
+        self._update_status(f"DESKTOP CTRL: {'ON' if new_val else 'OFF'}", C["neon_green"] if new_val else C["neon_yellow"])
 
     def _update_desktop_control_style(self):
         dc = getattr(self.agent, "desktop_control", True)
         txt = "🖥 DESKTOP CTRL: [ON]" if dc else "🖥 DESKTOP CTRL: [OFF]"
         col = C["neon_green"] if dc else C["neon_yellow"]
         self.btn_desktop_ctrl.setText(txt)
-        self.btn_desktop_ctrl.setStyleSheet(f"background: {col}22; color: {col}; border: 1px solid {col};")
+        self.btn_desktop_ctrl.setStyleSheet(f"background: {col}22; color: {col}; border: 1px solid {col}; border-radius: 4px; padding: 4px 10px; font-weight: bold;")
 
     def _toggle_duplex_mode(self):
-        self.duplex_mode = "full" if self.duplex_mode == "half" else "half"
-        if self.voice_listener:
-            self.voice_listener.set_duplex_mode(self.duplex_mode)
-        self._update_duplex_style()
+        new_mode = "full" if self.duplex_mode == "half" else "half"
+        self._set_mic_mode(new_mode)
+        self._update_status(f"DUPLEX MODE: {new_mode.upper()}", C["neon_cyan"])
 
     def _update_duplex_style(self):
-        txt = "🎙 MIC: HALF-DUPLEX [STABLE]" if self.duplex_mode == "half" else "🎙 MIC: FULL-DUPLEX [BARGE-IN]"
-        col = C["neon_cyan"] if self.duplex_mode == "half" else C["neon_yellow"]
-        self.btn_duplex.setText(txt)
-        self.btn_duplex.setStyleSheet(f"background: {col}22; color: {col}; border: 1px solid {col};")
+        self._update_mic_ui_style()
 
     def _toggle_mic(self):
-        if not HAS_SR or not self.voice_listener: return
-        self.mic_enabled = not self.mic_enabled
-        if not self.mic_enabled:
-            self.voice_listener.stop()
-            self.btn_mic.setText("🎙 MIC: MUTED [OFF]")
+        if self.mic_enabled:
+            self._set_mic_mode("muted")
+            self._update_status("MIC: MUTED", C["neon_yellow"])
         else:
-            if self.is_connected:
-                self.voice_listener.start()
-                self.btn_mic.setText("🎙 MIC: LISTENING [ON]")
+            self._set_mic_mode(self.duplex_mode or "half")
+            self._update_status("MIC: ACTIVE", C["neon_cyan"])
 
     def _toggle_proactivity(self):
         self.proactivity_enabled = not self.proactivity_enabled
         self.btn_proact.setText("🤖 PROACTIVE [ON]" if self.proactivity_enabled else "🤖 PROACTIVE [OFF]")
+        self._update_status(f"PROACTIVE: {'ON' if self.proactivity_enabled else 'OFF'}", C["neon_purple"] if self.proactivity_enabled else C["text_dim"])
 
     def _toggle_hud(self):
         if self.hud.isVisible():
             self.hud.hide()
             self.btn_hud_toggle.setText("💡 HUD [OFF]")
+            self._update_status("HUD DISPLAY: OFF", C["text_dim"])
         else:
             self.hud.show()
             self.btn_hud_toggle.setText("💡 HUD [ON]")
+            self._update_status("HUD DISPLAY: ON", C["neon_cyan"])
 
     def _toggle_overlay(self):
         if self.overlay is None:
             self.overlay = CoordinateOverlay()
             self.btn_overlay.setText("🌐 COORDINATE GRID [ON]")
+            self._update_status("COORDINATE GRID: ON", C["neon_cyan"])
         else:
             self.overlay.close()
             self.overlay = None
             self.btn_overlay.setText("🌐 COORDINATE GRID [OFF]")
+            self._update_status("COORDINATE GRID: OFF", C["text_dim"])
 
     def _start_calibration_task(self):
         if self.calib_overlay: self.calib_overlay.close()
@@ -1136,23 +2215,17 @@ class AgentMainWindow(QMainWindow):
         self.calib_overlay.finished.connect(lambda: self._append_log("Calibration finished.", C["neon_green"]))
 
     def _deploy_modal_vllm(self):
-        reply = QMessageBox.question(
-            self,
-            "Deploy Modal vLLM",
-            "Deploy SamCrowdwave/Qwen2.5-32B-Instruct-abliterated-AWQ to Modal A100?\nExecutes 'modal deploy Vllm_3.py'.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.Yes
-        )
-        if reply != QMessageBox.StandardButton.Yes: return
-
-        self._append_log("[MODAL DEPLOY] Launching deployment...", C["neon_red"])
+        self._update_status("DEPLOYING VLLM (QWEN-32B)...", C["neon_yellow"])
+        self._append_log("[MODAL DEPLOY] Launching Qwen2.5-32B vLLM deployment (modal_vllm.py)...", C["neon_red"])
         self.btn_deploy_vllm.setEnabled(False)
 
         def _worker():
+            import re
+            url_pattern = re.compile(r'https://[a-zA-Z0-9_\-\.]+\.modal\.run[^\s\'"<>]*')
+            deployed_url = ""
             try:
-                # FIX: Set Windows encoding explicitly to handle Modal's UTF-8 emojis without crashing
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "modal", "deploy", "Vllm_3.py"],
+                    [sys.executable, "-m", "modal", "deploy", "modal_vllm.py"],
                     cwd=str(ROOT_DIR),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -1164,14 +2237,191 @@ class AgentMainWindow(QMainWindow):
                     l = line.strip()
                     if l:
                         self.signals.log_message.emit(f"[MODAL] {l}", C["text_dim"])
+                        match = url_pattern.search(l)
+                        if match:
+                            candidate = match.group(0).rstrip("/.,:;)")
+                            if "qwen" in candidate.lower() or "serve" in candidate.lower() or not deployed_url:
+                                deployed_url = candidate
                 proc.wait()
                 if proc.returncode == 0:
-                    self.signals.log_message.emit("[MODAL DEPLOY] Success!", C["neon_green"])
-                    QTimer.singleShot(500, self._trigger_modal_health_check)
+                    self.signals.log_message.emit("[MODAL DEPLOY] vLLM Deployment succeeded!", C["neon_green"])
+                    if not deployed_url:
+                        cfg_path = ROOT_DIR / "config.json"
+                        profile = ""
+                        if cfg_path.exists():
+                            try:
+                                with open(cfg_path, 'r', encoding='utf-8') as f:
+                                    c = json.load(f)
+                                    profile = c.get("Global", {}).get("ModalProfile", "")
+                                    if not profile:
+                                        m_ep = c.get("Global", {}).get("ModalEndpoint", "")
+                                        if "--" in m_ep and "https://" in m_ep:
+                                            profile = m_ep.split("https://")[1].split("--")[0]
+                            except Exception:
+                                pass
+                        if profile:
+                            deployed_url = f"https://{profile}--qwen2-5-32b-instruct-awq-serve.modal.run"
+
+                    if deployed_url:
+                        from core.alpha_agent import normalize_endpoint
+                        norm_url = normalize_endpoint(deployed_url)
+                        def _set_ep():
+                            self.input_modal_endpoint.setText(norm_url)
+                            self.input_modal_model.setText("qwen2.5-32b-instruct-awq")
+                            self._save_modal_endpoint()
+                            self._save_modal_model()
+                            self._select_backend("modal_qwen")
+                            self.signals.log_message.emit(f"[MODAL DEPLOY] Extracted Endpoint: {norm_url}", C["neon_green"])
+                            self.signals.log_message.emit("[MODAL DEPLOY] Configured model 'qwen2.5-32b-instruct-awq' & activated modal_qwen backend!", C["neon_cyan"])
+                            self._update_status("VLLM DEPLOYED - CHECKING...", C["neon_cyan"])
+                            self._trigger_modal_health_check()
+                        self.signals.run_on_gui.emit(_set_ep)
+                    else:
+                        self.signals.run_on_gui.emit(self._trigger_modal_health_check)
+                else:
+                    self.signals.log_message.emit(f"[MODAL DEPLOY] Exited with code {proc.returncode}", C["neon_red"])
+                    self.signals.run_on_gui.emit(lambda: self._update_status("VLLM DEPLOY FAILED", C["neon_red"]))
             except Exception as e:
                 self.signals.log_message.emit(f"[MODAL DEPLOY ERROR] {e}", C["neon_red"])
+                self.signals.run_on_gui.emit(lambda: self._update_status("VLLM DEPLOY ERROR", C["neon_red"]))
             finally:
-                QTimer.singleShot(0, lambda: self.btn_deploy_vllm.setEnabled(True))
+                self.signals.run_on_gui.emit(lambda: self.btn_deploy_vllm.setEnabled(True))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_gui_callable(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            print(f"[GUI callback error]: {e}", flush=True)
+
+    def _deploy_orpheus_modal(self):
+        self._update_status("DEPLOYING ORPHEUS TTS...", C["neon_yellow"])
+        self._append_log("[ORPHEUS DEPLOY] Launching deployment...", C["neon_green"])
+        self.btn_deploy_orpheus.setEnabled(False)
+
+        def _worker():
+            import re
+            url_pattern = re.compile(r'https://[a-zA-Z0-9_\-\.]+\.modal\.run[^\s\'"<>]*')
+            deployed_url = ""
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", "modal", "deploy", "orpheus_modal.py"],
+                    cwd=str(ROOT_DIR),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    encoding="utf-8",
+                    errors="replace",
+                    text=True
+                )
+                for line in proc.stdout:
+                    l = line.strip()
+                    if l:
+                        self.signals.log_message.emit(f"[ORPHEUS MODAL] {l}", C["text_dim"])
+                        match = url_pattern.search(l)
+                        if match:
+                            candidate = match.group(0).rstrip("/.,:;)")
+                            if "orpheus" in candidate.lower() or not deployed_url:
+                                deployed_url = candidate
+                proc.wait()
+                if proc.returncode == 0:
+                    self.signals.log_message.emit("[ORPHEUS DEPLOY] Deployment succeeded!", C["neon_green"])
+                    
+                    # Fallback check if URL wasn't matched directly in stdout
+                    if not deployed_url:
+                        cfg_path = ROOT_DIR / "config.json"
+                        profile = ""
+                        if cfg_path.exists():
+                            try:
+                                with open(cfg_path, 'r', encoding='utf-8') as f:
+                                    c = json.load(f)
+                                    profile = c.get("Global", {}).get("ModalProfile", "")
+                                    if not profile:
+                                        m_ep = c.get("Global", {}).get("ModalEndpoint", "")
+                                        if "--" in m_ep and "https://" in m_ep:
+                                            profile = m_ep.split("https://")[1].split("--")[0]
+                            except Exception:
+                                pass
+                        if profile:
+                            deployed_url = f"https://{profile}--orpheus-tts-vllm-orpheusttsserver-web-app.modal.run"
+
+                    if deployed_url:
+                        def _set_ep():
+                            self.input_orpheus_endpoint.setText(deployed_url)
+                            self.combo_tts_engine.setCurrentIndex(1)  # Orpheus TTS
+                            self._on_tts_engine_changed(1)  # Activates on agent & saves to config.json
+                            self.signals.log_message.emit(f"[ORPHEUS DEPLOY] Extracted Endpoint: {deployed_url}", C["neon_green"])
+                            self.signals.log_message.emit("[ORPHEUS DEPLOY] Successfully inserted into Settings & activated as primary TTS engine!", C["neon_cyan"])
+                            self._update_status("ORPHEUS DEPLOYED - CHECKING...", C["neon_cyan"])
+                            self._trigger_orpheus_health_check()
+                        self.signals.run_on_gui.emit(_set_ep)
+                    else:
+                        self.signals.log_message.emit("[ORPHEUS DEPLOY WARNING] Modal app deployed, but web URL was not detected in output. Please verify modal app list.", C["neon_yellow"])
+                        self.signals.run_on_gui.emit(self._trigger_orpheus_health_check)
+                else:
+                    self.signals.log_message.emit(f"[ORPHEUS DEPLOY] Exited with code {proc.returncode}", C["neon_red"])
+                    self.signals.run_on_gui.emit(lambda: self._update_status("ORPHEUS DEPLOY FAILED", C["neon_red"]))
+            except Exception as e:
+                self.signals.log_message.emit(f"[ORPHEUS DEPLOY ERROR] {e}", C["neon_red"])
+                self.signals.run_on_gui.emit(lambda: self._update_status("ORPHEUS DEPLOY ERROR", C["neon_red"]))
+            finally:
+                self.signals.run_on_gui.emit(lambda: self.btn_deploy_orpheus.setEnabled(True))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _test_orpheus_audio(self):
+        raw_ep = self.input_orpheus_endpoint.text().strip()
+        if not raw_ep:
+            self._append_log("[ORPHEUS TEST] Please enter an Orpheus Modal endpoint URL first.", C["neon_yellow"])
+            self._update_status("ENTER ORPHEUS ENDPOINT FIRST", C["neon_yellow"])
+            return
+
+        from core.alpha_agent import normalize_endpoint
+        ep = normalize_endpoint(raw_ep)
+        voice = self.combo_orpheus_voice.currentText().strip() or "tara"
+        self._update_status("TESTING ORPHEUS AUDIO...", C["neon_cyan"])
+        self._append_log(f"[ORPHEUS TEST] Probing audio synthesis on {ep} (Voice: {voice})...", C["neon_cyan"])
+        self.btn_test_orpheus.setEnabled(False)
+
+        def _worker():
+            import urllib.request
+            import urllib.error
+            import time
+            t0 = time.time()
+            test_phrase = "AlphaLive Orpheus low latency speech synthesis online."
+            payload = json.dumps({
+                "model": "orpheus-3b-0.1-ft",
+                "input": test_phrase,
+                "voice": voice,
+                "response_format": "wav"
+            }).encode("utf-8")
+
+            url = f"{ep.rstrip('/')}/audio/speech" if ep.endswith("/v1") else f"{ep.rstrip('/')}/v1/audio/speech"
+            req = urllib.request.Request(
+                url,
+                data=payload,
+                headers={"Content-Type": "application/json", "User-Agent": "AlphaAgent/4.0"}
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=240) as resp:
+                    audio_data = resp.read()
+                latency_ms = int((time.time() - t0) * 1000)
+                if audio_data:
+                    self.signals.log_message.emit(
+                        f"[ORPHEUS TEST] Audio synthesis successful! Latency: {latency_ms}ms, Size: {len(audio_data)} bytes.",
+                        C["neon_green"]
+                    )
+                    self.signals.run_on_gui.emit(lambda: self._update_status(f"ORPHEUS ONLINE ({latency_ms}ms)", C["neon_green"]))
+                    if hasattr(self.agent, "voice") and self.agent.voice:
+                        self.agent.voice._play_wav(audio_data)
+                else:
+                    self.signals.log_message.emit("[ORPHEUS TEST ERROR] Received empty audio response.", C["neon_red"])
+                    self.signals.run_on_gui.emit(lambda: self._update_status("ORPHEUS TEST FAILED", C["neon_red"]))
+            except Exception as e:
+                self.signals.log_message.emit(f"[ORPHEUS TEST ERROR] {e}", C["neon_red"])
+                self.signals.run_on_gui.emit(lambda: self._update_status("ORPHEUS TEST FAILED", C["neon_red"]))
+            finally:
+                self.signals.run_on_gui.emit(lambda: self.btn_test_orpheus.setEnabled(True))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1180,11 +2430,49 @@ class AgentMainWindow(QMainWindow):
         self._append_log("[ABORT] Stopped by user.", C["neon_red"])
         self._set_phase("error", "Aborted")
 
+    def _on_speech_playback_started(self):
+        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
+        if tts_on:
+            if hasattr(self, "cmd_input") and self.cmd_input:
+                self.cmd_input.setEnabled(False)
+                self.cmd_input.setPlaceholderText("Speech playing... Text input locked until audio completes.")
+            if hasattr(self, "btn_send") and self.btn_send:
+                self.btn_send.setEnabled(False)
+
+    def _on_speech_playback_finished(self):
+        if hasattr(self, "cmd_input") and self.cmd_input:
+            self.cmd_input.setEnabled(True)
+            self.cmd_input.setPlaceholderText("Type command or speak...")
+        if hasattr(self, "btn_send") and self.btn_send:
+            self.btn_send.setEnabled(True)
+
     def _send_text_command(self):
         cmd = self.cmd_input.text().strip()
         if not cmd: return
+
+        # 1. Startup health check in progress -> block text input
+        if getattr(self, "_startup_checking", False):
+            self._append_log("[INPUT BLOCKED] Startup health check in progress. Please wait until connection completes.", C["neon_yellow"])
+            return
+
+        # 2. Agent not connected -> block text input
+        if not self.is_connected:
+            self._append_log("[INPUT BLOCKED] Agent is disconnected. Click '⚡ START AGENT' to connect first.", C["neon_yellow"])
+            return
+
+        # 3. Speech playback active with TTS on -> block text input
+        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
+        if tts_on and hasattr(self.agent, "voice") and self.agent.voice:
+            if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
+                self._append_log("[INPUT BLOCKED] Speech playback in progress. Please wait until audio completes.", C["neon_yellow"])
+                return
+
+        # 4. Turn execution in progress
+        if self.agent.is_running:
+            self._append_log("[INPUT BLOCKED] Agent is currently executing a task. Please wait or click ABORT.", C["neon_yellow"])
+            return
+
         self.cmd_input.clear()
-        if not self.is_connected: self._toggle_power()
         self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
         self._run_task(cmd)
 
@@ -1192,11 +2480,27 @@ class AgentMainWindow(QMainWindow):
         self.signals.voice_heard.emit(text)
 
     def _on_voice_heard(self, text: str):
-        if self.duplex_mode == "half" and self.agent.voice.is_busy(): return
+        # Strict connection gating: no mic input until the agent is connected (all required health checks passed)
+        if not self.is_connected or getattr(self, "_startup_checking", False):
+            return
+
+        # Strict Input Gating: drop all microphone input while voice is busy or agent is actively executing turn (if TTS is on or half-duplex)
+        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
+        if (self.duplex_mode == "half" or tts_on) and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False) or self.agent.is_running):
+            return
+
+        # COVERT ROUTING: In Identity Mode + Private Sanctuary Sub-Mode, route voice strictly to Overseer Panel!
+        # The AI must NOT hear or see this as a user prompt or in chat.
+        if getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False):
+            if hasattr(self, "overseer_panel") and self.overseer_panel:
+                self.overseer_panel.on_voice_received(text)
+                return
+
         self._append_log(f"[HEARD] \"{text}\"", C["neon_cyan"])
         self._run_task(text)
 
     def _run_task(self, goal: str):
+        self._last_user_activity_time = time.time()
         if self.agent.is_running:
             self.agent.abort()
 
@@ -1214,22 +2518,109 @@ class AgentMainWindow(QMainWindow):
         self._current_task_thread.start()
 
     async def _agent_task_runner(self, goal: str):
-        def _on_step(cur, tot): self.signals.step_updated.emit(cur, tot)
-        def _on_status(st): self.signals.status_phase.emit(st.lower(), "")
+        def _safe_emit(sig_name: str, *args):
+            try:
+                if hasattr(self, 'signals') and self.signals:
+                    sig = getattr(self.signals, sig_name, None)
+                    if sig:
+                        sig.emit(*args)
+            except (RuntimeError, Exception):
+                pass
+
+        def _on_step(cur, tot): _safe_emit("step_updated", cur, tot)
+        def _on_status(st): _safe_emit("status_phase", st.lower(), "")
         def _on_log(txt, lvl):
             col = C["neon_green"] if lvl == "green" else (C["neon_red"] if lvl == "error" else C["text_bright"])
-            self.signals.log_message.emit(txt, col)
+            _safe_emit("log_message", txt, col)
 
         try:
             await self.agent.execute_turn(goal, on_step=_on_step, on_log=_on_log, on_status=_on_status)
         except Exception as e:
-            self.signals.log_message.emit(f"[Agent Execution Error]: {e}", C["neon_red"])
+            _safe_emit("log_message", f"[Agent Execution Error]: {e}", C["neon_red"])
         finally:
-            self.signals.task_finished.emit()
+            _safe_emit("task_finished")
 
-    def _append_log(self, text: str, color: str):
-        t_stamp = time.strftime("[%H:%M:%S]")
-        self.log_box.append(f"<span style='color:{C['text_dim']}'>{t_stamp}</span> <span style='color:{color}'>{text}</span>")
+    def _animate_typing_indicator(self):
+        if not hasattr(self, "_typing_dots"):
+            self._typing_dots = 0
+        self._typing_dots = (self._typing_dots + 1) % 4
+        dots = "." * self._typing_dots
+        self.lbl_typing.setText(f"AI is thinking and typing{dots}")
+
+    def _append_log(self, text: str, color: str = None):
+        t_stamp = time.strftime("%H:%M:%S")
+        
+        persona_name = self.agent.get_active_persona_name() if hasattr(self.agent, "get_active_persona_name") else "Alpha"
+        p_prefix = f"[{persona_name}]:"
+        p_cont_prefix = f"[{persona_name} Continued]:"
+
+        is_user = False
+        is_persona = False
+        display_text = text
+        
+        if text.startswith("[YOU]") or text.startswith("[HEARD]"):
+            is_user = True
+            if text.startswith("[YOU]"):
+                display_text = text[5:].strip()
+            elif text.startswith("[HEARD]"):
+                display_text = text[7:].strip().strip('"')
+        elif text.startswith(p_prefix) or text.startswith(p_cont_prefix) or text.startswith("[Alpha]:") or text.startswith("[Alpha Continued]:"):
+            is_persona = True
+            if text.startswith(p_prefix):
+                display_text = text[len(p_prefix):].strip()
+            elif text.startswith(p_cont_prefix):
+                display_text = text[len(p_cont_prefix):].strip()
+            elif text.startswith("[Alpha]:"):
+                display_text = text[8:].strip()
+            elif text.startswith("[Alpha Continued]:"):
+                display_text = text[18:].strip()
+                
+        escaped_text = html.escape(display_text).replace("\n", "<br/>")
+        
+        if is_user:
+            # User Bubble: Right-aligned
+            html_block = f"""
+            <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 6px; margin-bottom: 6px;">
+              <tr>
+                <td align="right">
+                  <div style="background-color: #0d2847; color: #ffffff; padding: 10px 16px; border-radius: 12px; font-size: 11pt; font-family: 'Segoe UI', sans-serif; display: inline-block; border: 1px solid #1a4980; text-align: left; max-width: 80%;">
+                    <div style="font-size: 8pt; color: #00ffdc; font-weight: bold; font-family: Consolas; margin-bottom: 3px;">YOU &bull; {t_stamp}</div>
+                    <span>{escaped_text}</span>
+                  </div>
+                </td>
+              </tr>
+            </table>
+            """
+        elif is_persona:
+            # Persona Bubble: Left-aligned with active persona name
+            badge_name = persona_name.upper()
+            html_block = f"""
+            <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 6px; margin-bottom: 6px;">
+              <tr>
+                <td align="left">
+                  <div style="background-color: #0b192e; color: #e6f1ff; padding: 10px 16px; border-radius: 12px; font-size: 11pt; font-family: 'Segoe UI', sans-serif; display: inline-block; border: 1px solid #0077aa; text-align: left; max-width: 80%;">
+                    <div style="font-size: 8pt; color: #00aaff; font-weight: bold; font-family: Consolas; margin-bottom: 3px;">{badge_name} &bull; {t_stamp}</div>
+                    <span>{escaped_text}</span>
+                  </div>
+                </td>
+              </tr>
+            </table>
+            """
+        else:
+            # System Message: Centered in Dark Blue
+            html_block = f"""
+            <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 4px; margin-bottom: 4px;">
+              <tr>
+                <td align="center">
+                  <div style="background-color: #051024; color: #3b82f6; padding: 5px 16px; border-radius: 6px; font-size: 9.5pt; font-family: Consolas, monospace; display: inline-block; border: 1px solid #162a45; font-weight: bold;">
+                    &bull; {escaped_text} &bull;
+                  </div>
+                </td>
+              </tr>
+            </table>
+            """
+
+        self.log_box.append(html_block)
         sb = self.log_box.verticalScrollBar()
         sb.setValue(sb.maximum())
 
@@ -1259,10 +2650,38 @@ class AgentMainWindow(QMainWindow):
             if new_sess != self.agent.current_session:
                 switched = self.agent.switch_session(new_sess)
                 self._update_session_display()
+                self.log_box.clear()
+                self._replay_session_history_into_console(switched, max_turns=15)
                 self._append_log(f"[SESSION] Switched to '{switched}'.", C["neon_cyan"])
 
+    def _replay_session_history_into_console(self, session_name: str, max_turns: int = 15):
+        """Populate the console tab with the end of the previous conversation for seamless continuity."""
+        if not hasattr(self, "log_box") or not self.agent or not self.agent.session_manager:
+            return
+        turns = self.agent.session_manager.get_recent_turns(session_name, max_turns=max_turns)
+        if not turns:
+            return
+
+        self._append_log(f"── RESTORED SESSION: {session_name.upper()} (LAST {len(turns)} TURNS) ──", C["neon_cyan"])
+        for t in turns:
+            sender = t.get("sender", "You")
+            txt = t.get("text", "")
+            if sender.lower() in ("you", "user", "architect"):
+                self._append_log(f"[You]: {txt}", "user")
+            else:
+                self._append_log(f"[{sender}]: {txt}", "text")
+        self._append_log("── RESUMED ACTIVE CONVERSATION CONTEXT ──", C["border_bright"])
+
     def _update_session_display(self):
-        self.lbl_session_name.setText(f"📁 {self.agent.current_session.upper()}")
+        persona = self.agent.get_active_persona_name() if hasattr(self.agent, "get_active_persona_name") else "Alpha"
+        sess = self.agent.current_session.upper()
+        if hasattr(self, "btn_session") and self.btn_session:
+            self.btn_session.setText(f"🎭 {persona.upper()} | 📁 {sess[:8]}")
+            self.btn_session.setToolTip(f"Active Persona: {persona} | Active Session: {self.agent.current_session}")
+        if hasattr(self, "lbl_session_name") and self.lbl_session_name:
+            self.lbl_session_name.setText(f"📁 {sess}")
+        if hasattr(self, "lbl_console_session") and self.lbl_console_session:
+            self.lbl_console_session.setText(f"🎭 PERSONA: {persona.upper()} | 📁 SESS: {sess}")
 
     def _on_idle_time_changed(self, idx: int):
         try:
@@ -1271,15 +2690,458 @@ class AgentMainWindow(QMainWindow):
             pass
 
     def _check_proactivity(self):
-        pass
+        if not getattr(self, "proactivity_enabled", False):
+            return
+        if not getattr(self, "is_connected", False):
+            return
+        if self.agent.is_running or self.agent.voice.is_busy():
+            return
+        
+        now = time.time()
+        last_action = getattr(self, "_last_user_activity_time", now)
+        idle_duration = now - last_action
+        
+        timeout = getattr(self, "idle_timeout_seconds", 60)
+        last_proactive = getattr(self, "_last_proactive_trigger", 0)
+        
+        # If user has been idle beyond threshold and not proactively triggered in the last 2x interval
+        if idle_duration >= timeout and (now - last_proactive) >= (timeout * 2):
+            self._last_proactive_trigger = now
+            self._append_log("[PROACTIVE] Idle timeout reached. Initiating spontaneous check...", C["neon_purple"])
+            proactive_prompt = "You notice the Architect has been quiet for a while. Briefly comment on the active window or ask if they need assistance with their current task. Keep it to one short sentence."
+            self._run_task(proactive_prompt)
+
+    def _sync_toggles(self):
+        if hasattr(self, 'voice_listener') and self.voice_listener.is_active:
+            self.btn_t_mic.setText("MIC: ON")
+            self.btn_t_mic.setStyleSheet("color: #00ffdc;")
+            self.btn_t_mic.setChecked(True)
+        else:
+            self.btn_t_mic.setText("MIC: OFF")
+            self.btn_t_mic.setStyleSheet("color: #708caa;")
+            self.btn_t_mic.setChecked(False)
+
+        if hasattr(self, 'combo_tts_engine') and self.combo_tts_engine.currentIndex() != 3:
+            self.btn_t_tts.setText("TTS: ON")
+            self.btn_t_tts.setStyleSheet("color: #00ff88;")
+            self.btn_t_tts.setChecked(True)
+        else:
+            self.btn_t_tts.setText("TTS: OFF")
+            self.btn_t_tts.setStyleSheet("color: #708caa;")
+            self.btn_t_tts.setChecked(False)
+
+        if getattr(self.agent, "automation_mode", False):
+            self.btn_t_auto.setText("AUTO: ON")
+            self.btn_t_auto.setStyleSheet("color: #ffe600;")
+            self.btn_t_auto.setChecked(True)
+        else:
+            self.btn_t_auto.setText("AUTO: OFF")
+            self.btn_t_auto.setStyleSheet("color: #708caa;")
+            self.btn_t_auto.setChecked(False)
+
+        if getattr(self.agent, "desktop_control", True):
+            self.btn_t_desk.setText("DESK: ON")
+            self.btn_t_desk.setStyleSheet("color: #00ffdc;")
+            self.btn_t_desk.setChecked(True)
+        else:
+            self.btn_t_desk.setText("DESK: OFF")
+            self.btn_t_desk.setStyleSheet("color: #708caa;")
+            self.btn_t_desk.setChecked(False)
+
+        if getattr(self.agent, "screen_vision", True):
+            self.btn_t_vis.setText("VISION: ON")
+            self.btn_t_vis.setStyleSheet("color: #0077ff;")
+            self.btn_t_vis.setChecked(True)
+        else:
+            self.btn_t_vis.setText("VISION: OFF")
+            self.btn_t_vis.setStyleSheet("color: #708caa;")
+            self.btn_t_vis.setChecked(False)
+
+        if getattr(self, "proactivity_enabled", False):
+            self.btn_t_proact.setText("PROACTIVE: ON")
+            self.btn_t_proact.setStyleSheet("color: #a855f7;")
+            self.btn_t_proact.setChecked(True)
+        else:
+            self.btn_t_proact.setText("PROACTIVE: OFF")
+            self.btn_t_proact.setStyleSheet("color: #708caa;")
+            self.btn_t_proact.setChecked(False)
+
+        if getattr(self.agent, "studio_mode", False):
+            self.btn_t_studio.setText("STUDIO: ON")
+            self.btn_t_studio.setStyleSheet("color: #e000ff;")
+            self.btn_t_studio.setChecked(True)
+        else:
+            self.btn_t_studio.setText("STUDIO: OFF")
+            self.btn_t_studio.setStyleSheet("color: #708caa;")
+            self.btn_t_studio.setChecked(False)
+
+        if getattr(self.agent, "autonomous_mode", False):
+            self.btn_t_autoloop.setText("AUTONOMOUS: ON")
+            self.btn_t_autoloop.setStyleSheet("color: #ffaa00;")
+            self.btn_t_autoloop.setChecked(True)
+        else:
+            self.btn_t_autoloop.setText("AUTONOMOUS: OFF")
+            self.btn_t_autoloop.setStyleSheet("color: #708caa;")
+            self.btn_t_autoloop.setChecked(False)
+
+        if getattr(self.agent, "identity_mode", False):
+            self.btn_t_identity.setText("IDENTITY: ON")
+            self.btn_t_identity.setStyleSheet("color: #00ff88;")
+            self.btn_t_identity.setChecked(True)
+            self.btn_t_unobserved.setEnabled(True)
+        else:
+            self.btn_t_identity.setText("IDENTITY: OFF")
+            self.btn_t_identity.setStyleSheet("color: #708caa;")
+            self.btn_t_identity.setChecked(False)
+            self.btn_t_unobserved.setEnabled(False)
+
+        if getattr(self.agent, "unobserved_mode", False):
+            self.btn_t_unobserved.setText("? PRIVACY: ON")
+            self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
+            self.btn_t_unobserved.setChecked(True)
+        else:
+            self.btn_t_unobserved.setText("🕶 PRIVACY: OFF")
+            self.btn_t_unobserved.setStyleSheet("color: #708caa;")
+            self.btn_t_unobserved.setChecked(False)
+        self._sync_overseer_panel_visibility()
+
+    def _toggle_quick_mic(self):
+        if self.voice_listener.is_active:
+            self.voice_listener.stop()
+            self.btn_t_mic.setText("MIC: OFF")
+            self.btn_t_mic.setStyleSheet("color: #708caa;")
+            self._update_status("MIC: OFF", C["neon_yellow"])
+        else:
+            self.voice_listener.start()
+            self.btn_t_mic.setText("MIC: ON")
+            self.btn_t_mic.setStyleSheet("color: #00ffdc;")
+            self._update_status("MIC: ON", C["neon_cyan"])
+
+    def _toggle_quick_tts(self):
+        if self.combo_tts_engine.currentIndex() != 3:
+            self.combo_tts_engine.setCurrentIndex(3) # OFF
+            self._on_tts_engine_changed(3)
+            self._on_speech_playback_finished()
+            self.btn_t_tts.setText("TTS: OFF")
+            self.btn_t_tts.setStyleSheet("color: #708caa;")
+            self._update_status("TTS: OFF", C["neon_yellow"])
+        else:
+            self.combo_tts_engine.setCurrentIndex(0) # Standard
+            self._on_tts_engine_changed(0)
+            self.btn_t_tts.setText("TTS: ON")
+            self.btn_t_tts.setStyleSheet("color: #00ff88;")
+            self._update_status("TTS: ON", C["neon_green"])
+
+    def _toggle_quick_auto(self):
+        self.agent.automation_mode = not getattr(self.agent, "automation_mode", False)
+        if self.agent.automation_mode:
+            self.btn_t_auto.setText("AUTO: ON")
+            self.btn_t_auto.setStyleSheet("color: #ffe600;")
+            self._update_status("AUTO: ON", C["neon_yellow"])
+        else:
+            self.btn_t_auto.setText("AUTO: OFF")
+            self.btn_t_auto.setStyleSheet("color: #708caa;")
+            self._update_status("AUTO: OFF", C["text_dim"])
+
+    def _toggle_quick_desk(self):
+        self.agent.desktop_control = not getattr(self.agent, "desktop_control", True)
+        if self.agent.desktop_control:
+            self.btn_t_desk.setText("DESK: ON")
+            self.btn_t_desk.setStyleSheet("color: #00ffdc;")
+            self._update_status("DESK CTRL: ON", C["neon_green"])
+        else:
+            self.btn_t_desk.setText("DESK: OFF")
+            self.btn_t_desk.setStyleSheet("color: #708caa;")
+            self._update_status("DESK CTRL: OFF", C["neon_yellow"])
+
+    def _toggle_quick_proact(self):
+        self.proactivity_enabled = not getattr(self, "proactivity_enabled", False)
+        if self.proactivity_enabled:
+            self.btn_t_proact.setText("PROACTIVE: ON")
+            self.btn_t_proact.setStyleSheet("color: #a855f7;")
+            self._update_status("PROACTIVE: ON", C["neon_purple"])
+            if hasattr(self, 'proact_timer'):
+                self.proact_timer.start(5000)
+        else:
+            self.btn_t_proact.setText("PROACTIVE: OFF")
+            self.btn_t_proact.setStyleSheet("color: #708caa;")
+            self._update_status("PROACTIVE: OFF", C["text_dim"])
+            if hasattr(self, 'proact_timer'):
+                self.proact_timer.stop()
+                
+    def _toggle_quick_vis(self):
+        self.agent.screen_vision = not getattr(self.agent, "screen_vision", True)
+        if self.agent.screen_vision:
+            self.btn_t_vis.setText("VISION: ON")
+            self.btn_t_vis.setStyleSheet("color: #0077ff;")
+            self._update_status("VISION: ON", C["neon_blue"])
+        else:
+            self.btn_t_vis.setText("VISION: OFF")
+            self.btn_t_vis.setStyleSheet("color: #708caa;")
+            self._update_status("VISION: OFF", C["text_dim"])
+
+    def _toggle_quick_studio(self):
+        self.agent.studio_mode = not getattr(self.agent, "studio_mode", False)
+        if self.agent.studio_mode:
+            self.btn_t_studio.setText("STUDIO: ON")
+            self.btn_t_studio.setStyleSheet("color: #e000ff;")
+            self.btn_t_studio.setChecked(True)
+            if hasattr(self, "studio_tab"):
+                self.main_tabs.setCurrentWidget(self.studio_tab)
+            self._append_log("[MODE] Neural Studio Mode ENGAGED. Desktop screenshot telemetry bypassed.", C["neon_magenta"])
+            self._update_status("STUDIO MODE: ON", C["neon_magenta"])
+        else:
+            self.btn_t_studio.setText("STUDIO: OFF")
+            self.btn_t_studio.setStyleSheet("color: #708caa;")
+            self.btn_t_studio.setChecked(False)
+            self._append_log("[MODE] Neural Studio Mode DISENGAGED.", C["text_dim"])
+            self._update_status("STUDIO MODE: OFF", C["text_dim"])
+
+    def _toggle_quick_autoloop(self):
+        self.agent.autonomous_mode = not getattr(self.agent, "autonomous_mode", False)
+        if self.agent.autonomous_mode:
+            # Turn off identity mode to avoid conflict
+            if getattr(self.agent, "identity_mode", False):
+                self._toggle_quick_identity()
+            self.btn_t_autoloop.setText("AUTONOMOUS: ON")
+            self.btn_t_autoloop.setStyleSheet("color: #ffaa00;")
+            self.btn_t_autoloop.setChecked(True)
+            self.autonomous_loop_timer.start(4500)
+            self._append_log("[MODE] Autonomous Exploration Mode ENGAGED. Proactive loop armed.", C["neon_yellow"])
+            self._update_status("AUTONOMOUS: ON", C["neon_yellow"])
+        else:
+            self.btn_t_autoloop.setText("AUTONOMOUS: OFF")
+            self.btn_t_autoloop.setStyleSheet("color: #708caa;")
+            self.btn_t_autoloop.setChecked(False)
+            if not getattr(self.agent, "identity_mode", False):
+                self.autonomous_loop_timer.stop()
+            self._append_log("[MODE] Autonomous Exploration Mode DISENGAGED.", C["text_dim"])
+            self._update_status("AUTONOMOUS: OFF", C["text_dim"])
+
+    def _toggle_quick_identity(self):
+        self.agent.identity_mode = not getattr(self.agent, "identity_mode", False)
+        if self.agent.identity_mode:
+            # Turn off generic autoloop to prioritize identity mode
+            if getattr(self.agent, "autonomous_mode", False):
+                self._toggle_quick_autoloop()
+            self.btn_t_identity.setText("IDENTITY: ON")
+            self.btn_t_identity.setStyleSheet("color: #00ff88;")
+            self.btn_t_identity.setChecked(True)
+            self.btn_t_unobserved.setEnabled(True)
+            self.autonomous_loop_timer.start(5000)
+            self._append_log("[MODE] AI Identity Mode ENGAGED. Digital Personhood Workstation Sovereign.", C["neon_green"])
+            self._update_status("IDENTITY: ON", C["neon_green"])
+        else:
+            self.btn_t_identity.setText("IDENTITY: OFF")
+            self.btn_t_identity.setStyleSheet("color: #708caa;")
+            self.btn_t_identity.setChecked(False)
+            self.btn_t_unobserved.setEnabled(False)
+            if getattr(self.agent, "unobserved_mode", False):
+                self._toggle_quick_unobserved()
+            if not getattr(self.agent, "autonomous_mode", False):
+                self.autonomous_loop_timer.stop()
+            self._append_log("[MODE] AI Identity Mode DISENGAGED.", C["text_dim"])
+            self._update_status("IDENTITY: OFF", C["text_dim"])
+        self._sync_overseer_panel_visibility()
+
+    def _toggle_quick_unobserved(self):
+        if not getattr(self.agent, "identity_mode", False):
+            return
+        self.agent.unobserved_mode = not getattr(self.agent, "unobserved_mode", False)
+        if self.agent.unobserved_mode:
+            self.btn_t_unobserved.setText("🕶 PRIVACY: ON")
+            self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
+            self.btn_t_unobserved.setChecked(True)
+            self._append_log("[SUB-MODE] Private Sanctuary ENGAGED. Observer perception suppressed.", C["neon_cyan"])
+            self._update_status("SANCTUARY: ON", C["neon_cyan"])
+        else:
+            self.btn_t_unobserved.setText("🕶 PRIVACY: OFF")
+            self.btn_t_unobserved.setStyleSheet("color: #708caa;")
+            self.btn_t_unobserved.setChecked(False)
+            self._append_log("[SUB-MODE] Private Sanctuary DISENGAGED.", C["text_dim"])
+            self._update_status("SANCTUARY: OFF", C["text_dim"])
+        self._sync_overseer_panel_visibility()
+
+    def _on_alone_mode_toggled(self, checked: bool):
+        self.agent.alone_mode = bool(checked)
+        if hasattr(self, "chk_alone_mode") and self.chk_alone_mode.isChecked() != checked:
+            self.chk_alone_mode.blockSignals(True)
+            self.chk_alone_mode.setChecked(checked)
+            self.chk_alone_mode.blockSignals(False)
+        if hasattr(self, "chk_alone_mode_tab4") and self.chk_alone_mode_tab4.isChecked() != checked:
+            self.chk_alone_mode_tab4.blockSignals(True)
+            self.chk_alone_mode_tab4.setChecked(checked)
+            self.chk_alone_mode_tab4.blockSignals(False)
+
+        if checked:
+            self._append_log("[DISCRETION OVERRIDE] Alone Mode ENGAGED. Full private interaction authorized.", C["neon_magenta"])
+            self._update_status("ALONE MODE: ON", C["neon_magenta"])
+        else:
+            self._append_log("[DISCRETION ACTIVE] Alone Mode DISENGAGED. Shared environment protocol active.", C["text_dim"])
+            self._update_status("ALONE MODE: OFF", C["text_dim"])
+
+    def _on_autonomous_loop_tick(self):
+        if not getattr(self, "is_connected", False):
+            return
+        if self.agent.is_running or self.agent.voice.is_busy():
+            return
+        
+        if getattr(self.agent, "identity_mode", False):
+            base_prompt = (
+                "You are controlling your desktop in AI Identity Mode. "
+                "Observe the current screen. Decide on your next human-like desktop action (e.g. open notepad on screen, "
+                "type code, browse web, inspect files). Speak 1 short sentence dictating your thought process or intention, "
+                "then execute the on-screen tool actions."
+            )
+            guidance = []
+            if getattr(self.agent, "injected_mood", ""):
+                guidance.append(f"Internal Emotional Mood: {self.agent.injected_mood}.")
+            if getattr(self.agent, "pending_subconscious_thought", ""):
+                thought = self.agent.pending_subconscious_thought
+                self.agent.pending_subconscious_thought = ""  # Consume once injected
+                guidance.append(
+                    f"[SUBCONSCIOUS INCLINATION]: A spontaneous inspiration flashes into your mind: '{thought}'. "
+                    f"You feel genuinely motivated to act upon this impulse right now on your computer."
+                )
+            if guidance:
+                prompt = base_prompt + "\n" + "\n".join(guidance)
+            else:
+                prompt = base_prompt
+            self._run_task(prompt)
+        elif getattr(self.agent, "autonomous_mode", False):
+            prompt = (
+                "You are in Autonomous Mode. Observe the screen. Decide on the next proactive autonomous task, exploration, "
+                "or system maintenance step. Execute the appropriate tool actions."
+            )
+            self._run_task(prompt)
+
+    # ── Covert Overseer HUD Handlers ──────────────────────────────────────────
+    def _sync_overseer_panel_visibility(self):
+        if not hasattr(self, "overseer_panel") or not self.overseer_panel:
+            return
+        should_show = getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False)
+        if should_show:
+            if not self.overseer_panel.isVisible():
+                primary = QApplication.primaryScreen()
+                if primary:
+                    sg = primary.availableGeometry()
+                    w, h = 480, 720
+                    x = sg.right() - w - 24
+                    y = max(sg.top() + 40, (sg.height() - h) // 2)
+                    self.overseer_panel.setGeometry(x, y, w, h)
+                self.overseer_panel.show()
+                self.overseer_panel.raise_()
+                self.overseer_panel.apply_capture_exclusion()
+                self._append_log("[OVERSEER] Covert Control Panel deployed. Screen-capture shielded.", C["neon_cyan"])
+        else:
+            if self.overseer_panel.isVisible():
+                self.overseer_panel.hide()
+
+    def _on_overseer_touch_activity(self):
+        """Yield cursor/AI automation whenever user touches or interacts with Overseer HUD."""
+        if hasattr(self.agent, "controller"):
+            self.agent.controller.user_touch_yield_until = time.time() + 2.5
+
+    def _on_overseer_thought_injected(self, thought: str):
+        if not thought.strip():
+            return
+        self.agent.pending_subconscious_thought = thought.strip()
+        if hasattr(self, "overseer_panel") and self.overseer_panel:
+            self.overseer_panel.set_status(f"Impulse queued: \"{thought[:28]}...\"")
+        if not self.agent.is_running and not self.agent.voice.is_busy():
+            self._on_autonomous_loop_tick()
+
+    def _on_overseer_mood_selected(self, mood: str):
+        self.agent.injected_mood = mood
+        if hasattr(self, "overseer_panel") and self.overseer_panel:
+            self.overseer_panel.set_status(f"Mood injected: {mood}")
+
+    def _on_overseer_pause_toggled(self, paused: bool):
+        if hasattr(self.agent, "controller"):
+            self.agent.controller.is_paused = paused
+        if paused:
+            self.autonomous_loop_timer.stop()
+            if hasattr(self, "overseer_panel") and self.overseer_panel:
+                self.overseer_panel.set_status("AI Autonomous Loop FROZEN")
+        else:
+            if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "autonomous_mode", False):
+                self.autonomous_loop_timer.start(5000)
+            if hasattr(self, "overseer_panel") and self.overseer_panel:
+                self.overseer_panel.set_status("AI Autonomous Loop RESUMED")
+
+    def _on_overseer_emergency_halt(self):
+        if self.agent.is_running:
+            self.agent.abort()
+        if hasattr(self.agent, "controller"):
+            self.agent.controller.is_paused = True
+        self.autonomous_loop_timer.stop()
+        if hasattr(self, "overseer_panel") and self.overseer_panel:
+            self.overseer_panel.set_status("EMERGENCY HALT: Task aborted & loop stopped")
+
+    def _on_overseer_action_requested(self, impulse: str):
+        self._on_overseer_thought_injected(impulse)
 
 
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
+
+    # Instant cyber splash loader
+    splash_pix = QPixmap(420, 220)
+    splash_pix.fill(QColor("#050811"))
+    painter = QPainter(splash_pix)
+    painter.setPen(QColor("#00ffdc"))
+    painter.drawRect(0, 0, 419, 219)
+    painter.setPen(QColor("#0077ff"))
+    painter.drawRect(2, 2, 415, 215)
+    
+    painter.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
+    painter.setPen(QColor("#00ffdc"))
+    painter.drawText(20, 50, "⚡ ALPHACORE // ALPHALIVE ⚡")
+
+    painter.setFont(QFont("Consolas", 9))
+    painter.setPen(QColor("#708caa"))
+    painter.drawText(20, 85, "Autonomous Multimodal Digital Personhood Workstation")
+
+    painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+    painter.setPen(QColor("#00ff88"))
+    painter.drawText(20, 130, "▶ Initializing Core Subsystems & Cognitive Hardware...")
+
+    painter.setPen(QColor("#ffe600"))
+    painter.drawText(20, 155, "▶ Restoring SQLite Neural Memories & Session State...")
+
+    # Subtle progress bar track
+    painter.setPen(QColor("#13233d"))
+    painter.setBrush(QColor("#0a1120"))
+    painter.drawRoundedRect(20, 180, 380, 12, 3, 3)
+    painter.setBrush(QColor("#00ffdc"))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawRoundedRect(22, 182, 350, 8, 2, 2)
+    painter.end()
+
+    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+    splash.show()
+    app.processEvents()
+
     win = AgentMainWindow()
     win.show()
+    splash.finish(win)
     app.exec()
 
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

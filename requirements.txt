@@ -26,3 +26,4 @@ modal>=0.60.0
 paho-mqtt>=1.6.1
 
 pyttsx3>=2.90
+uiautomation>=2.0.18

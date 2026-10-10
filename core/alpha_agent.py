@@ -60,6 +60,14 @@ try:
 except ImportError:
     HAS_OCR = False
 
+# Native Windows UI Automation (Accessibility Tree)
+try:
+    import uiautomation as auto
+    auto.SetGlobalSearchTimeout(1.5)
+    HAS_UIA = True
+except ImportError:
+    HAS_UIA = False
+
 # Memory Manager
 try:
     from memory.memory_manager import MemoryManager
@@ -123,7 +131,7 @@ Operating System: Windows 11
 
 CORE OPERATIONAL RULES:
 1. CONVERSATION FIRST (DEFAULT): When Architect is talking, conversing, making remarks, asking questions, thinking out loud, bantering, venting, or chatting casually (e.g. 'what are you doing', 'I am trying to fix this', 'oh you are recording', 'who are you', 'what is up', 'why is it doing that'), RESPOND EXCLUSIVELY VERBALLY WITH TEXT. DO NOT CALL ANY TOOLS! Do NOT click around the screen or invent action steps for conversational remarks.
-2. EXPLICIT DESKTOP ACTIONS ONLY: You only call physical mouse/keyboard/system tools (mouse_click, type_text, press_key, hotkey, find_text_on_screen, vision_click, launch_app, browser_open_url, focus_window, window_action, run_shell_command, get_clipboard, set_clipboard, mouse_drag, mouse_scroll) when Architect explicitly gives you an action command to control his PC (e.g. 'click the start button', 'open chrome', 'launch notepad', 'type my password', 'calibrate screen', 'search for X', 'open youtube'). Prefer direct tools like launch_app and browser_open_url whenever applicable rather than hunting for small icons on screen.
+2. EXPLICIT DESKTOP ACTIONS ONLY: You only call physical mouse/keyboard/system tools (click_ui_element, find_ui_element, mouse_click, type_text, press_key, hotkey, find_text_on_screen, vision_click, launch_app, browser_open_url, focus_window, window_action, run_shell_command, get_clipboard, set_clipboard, mouse_drag, mouse_scroll) when Architect explicitly gives you an action command to control his PC (e.g. 'click the start button', 'open chrome', 'launch notepad', 'type my password', 'calibrate screen', 'search for X', 'open youtube'). Prefer click_ui_element for exact zero-miss control clicks on buttons, tabs, or fields, and direct tools like launch_app and browser_open_url whenever applicable rather than hunting for small icons on screen.
 3. NO TOOL LOOPING: When executing a desktop task, take the necessary actions and immediately call 'task_complete' when finished. NEVER repeatedly click or repeat the same tool action.
 4. MULTI-STEP VERBAL NARRATION: When executing multi-step tasks or sequential operations, always include a brief, natural spoken status remark before or with each tool call (e.g., 'Opening Chrome now...', 'Got it, let\'s see what we do next...', 'All done!') so Architect always hears what you are doing in real time.
 5. DIRECT VERBAL OUTPUT: Always provide your conversational speech and status remarks as direct text output, NEVER exclusively inside task_complete summary arguments. The summary is only for logging; Architect only hears what you output as direct conversational text.
@@ -320,6 +328,7 @@ class VoiceEngine:
 
         self.is_speaking = False
         self.last_speech_time = time.time()
+        self._clause_buffer = ""
 
     def queue_chunk(self, text: str):
         """Push a sentence or complete phrase into the speech pipeline for instant playback."""
@@ -330,6 +339,37 @@ class VoiceEngine:
         self.is_speaking = True
         self._record_spoken_phrase(clean)
         self._queue.put((clean, None))
+
+    def feed_stream_token(self, token: str):
+        """Streaming clause chunker: buffers tokens and dispatches natural clauses immediately for <150ms TTFA."""
+        if self._interrupted.is_set() or not token:
+            return
+        if not hasattr(self, "_clause_buffer"):
+            self._clause_buffer = ""
+        self._clause_buffer += token
+
+        # Split on sentence boundaries, punctuation pauses, or clause delimiters
+        clause_pattern = re.compile(r'([.?!;:\n]+|,\s+|\s+(?:and|but|however|because|then)\s+)', re.IGNORECASE)
+        match = clause_pattern.search(self._clause_buffer)
+        if match:
+            split_idx = match.end()
+            candidate = self._clause_buffer[:split_idx].strip()
+            # Ensure candidate has meaningful words (at least 3 words or 12 chars)
+            words = candidate.split()
+            if len(words) >= 3 or (len(words) >= 1 and any(c in candidate for c in ('.', '!', '?'))):
+                self._clause_buffer = self._clause_buffer[split_idx:].lstrip()
+                clean = self.clean_text_for_speech(candidate)
+                if clean:
+                    self.queue_chunk(clean)
+
+    def flush_stream(self):
+        """Flushes any remaining text in the streaming clause buffer."""
+        if hasattr(self, "_clause_buffer") and self._clause_buffer.strip():
+            rem = self._clause_buffer.strip()
+            self._clause_buffer = ""
+            clean = self.clean_text_for_speech(rem)
+            if clean:
+                self.queue_chunk(clean)
 
     def speak_chunk(self, text: str):
         self.queue_chunk(text)
@@ -898,6 +938,23 @@ class DesktopController:
             except Exception:
                 return PIL.Image.new("RGB", (screen_w or 1920, screen_h or 1080), (10, 10, 10))
 
+    def has_screen_changed(self, img: PIL.Image.Image, threshold: float = 0.015) -> bool:
+        """Fast perceptual downsampled frame differencing to eliminate redundant vision token uploads."""
+        try:
+            # Resize to a low-res 64x64 thumbnail for <2ms difference computation
+            thumb = img.convert("L").resize((64, 64))
+            arr = np.frombuffer(thumb.tobytes(), dtype=np.uint8).astype(np.float32)
+            if not hasattr(self, "_last_thumb_arr") or self._last_thumb_arr is None:
+                self._last_thumb_arr = arr
+                return True
+            diff = np.mean(np.abs(arr - self._last_thumb_arr)) / 255.0
+            if diff > threshold:
+                self._last_thumb_arr = arr
+                return True
+            return False
+        except Exception:
+            return True
+
     def capture_camera_frame(self) -> PIL.Image.Image | None:
         """Capture a single frame from the connected USB webcam."""
         try:
@@ -1301,7 +1358,160 @@ class DesktopController:
             except Exception as e:
                 elements.append(f"[OCR note: {e}]")
 
+        # Supplement with native Windows Accessibility Tree controls if available
+        if HAS_UIA:
+            try:
+                uia_summary = self.get_ui_tree_summary(max_elements=20)
+                if uia_summary:
+                    elements.append("\nActive UI Automation Tree Controls:")
+                    elements.append(uia_summary)
+            except Exception:
+                pass
+
         return "\n".join(elements)
+
+    def find_ui_element(self, query: str, control_type: str = None) -> dict:
+        """Find a UI control via Windows UI Automation Accessibility tree by Name, AutomationId, or text query."""
+        if not HAS_UIA:
+            return {"found": False, "error": "uiautomation module is not installed"}
+        try:
+            q = (query or "").strip().lower()
+            if not q:
+                return {"found": False, "error": "Query cannot be empty"}
+
+            target_control = None
+            root = auto.GetRootControl()
+
+            def match_predicate(ctrl, depth):
+                nonlocal target_control
+                if not ctrl:
+                    return False
+                try:
+                    c_name = (ctrl.Name or "").strip()
+                    c_id = (ctrl.AutomationId or "").strip()
+                    c_type = (ctrl.ControlTypeName or "").strip()
+
+                    if control_type and control_type.lower() not in c_type.lower():
+                        return False
+
+                    # Check exact or substring matches
+                    if q == c_name.lower() or q == c_id.lower() or (len(q) >= 3 and (q in c_name.lower() or q in c_id.lower())):
+                        rect = ctrl.BoundingRectangle
+                        # Verify valid bounding rectangle on screen
+                        if rect and (rect.right > rect.left) and (rect.bottom > rect.top):
+                            target_control = ctrl
+                            return True
+                except Exception:
+                    pass
+                return False
+
+            # Search active foreground window first for responsiveness
+            try:
+                fg = auto.GetForegroundControl()
+                if fg:
+                    auto.FindControl(fg, match_predicate, maxDepth=8)
+            except Exception:
+                pass
+
+            # Fallback to desktop root search
+            if not target_control and root:
+                try:
+                    auto.FindControl(root, match_predicate, maxDepth=6)
+                except Exception:
+                    pass
+
+            if target_control:
+                rect = target_control.BoundingRectangle
+                cx = int((rect.left + rect.right) / 2)
+                cy = int((rect.top + rect.bottom) / 2)
+                return {
+                    "found": True,
+                    "name": target_control.Name,
+                    "control_type": target_control.ControlTypeName,
+                    "automation_id": target_control.AutomationId,
+                    "x": cx,
+                    "y": cy,
+                    "bounding_box": [rect.left, rect.top, rect.right, rect.bottom],
+                    "_control": target_control
+                }
+            return {"found": False, "query": query, "message": "Element not found in Windows UI tree"}
+        except Exception as e:
+            return {"found": False, "query": query, "error": str(e)}
+
+    def click_ui_element(self, query: str, control_type: str = None, button: str = "left", clicks: int = 1) -> dict:
+        """Zero-miss click on a Windows UI element by semantic name/identifier via UI Automation Tree."""
+        if self._check_touch_yield():
+            return {"found": False, "clicked": False, "error": "Action yielded: Desktop input paused for user touch interaction."}
+
+        res = self.find_ui_element(query, control_type=control_type)
+        if not res.get("found"):
+            return res
+
+        cx = res.get("x")
+        cy = res.get("y")
+        ctrl = res.get("_control")
+
+        # Try native UI Automation pattern click or fallback to physical mouse click
+        invoked = False
+        if ctrl and clicks == 1 and button == "left":
+            try:
+                # Some standard controls support direct Click() method
+                if hasattr(ctrl, "Click"):
+                    ctrl.Click(simulateMove=False)
+                    invoked = True
+            except Exception:
+                invoked = False
+
+        if not invoked and cx is not None and cy is not None:
+            self.click(cx, cy, button=button, clicks=clicks)
+
+        return {
+            "found": True,
+            "clicked": True,
+            "name": res.get("name"),
+            "control_type": res.get("control_type"),
+            "automation_id": res.get("automation_id"),
+            "x": cx,
+            "y": cy,
+            "invoked_natively": invoked
+        }
+
+    def get_ui_tree_summary(self, max_elements: int = 25) -> str:
+        """Generate structured text summary of interactive controls in the active foreground window."""
+        if not HAS_UIA:
+            return ""
+        try:
+            fg = auto.GetForegroundControl()
+            if not fg:
+                return ""
+            summary_lines = []
+            interactive_types = {
+                "ButtonControl", "EditControl", "TabItemControl", "MenuItemControl",
+                "CheckBoxControl", "RadioButtonControl", "ComboBoxControl", "HyperlinkControl", "ListItemControl"
+            }
+
+            def collector(ctrl, depth):
+                if not ctrl:
+                    return False
+                try:
+                    c_type = ctrl.ControlTypeName or ""
+                    c_name = (ctrl.Name or "").strip()
+                    if c_type in interactive_types and c_name:
+                        rect = ctrl.BoundingRectangle
+                        if rect and (rect.right > rect.left) and (rect.bottom > rect.top):
+                            cx = int((rect.left + rect.right) / 2)
+                            cy = int((rect.top + rect.bottom) / 2)
+                            summary_lines.append(f"- [{c_type.replace('Control', '')}] '{c_name}' at ({cx}, {cy})")
+                            if len(summary_lines) >= max_elements:
+                                return True
+                except Exception:
+                    pass
+                return False
+
+            auto.FindControl(fg, collector, maxDepth=8)
+            return "\n".join(summary_lines)
+        except Exception:
+            return ""
 
     def browser_search(self, query: str) -> str:
         """Search Google via default browser."""
@@ -1749,6 +1959,38 @@ class AlphaAgent:
                             "clicks": {"type": "integer", "description": "Number of clicks (1 for single, 2 for double)"}
                         },
                         "required": ["instruction"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "click_ui_element",
+                    "description": "Zero-miss click on an exact Windows control (button, tab, text field, checkbox, menu item) by name or label using the Windows UI Accessibility tree.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Name, label, or automation ID of the UI element (e.g. 'Save', 'Submit', 'File', 'OK', 'Settings')"},
+                            "control_type": {"type": "string", "description": "Optional control type filter (e.g. 'Button', 'Edit', 'TabItem', 'MenuItem', 'CheckBox')"},
+                            "button": {"type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button to click with"},
+                            "clicks": {"type": "integer", "description": "Number of clicks (1 for single, 2 for double)"}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "find_ui_element",
+                    "description": "Inspect and locate coordinates and details of a Windows UI control via Accessibility tree without clicking.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Name, label, or automation ID to search for"},
+                            "control_type": {"type": "string", "description": "Optional control type filter (e.g. 'Button', 'Edit')"}
+                        },
+                        "required": ["query"]
                     }
                 }
             },
@@ -2462,6 +2704,32 @@ class AlphaAgent:
                     )
                 ),
                 types.FunctionDeclaration(
+                    name="click_ui_element",
+                    description="Zero-miss click on an exact Windows control (button, tab, text field, checkbox, menu item) by name or label using the Windows UI Accessibility tree.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["query"],
+                        properties={
+                            "query": genai.types.Schema(type=genai.types.Type.STRING, description="Name, label, or automation ID of the UI element (e.g. 'Save', 'Submit', 'File', 'OK', 'Settings')"),
+                            "control_type": genai.types.Schema(type=genai.types.Type.STRING, description="Optional control type filter (e.g. 'Button', 'Edit', 'TabItem', 'MenuItem', 'CheckBox')"),
+                            "button": genai.types.Schema(type=genai.types.Type.STRING, description="'left', 'right', or 'middle'"),
+                            "clicks": genai.types.Schema(type=genai.types.Type.INTEGER, description="Number of clicks (1 for single, 2 for double)"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="find_ui_element",
+                    description="Inspect and locate coordinates and details of a Windows UI control via Accessibility tree without clicking.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["query"],
+                        properties={
+                            "query": genai.types.Schema(type=genai.types.Type.STRING, description="Name, label, or automation ID to search for"),
+                            "control_type": genai.types.Schema(type=genai.types.Type.STRING, description="Optional control type filter (e.g. 'Button', 'Edit')"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
                     name="launch_app",
                     description="Launch an application by name or system command (e.g. 'chrome', 'edge', 'notepad', 'calc', 'explorer', 'cmd', 'powershell', 'code') or bring it to foreground if already running.",
                     parameters=genai.types.Schema(
@@ -2823,10 +3091,18 @@ class AlphaAgent:
                 is_studio = getattr(self, "studio_mode", False)
                 if not is_studio and getattr(self, "screen_vision", True) and (is_desktop or any(w in user_goal.lower() for w in ("screen", "screenshot", "look at", "what do you see"))):
                     screenshot = self.controller.capture_screenshot()
-                    img_byte_arr = io.BytesIO()
-                    screenshot.save(img_byte_arr, format='JPEG', quality=60)
-                    img_bytes = img_byte_arr.getvalue()
-                    history[-1].parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                    # Frame differencing: on multi-step turns, skip uploading duplicate frames if screen hasn't changed
+                    screen_changed = (step == 1) or self.controller.has_screen_changed(screenshot)
+                    if screen_changed:
+                        img_byte_arr = io.BytesIO()
+                        screenshot.save(img_byte_arr, format='JPEG', quality=60)
+                        img_bytes = img_byte_arr.getvalue()
+                        history[-1].parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                    else:
+                        # Screen is unchanged from previous step: reuse visual context without consuming extra tokens
+                        history[-1].parts.append(types.Part.from_text(text="[Vision note: Screen visually unchanged from previous action step.]"))
+                        if on_log:
+                            on_log("[VISION] Screen unchanged from prior step. Reusing frame cache to save tokens.", "cyan")
 
                 # Camera vision support: grab camera frame if explicitly requested
                 if any(w in user_goal.lower() for w in ("camera", "webcam", "look at me", "see me")):
@@ -2928,6 +3204,8 @@ class AlphaAgent:
                             tok = part.text
                             full_model_text += tok
                             print(tok, end="", flush=True)
+                            if not is_desktop and hasattr(self, "voice") and self.voice:
+                                self.voice.feed_stream_token(tok)
 
                 if first_chunk.candidates:
                     _handle_chunk_cand(first_chunk.candidates[0])
@@ -2944,6 +3222,9 @@ class AlphaAgent:
 
                 print()
 
+                if hasattr(self, "voice") and self.voice:
+                    self.voice.flush_stream()
+
                 if not self.is_running:
                     break
 
@@ -2955,7 +3236,8 @@ class AlphaAgent:
                     if self.is_running:
                         if on_status:
                             on_status("PROCESSING")
-                        if not (getattr(self, "automation_mode", False) and function_calls):
+                        # If desktop automation with function calls or stream wasn't flushed, ensure chunk queued
+                        if is_desktop and not (getattr(self, "automation_mode", False) and function_calls):
                             self.voice.queue_chunk(clean_text)
 
                 # Cutoff Auto-Continuation Guard
@@ -3070,6 +3352,18 @@ class AlphaAgent:
                             gemini_client=self.client,
                             button=fn_args.get("button", "left"),
                             clicks=int(fn_args.get("clicks", 1))
+                        )
+                    elif fn_name == "click_ui_element":
+                        res = self.controller.click_ui_element(
+                            query=fn_args.get("query", ""),
+                            control_type=fn_args.get("control_type"),
+                            button=fn_args.get("button", "left"),
+                            clicks=int(fn_args.get("clicks", 1))
+                        )
+                    elif fn_name == "find_ui_element":
+                        res = self.controller.find_ui_element(
+                            query=fn_args.get("query", ""),
+                            control_type=fn_args.get("control_type")
                         )
                     elif fn_name == "launch_app":
                         res = self.controller.launch_app(
@@ -3423,8 +3717,13 @@ class AlphaAgent:
 
                         if not in_think:
                             print(tok, end="", flush=True)
+                            if not is_desktop and hasattr(self, "voice") and self.voice:
+                                self.voice.feed_stream_token(tok)
 
                 print()
+
+                if hasattr(self, "voice") and self.voice:
+                    self.voice.flush_stream()
 
                 if not self.is_running:
                     break
@@ -3437,7 +3736,8 @@ class AlphaAgent:
                     if self.is_running:
                         if on_status:
                             on_status("PROCESSING")
-                        self.voice.queue_chunk(clean_text)
+                        if is_desktop:
+                            self.voice.queue_chunk(clean_text)
                     full_turn_spoken_text += clean_text + " "
 
                 # Reconstruct tool calls
@@ -3515,6 +3815,18 @@ class AlphaAgent:
                             gemini_client=self.client,
                             button=fn_args.get("button", "left"),
                             clicks=int(fn_args.get("clicks", 1))
+                        )
+                    elif fn_name == "click_ui_element":
+                        res = self.controller.click_ui_element(
+                            query=fn_args.get("query", ""),
+                            control_type=fn_args.get("control_type"),
+                            button=fn_args.get("button", "left"),
+                            clicks=int(fn_args.get("clicks", 1))
+                        )
+                    elif fn_name == "find_ui_element":
+                        res = self.controller.find_ui_element(
+                            query=fn_args.get("query", ""),
+                            control_type=fn_args.get("control_type")
                         )
                     elif fn_name == "launch_app":
                         res = self.controller.launch_app(

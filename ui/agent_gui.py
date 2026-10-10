@@ -905,22 +905,41 @@ class AgentMainWindow(QMainWindow):
         self.btn_backend_modal.setFixedHeight(32)
         self.btn_backend_modal.clicked.connect(lambda: self._select_backend("modal_qwen"))
 
-        self.btn_deploy_vllm = QPushButton("🚀 DEPLOY / REDEPLOY MODAL vLLM")
-        self.btn_deploy_vllm.setFixedHeight(28)
+        self.btn_deploy_vllm = QPushButton("🚀 DEPLOY ALL-IN-ONE BACKEND TO MODAL")
+        self.btn_deploy_vllm.setFixedHeight(32)
         self.btn_deploy_vllm.setStyleSheet(f"""
             QPushButton {{
-                background: {C['neon_red']}22;
-                color: #ff5577;
-                border: 1px solid {C['neon_red']};
+                background: {C['neon_cyan']}22;
+                color: {C['neon_cyan']};
+                border: 1px solid {C['neon_cyan']};
                 border-radius: 4px;
-                padding: 4px 10px;
+                padding: 6px 12px;
                 font-family: Consolas;
                 font-size: 11px;
                 font-weight: bold;
             }}
-            QPushButton:hover {{ background: {C['neon_red']}; color: #fff; }}
+            QPushButton:hover {{ background: {C['neon_cyan']}; color: #000; }}
         """)
-        self.btn_deploy_vllm.clicked.connect(self._deploy_modal_vllm)
+        self.btn_deploy_vllm.setToolTip("Deploy unified alphalive-backend suite (Qwen2.5-32B AWQ, Orpheus TTS, SDXL Txt2Img, Img2Img, Upscaler, Video, and Audio pipelines)")
+        self.btn_deploy_vllm.clicked.connect(self._deploy_modal_aio)
+
+        self.btn_cache_assets = QPushButton("📦 CACHE MODEL & LORA WEIGHTS (MODAL RUN)")
+        self.btn_cache_assets.setFixedHeight(32)
+        self.btn_cache_assets.setStyleSheet(f"""
+            QPushButton {{
+                background: {C['neon_yellow']}22;
+                color: {C['neon_yellow']};
+                border: 1px solid {C['neon_yellow']};
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-family: Consolas;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background: {C['neon_yellow']}; color: #000; }}
+        """)
+        self.btn_cache_assets.setToolTip("Runs 'modal run deploy/deploy.py' to download, sync, and cache all model & LoRA safetensors to the shared volume (hf-hub-cache)")
+        self.btn_cache_assets.clicked.connect(self._cache_modal_assets)
 
         # Custom System Instructions editor
         self.input_custom_instructions = QTextEdit()
@@ -1279,7 +1298,6 @@ class AgentMainWindow(QMainWindow):
         row_v.addWidget(lbl_o_voice)
         row_v.addWidget(self.combo_orpheus_voice, 1)
         row_v.addWidget(self.btn_test_orpheus)
-        row_v.addWidget(self.btn_deploy_orpheus)
         co_l.addLayout(row_v)
 
         lbl_o_note = QLabel("⚡ Unquantized BF16 precision on vLLM PagedAttention for sub-100ms Time-to-First-Audio-Chunk & human-level emotional inflection.")
@@ -1354,6 +1372,7 @@ class AgentMainWindow(QMainWindow):
         l_engine.addWidget(self.input_gemini_key)
 
         l_engine.addWidget(self.btn_deploy_vllm)
+        l_engine.addWidget(self.btn_cache_assets)
         
         l_engine.addStretch()
         btn_save_engine = QPushButton("💾 SAVE & APPLY ENGINE SETTINGS")
@@ -2214,18 +2233,24 @@ class AgentMainWindow(QMainWindow):
         self.calib_overlay = CalibrationOverlay()
         self.calib_overlay.finished.connect(lambda: self._append_log("Calibration finished.", C["neon_green"]))
 
-    def _deploy_modal_vllm(self):
-        self._update_status("DEPLOYING VLLM (QWEN-32B)...", C["neon_yellow"])
-        self._append_log("[MODAL DEPLOY] Launching Qwen2.5-32B vLLM deployment (modal_vllm.py)...", C["neon_red"])
+    def _deploy_modal_aio(self):
+        self._update_status("DEPLOYING ALL-IN-ONE BACKEND...", C["neon_yellow"])
+        self._append_log("[MODAL DEPLOY] Launching AlphaLive All-in-One deployment (deploy/deploy.py)...", C["neon_cyan"])
         self.btn_deploy_vllm.setEnabled(False)
+        if hasattr(self, "btn_cache_assets"):
+            self.btn_cache_assets.setEnabled(False)
+        if hasattr(self, "btn_deploy_orpheus"):
+            self.btn_deploy_orpheus.setEnabled(False)
 
         def _worker():
             import re
             url_pattern = re.compile(r'https://[a-zA-Z0-9_\-\.]+\.modal\.run[^\s\'"<>]*')
-            deployed_url = ""
+            qwen_url = ""
+            orpheus_url = ""
+            main_url = ""
             try:
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "modal", "deploy", "modal_vllm.py"],
+                    [sys.executable, "-m", "modal", "deploy", "deploy/deploy.py"],
                     cwd=str(ROOT_DIR),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -2240,73 +2265,91 @@ class AgentMainWindow(QMainWindow):
                         match = url_pattern.search(l)
                         if match:
                             candidate = match.group(0).rstrip("/.,:;)")
-                            if "qwen" in candidate.lower() or "serve" in candidate.lower() or not deployed_url:
-                                deployed_url = candidate
+                            cand_low = candidate.lower()
+                            if "qwen" in cand_low or "serve" in cand_low:
+                                qwen_url = candidate
+                            elif "orpheus" in cand_low:
+                                orpheus_url = candidate
+                            elif "alphalive-main-api" in cand_low or "alphalive" in cand_low or not main_url:
+                                main_url = candidate
                 proc.wait()
                 if proc.returncode == 0:
-                    self.signals.log_message.emit("[MODAL DEPLOY] vLLM Deployment succeeded!", C["neon_green"])
-                    if not deployed_url:
-                        cfg_path = ROOT_DIR / "config.json"
-                        profile = ""
-                        if cfg_path.exists():
-                            try:
-                                with open(cfg_path, 'r', encoding='utf-8') as f:
-                                    c = json.load(f)
-                                    profile = c.get("Global", {}).get("ModalProfile", "")
-                                    if not profile:
-                                        m_ep = c.get("Global", {}).get("ModalEndpoint", "")
-                                        if "--" in m_ep and "https://" in m_ep:
-                                            profile = m_ep.split("https://")[1].split("--")[0]
-                            except Exception:
-                                pass
-                        if profile:
-                            deployed_url = f"https://{profile}--qwen2-5-32b-instruct-awq-serve.modal.run"
+                    self.signals.log_message.emit("[MODAL DEPLOY] All-in-One Backend deployment succeeded!", C["neon_green"])
 
-                    if deployed_url:
-                        from core.alpha_agent import normalize_endpoint
-                        norm_url = normalize_endpoint(deployed_url)
-                        def _set_ep():
-                            self.input_modal_endpoint.setText(norm_url)
+                    # Fallback check config.json for profile if URLs weren't explicitly captured in stdout
+                    cfg_path = ROOT_DIR / "config.json"
+                    profile = ""
+                    if cfg_path.exists():
+                        try:
+                            with open(cfg_path, 'r', encoding='utf-8') as f:
+                                c = json.load(f)
+                                profile = c.get("Global", {}).get("ModalProfile", "")
+                                if not profile:
+                                    m_ep = c.get("Global", {}).get("ModalEndpoint", "")
+                                    if "--" in m_ep and "https://" in m_ep:
+                                        profile = m_ep.split("https://")[1].split("--")[0]
+                        except Exception:
+                            pass
+
+                    if profile:
+                        if not qwen_url:
+                            qwen_url = f"https://{profile}--alphalive-backend-serve.modal.run"
+                        if not orpheus_url:
+                            orpheus_url = f"https://{profile}--alphalive-backend-orpheusttsserver-web-app.modal.run"
+
+                    from core.alpha_agent import normalize_endpoint
+                    def _apply_endpoints():
+                        if qwen_url:
+                            norm_qwen = normalize_endpoint(qwen_url)
+                            self.input_modal_endpoint.setText(norm_qwen)
                             self.input_modal_model.setText("qwen2.5-32b-instruct-awq")
                             self._save_modal_endpoint()
                             self._save_modal_model()
                             self._select_backend("modal_qwen")
-                            self.signals.log_message.emit(f"[MODAL DEPLOY] Extracted Endpoint: {norm_url}", C["neon_green"])
-                            self.signals.log_message.emit("[MODAL DEPLOY] Configured model 'qwen2.5-32b-instruct-awq' & activated modal_qwen backend!", C["neon_cyan"])
-                            self._update_status("VLLM DEPLOYED - CHECKING...", C["neon_cyan"])
-                            self._trigger_modal_health_check()
-                        self.signals.run_on_gui.emit(_set_ep)
-                    else:
-                        self.signals.run_on_gui.emit(self._trigger_modal_health_check)
+                            self.signals.log_message.emit(f"[MODAL DEPLOY] Configured Qwen vLLM Endpoint: {norm_qwen}", C["neon_green"])
+                        if orpheus_url:
+                            norm_orph = normalize_endpoint(orpheus_url)
+                            self.input_orpheus_endpoint.setText(norm_orph)
+                            self.combo_tts_engine.setCurrentIndex(1)
+                            self._on_tts_engine_changed(1)
+                            self.signals.log_message.emit(f"[MODAL DEPLOY] Configured Orpheus TTS Endpoint: {norm_orph}", C["neon_green"])
+                        if main_url:
+                            self.signals.log_message.emit(f"[MODAL DEPLOY] Studio & Media Gateway: {main_url}", C["neon_magenta"])
+
+                        self._update_status("BACKEND DEPLOYED - CHECKING...", C["neon_cyan"])
+                        self._trigger_modal_health_check()
+                        if orpheus_url:
+                            self._trigger_orpheus_health_check()
+
+                    self.signals.run_on_gui.emit(_apply_endpoints)
                 else:
                     self.signals.log_message.emit(f"[MODAL DEPLOY] Exited with code {proc.returncode}", C["neon_red"])
-                    self.signals.run_on_gui.emit(lambda: self._update_status("VLLM DEPLOY FAILED", C["neon_red"]))
+                    self.signals.run_on_gui.emit(lambda: self._update_status("DEPLOY FAILED", C["neon_red"]))
             except Exception as e:
                 self.signals.log_message.emit(f"[MODAL DEPLOY ERROR] {e}", C["neon_red"])
-                self.signals.run_on_gui.emit(lambda: self._update_status("VLLM DEPLOY ERROR", C["neon_red"]))
+                self.signals.run_on_gui.emit(lambda: self._update_status("DEPLOY ERROR", C["neon_red"]))
             finally:
-                self.signals.run_on_gui.emit(lambda: self.btn_deploy_vllm.setEnabled(True))
+                def _re_enable():
+                    self.btn_deploy_vllm.setEnabled(True)
+                    if hasattr(self, "btn_cache_assets"):
+                        self.btn_cache_assets.setEnabled(True)
+                    if hasattr(self, "btn_deploy_orpheus"):
+                        self.btn_deploy_orpheus.setEnabled(True)
+                self.signals.run_on_gui.emit(_re_enable)
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _run_gui_callable(self, fn):
-        try:
-            fn()
-        except Exception as e:
-            print(f"[GUI callback error]: {e}", flush=True)
-
-    def _deploy_orpheus_modal(self):
-        self._update_status("DEPLOYING ORPHEUS TTS...", C["neon_yellow"])
-        self._append_log("[ORPHEUS DEPLOY] Launching deployment...", C["neon_green"])
-        self.btn_deploy_orpheus.setEnabled(False)
+    def _cache_modal_assets(self):
+        self._update_status("CACHING MODAL ASSETS (MODAL RUN)...", C["neon_yellow"])
+        self._append_log("[MODAL CACHE] Launching AssetSync (modal run deploy/deploy.py) to download model & LoRA weights...", C["neon_cyan"])
+        if hasattr(self, "btn_deploy_vllm"):
+            self.btn_deploy_vllm.setEnabled(False)
+        self.btn_cache_assets.setEnabled(False)
 
         def _worker():
-            import re
-            url_pattern = re.compile(r'https://[a-zA-Z0-9_\-\.]+\.modal\.run[^\s\'"<>]*')
-            deployed_url = ""
             try:
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "modal", "deploy", "orpheus_modal.py"],
+                    [sys.executable, "-m", "modal", "run", "deploy/deploy.py"],
                     cwd=str(ROOT_DIR),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -2317,57 +2360,37 @@ class AgentMainWindow(QMainWindow):
                 for line in proc.stdout:
                     l = line.strip()
                     if l:
-                        self.signals.log_message.emit(f"[ORPHEUS MODAL] {l}", C["text_dim"])
-                        match = url_pattern.search(l)
-                        if match:
-                            candidate = match.group(0).rstrip("/.,:;)")
-                            if "orpheus" in candidate.lower() or not deployed_url:
-                                deployed_url = candidate
+                        self.signals.log_message.emit(f"[MODAL ASSETS] {l}", C["text_dim"])
                 proc.wait()
                 if proc.returncode == 0:
-                    self.signals.log_message.emit("[ORPHEUS DEPLOY] Deployment succeeded!", C["neon_green"])
-                    
-                    # Fallback check if URL wasn't matched directly in stdout
-                    if not deployed_url:
-                        cfg_path = ROOT_DIR / "config.json"
-                        profile = ""
-                        if cfg_path.exists():
-                            try:
-                                with open(cfg_path, 'r', encoding='utf-8') as f:
-                                    c = json.load(f)
-                                    profile = c.get("Global", {}).get("ModalProfile", "")
-                                    if not profile:
-                                        m_ep = c.get("Global", {}).get("ModalEndpoint", "")
-                                        if "--" in m_ep and "https://" in m_ep:
-                                            profile = m_ep.split("https://")[1].split("--")[0]
-                            except Exception:
-                                pass
-                        if profile:
-                            deployed_url = f"https://{profile}--orpheus-tts-vllm-orpheusttsserver-web-app.modal.run"
-
-                    if deployed_url:
-                        def _set_ep():
-                            self.input_orpheus_endpoint.setText(deployed_url)
-                            self.combo_tts_engine.setCurrentIndex(1)  # Orpheus TTS
-                            self._on_tts_engine_changed(1)  # Activates on agent & saves to config.json
-                            self.signals.log_message.emit(f"[ORPHEUS DEPLOY] Extracted Endpoint: {deployed_url}", C["neon_green"])
-                            self.signals.log_message.emit("[ORPHEUS DEPLOY] Successfully inserted into Settings & activated as primary TTS engine!", C["neon_cyan"])
-                            self._update_status("ORPHEUS DEPLOYED - CHECKING...", C["neon_cyan"])
-                            self._trigger_orpheus_health_check()
-                        self.signals.run_on_gui.emit(_set_ep)
-                    else:
-                        self.signals.log_message.emit("[ORPHEUS DEPLOY WARNING] Modal app deployed, but web URL was not detected in output. Please verify modal app list.", C["neon_yellow"])
-                        self.signals.run_on_gui.emit(self._trigger_orpheus_health_check)
+                    self.signals.log_message.emit("[MODAL CACHE] Model & LoRA weights successfully cached into Modal volume!", C["neon_green"])
+                    self.signals.run_on_gui.emit(lambda: self._update_status("ASSETS CACHED TO VOLUME", C["neon_green"]))
                 else:
-                    self.signals.log_message.emit(f"[ORPHEUS DEPLOY] Exited with code {proc.returncode}", C["neon_red"])
-                    self.signals.run_on_gui.emit(lambda: self._update_status("ORPHEUS DEPLOY FAILED", C["neon_red"]))
+                    self.signals.log_message.emit(f"[MODAL CACHE] Asset sync exited with code {proc.returncode}", C["neon_red"])
+                    self.signals.run_on_gui.emit(lambda: self._update_status("ASSET CACHING FAILED", C["neon_red"]))
             except Exception as e:
-                self.signals.log_message.emit(f"[ORPHEUS DEPLOY ERROR] {e}", C["neon_red"])
-                self.signals.run_on_gui.emit(lambda: self._update_status("ORPHEUS DEPLOY ERROR", C["neon_red"]))
+                self.signals.log_message.emit(f"[MODAL CACHE ERROR] {e}", C["neon_red"])
+                self.signals.run_on_gui.emit(lambda: self._update_status("ASSET CACHING ERROR", C["neon_red"]))
             finally:
-                self.signals.run_on_gui.emit(lambda: self.btn_deploy_orpheus.setEnabled(True))
+                def _re_enable():
+                    if hasattr(self, "btn_deploy_vllm"):
+                        self.btn_deploy_vllm.setEnabled(True)
+                    self.btn_cache_assets.setEnabled(True)
+                self.signals.run_on_gui.emit(_re_enable)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _run_gui_callable(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            print(f"[GUI callback error]: {e}", flush=True)
+
+    def _deploy_modal_vllm(self):
+        self._deploy_modal_aio()
+
+    def _deploy_orpheus_modal(self):
+        self._deploy_modal_aio()
 
     def _test_orpheus_audio(self):
         raw_ep = self.input_orpheus_endpoint.text().strip()

@@ -92,7 +92,7 @@ def download_weights():
     image=vllm_image,
     gpu="A100-80GB",
     timeout=20 * MINUTES,
-    scaledown_window=10 * MINUTES,
+    scaledown_window=5 * MINUTES,
     max_containers=1,
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
@@ -138,8 +138,8 @@ def serve():
     print("[AlphaCore] Launching 32B vLLM engine:")
     print(" ".join(cmd))
     
-    # Executing cleanly and blocking to keep the web server container alive
-    subprocess.run(cmd)
+    # Non-blocking launch: modal.web_server requires the entry function to return so Modal can bind port and transition from cold boot to live
+    subprocess.Popen(cmd)
 
 
 # --- Health Verification & Connection Info ---

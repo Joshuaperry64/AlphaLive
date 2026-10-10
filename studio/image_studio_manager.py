@@ -422,7 +422,7 @@ class ImageStudioManager:
                 if not lookup_fn:
                     raise RuntimeError("Modal Cls from_name function not available")
                 
-                app_name = os.getenv("MODAL_APP_NAME", "alphalive-aio-backend")
+                app_name = os.getenv("MODAL_APP_NAME", "alphalive-backend")
                 Txt2ImgCls = lookup_fn(app_name, "Txt2Img")
                 service = Txt2ImgCls()
 
@@ -570,7 +570,7 @@ class ImageStudioManager:
                 lookup_fn = getattr(modal.Cls, "from_name", None) or getattr(modal.Cls, "lookup", None)
                 if not lookup_fn:
                     raise RuntimeError("Modal Cls from_name function not available")
-                app_name = os.getenv("MODAL_APP_NAME", "alphalive-aio-backend")
+                app_name = os.getenv("MODAL_APP_NAME", "alphalive-backend")
                 UpscalerCls = lookup_fn(app_name, "Upscaler")
                 service = UpscalerCls()
                 res = service.upscale_image.remote(

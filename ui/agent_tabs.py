@@ -663,6 +663,7 @@ class AgentMemoryTab(QWidget):
 class ImageGenWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
 
     def __init__(self, studio_mgr, kwargs):
         super().__init__()
@@ -671,6 +672,10 @@ class ImageGenWorker(QThread):
 
     def run(self):
         try:
+            def _cb(step, total, msg):
+                self.progress.emit(step, total, msg)
+
+            self.kwargs["progress_callback"] = _cb
             res = self.studio_mgr.generate_image(**self.kwargs)
             self.finished.emit(res)
         except Exception as e:
@@ -679,16 +684,26 @@ class ImageGenWorker(QThread):
 class ImageUpscaleWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
 
-    def __init__(self, studio_mgr, image_path, upscaler_model):
+    def __init__(self, studio_mgr, image_path, scale=4, model_name="ultrasharp-4x"):
         super().__init__()
         self.studio_mgr = studio_mgr
         self.image_path = image_path
-        self.upscaler_model = upscaler_model
+        self.scale = scale
+        self.model_name = model_name
 
     def run(self):
         try:
-            res = self.studio_mgr.upscale_image(self.image_path, upscaler_model=self.upscaler_model)
+            def _cb(step, total, msg):
+                self.progress.emit(step, total, msg)
+
+            res = self.studio_mgr.upscale_image(
+                image_path=self.image_path,
+                scale=self.scale,
+                model_name=self.model_name,
+                progress_callback=_cb
+            )
             self.finished.emit(res)
         except Exception as e:
             self.error.emit(str(e))
@@ -989,14 +1004,22 @@ class AgentStudioTab(QWidget):
         self.btn_slideshow.clicked.connect(self._toggle_slideshow)
         nav_bar.addWidget(self.btn_slideshow)
 
-        self.btn_save = QPushButton("?? SAVE")
+        self.btn_save = QPushButton("💾 SAVE")
         self.btn_save.setFixedSize(65, 26)
         self.btn_save.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_save.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_green']}; border: 1px solid {C['border']}; border-radius: 4px;")
         self.btn_save.clicked.connect(self._save_current_image)
         nav_bar.addWidget(self.btn_save)
 
-        self.btn_fullscreen = QPushButton("? FULLSCREEN")
+        self.btn_upscale = QPushButton("⚡ UPSCALE")
+        self.btn_upscale.setFixedSize(85, 26)
+        self.btn_upscale.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_upscale.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_yellow']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_upscale.setToolTip("Neural Super-Resolution (4x UltraSharp / Modal A10G)")
+        self.btn_upscale.clicked.connect(self._on_manual_upscale)
+        nav_bar.addWidget(self.btn_upscale)
+
+        self.btn_fullscreen = QPushButton("⛶ FULLSCREEN")
         self.btn_fullscreen.setFixedSize(95, 26)
         self.btn_fullscreen.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_fullscreen.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_purple']}; border: 1px solid {C['border']}; border-radius: 4px;")
@@ -1175,21 +1198,85 @@ class AgentStudioTab(QWidget):
     def _on_manual_generate(self):
         prompt = self.txt_prompt.text().strip()
         if not prompt or not self.sm: return
-        self.lbl_pipeline_status.setText("Dispatching manual generation to Modal...")
+        self.lbl_pipeline_status.setText("Connecting to Modal cluster...")
         self.btn_generate.setEnabled(False)
-        m = self.combo_model.currentData()
-        l = self.combo_lora.currentData()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(25)
+        m = self.combo_model.currentData() or "jugg"
+        l = self.combo_lora.currentData() or "none"
 
-        def _work():
-            res = self.sm.generate_image(prompt=prompt, model_name=m, lora=l)
+        kwargs = {
+            "prompt": prompt,
+            "model_name": m,
+            "lora": l,
+            "steps": 25,
+            "guidance": 7.0
+        }
+
+        self.gen_worker = ImageGenWorker(self.sm, kwargs)
+        
+        def _on_prog(step, total, msg):
+            self.progress_bar.setMaximum(max(total, 1))
+            self.progress_bar.setValue(min(step, total))
+            self.lbl_pipeline_status.setText(msg)
+
+        def _on_done(res):
+            self.progress_bar.setValue(self.progress_bar.maximum())
             p = res.get("image_path")
             if p and os.path.exists(p):
-                QTimer.singleShot(0, lambda: self.on_image_generated(p, res))
-            QTimer.singleShot(0, lambda: self.btn_generate.setEnabled(True))
-            QTimer.singleShot(0, lambda: self.lbl_pipeline_status.setText("Ready"))
+                self.on_image_generated(p, res)
+            self.btn_generate.setEnabled(True)
+            self.lbl_pipeline_status.setText("Ready")
 
-        import threading
-        threading.Thread(target=_work, daemon=True).start()
+        def _on_err(err_msg):
+            self.lbl_pipeline_status.setText(f"Error: {err_msg[:60]}")
+            self.btn_generate.setEnabled(True)
+
+        self.gen_worker.progress.connect(_on_prog)
+        self.gen_worker.finished.connect(_on_done)
+        self.gen_worker.error.connect(_on_err)
+        self.gen_worker.start()
+
+    def _on_manual_upscale(self):
+        if not self.current_img_path or not os.path.exists(self.current_img_path):
+            QMessageBox.warning(self, "No Image", "No image currently displayed to upscale.")
+            return
+        if not self.sm: return
+
+        self.btn_upscale.setEnabled(False)
+        self.lbl_pipeline_status.setText("Upscaling 4x via Modal Neural Pipeline...")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximum(100)
+
+        self.upscale_worker = ImageUpscaleWorker(
+            self.sm,
+            self.current_img_path,
+            scale=4,
+            model_name="ultrasharp-4x"
+        )
+
+        def _on_prog(step, total, msg):
+            self.progress_bar.setMaximum(max(total, 1))
+            self.progress_bar.setValue(min(step, total))
+            self.lbl_pipeline_status.setText(msg)
+
+        def _on_done(res):
+            self.progress_bar.setValue(100)
+            up_path = res.get("upscaled_path")
+            if up_path and os.path.exists(up_path):
+                self.lbl_pipeline_status.setText("Upscale 4x complete!")
+                self._refresh_history()
+                self._load_image_by_index(0)
+            self.btn_upscale.setEnabled(True)
+
+        def _on_err(err_msg):
+            self.lbl_pipeline_status.setText(f"Upscale error: {err_msg[:60]}")
+            self.btn_upscale.setEnabled(True)
+
+        self.upscale_worker.progress.connect(_on_prog)
+        self.upscale_worker.finished.connect(_on_done)
+        self.upscale_worker.error.connect(_on_err)
+        self.upscale_worker.start()
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Left:

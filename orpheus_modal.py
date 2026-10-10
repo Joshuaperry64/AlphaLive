@@ -125,7 +125,7 @@ def deinterleave_orpheus_tokens(token_ids: list[int]) -> tuple[list[int], list[i
     gpu="L4",
     image=orpheus_image,
     timeout=20 * MINUTES,
-    scaledown_window=10 * MINUTES,
+    scaledown_window=5 * MINUTES,
     max_containers=1,
     volumes={"/root/.cache/huggingface": hf_cache_vol},
     secrets=[hf_secret],

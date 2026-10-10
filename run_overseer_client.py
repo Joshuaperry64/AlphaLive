@@ -19,7 +19,7 @@ if BASE_DIR not in sys.path:
 
 from PyQt6.QtWidgets import QApplication
 from core.workspace_bridge import WorkspaceClient
-from ui.overlays import OverseerControlPanel
+from ui.overseer_dashboard import EnhancedOverseerDashboard
 
 
 def main():
@@ -30,7 +30,7 @@ def main():
     args = parser.parse_args()
 
     print("=" * 60)
-    print(" ALPHALIVE // COVERT OVERSEER COCKPIT (REMOTE)")
+    print(" ALPHALIVE // ENHANCED OVERSEER COCKPIT (REMOTE)")
     print(f" Connecting to AI Workstation at ws://{args.host}:{args.port}")
     print("=" * 60)
 
@@ -39,13 +39,12 @@ def main():
     # Initialize Remote Bridge Client
     client = WorkspaceClient(host=args.host, port=args.port)
 
-    # Instantiate Touch-Optimized Overseer HUD
-    panel = OverseerControlPanel(None, remote_client=client)
+    # Instantiate Enhanced Overseer Dashboard
+    panel = EnhancedOverseerDashboard(remote_client=client)
     panel.show()
-    panel.apply_capture_exclusion()
 
     # Automatically connect to host
-    panel.connect_to_remote_host(host=args.host, port=args.port)
+    panel.remote_client.connect(host=args.host, port=args.port)
 
     # Optional local microphone listener for Workplace 1
     voice_listener = None

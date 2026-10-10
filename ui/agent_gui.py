@@ -348,6 +348,11 @@ class MiniStatusHUD(QWidget):
             color, bg_color, text = C["neon_cyan"], "rgba(4, 18, 20, 240)", "READY"
         elif self.current_state == "listening":
             color, bg_color, text = C["neon_green"], "rgba(4, 22, 10, 240)", "LISTENING"
+        elif self.current_state in ("coldboot", "waiting", "blocked"):
+            b_label = "COLD BOOT" if self.current_state == "coldboot" else self.current_state.upper()
+            if details:
+                b_label = details[:12].upper()
+            color, bg_color, text = C["neon_yellow"], "rgba(35, 25, 4, 245)", b_label
         elif self.current_state in ("generating", "working"):
             color, bg_color, text = C["neon_yellow"], "rgba(22, 18, 4, 240)", "GENERATING" if not details else details[:11].upper()
         elif self.current_state == "processing":
@@ -496,7 +501,7 @@ class AgentMainWindow(QMainWindow):
                 is_busy_fn=lambda: self.agent.voice.is_busy(),
                 duplex_mode=self.duplex_mode,
                 agent_voice=self.agent.voice,
-                on_state_callback=lambda st: self.signals.status_phase.emit(st, ""),
+                on_state_callback=lambda st: self.signals.status_phase.emit(st, "") if (self.is_connected and not getattr(self, "_startup_checking", False)) else None,
                 device_index=saved_mic
             )
             self.voice_listener.set_sensitivity(self._load_saved_mic_sensitivity())
@@ -1823,9 +1828,11 @@ class AgentMainWindow(QMainWindow):
         self._update_status("STANDBY // OFFLINE", C["text_dim"])
         if self.hud:
             self.hud.set_state("disconnected")
+        self._update_input_lock()
 
     def _startup_cold_boot_check(self, needs_vllm: bool, needs_orpheus: bool):
         self._startup_checking = True
+        self._update_input_lock()
         self._startup_gen = getattr(self, "_startup_gen", 0) + 1
         gen = self._startup_gen
         targets = []
@@ -1918,8 +1925,9 @@ class AgentMainWindow(QMainWindow):
         if HAS_SR and self.voice_listener and self.mic_enabled:
             self.voice_listener.start()
         self._update_status("READY // LISTENING", C["neon_green"])
-        if self.hud:
+        if hasattr(self, "hud") and self.hud:
             self.hud.set_state("listening")
+        self._update_input_lock()
 
         # First-time session greeting in active persona (unless in Privacy mode)
         self._check_first_time_session_intro()
@@ -2453,21 +2461,42 @@ class AgentMainWindow(QMainWindow):
         self._append_log("[ABORT] Stopped by user.", C["neon_red"])
         self._set_phase("error", "Aborted")
 
+    def _update_input_lock(self):
+        if not hasattr(self, "cmd_input") or not self.cmd_input:
+            return
+        if not hasattr(self, "btn_send") or not self.btn_send:
+            return
+            
+        is_locked = False
+        placeholder = "Type command or speak..."
+        
+        if getattr(self, "_startup_checking", False):
+            is_locked = True
+            placeholder = "System cold booting..."
+            if hasattr(self, "hud") and self.hud: self.hud.set_state("coldboot")
+        elif not getattr(self, "is_connected", False):
+            is_locked = True
+            placeholder = "Agent offline..."
+            if hasattr(self, "hud") and self.hud: self.hud.set_state("blocked", "OFFLINE")
+        elif getattr(self.agent, "is_running", False):
+            is_locked = True
+            placeholder = "Agent working..."
+        else:
+            tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
+            if tts_on and hasattr(self.agent, "voice") and self.agent.voice:
+                if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
+                    is_locked = True
+                    placeholder = "Speech playing..."
+                    
+        self.cmd_input.setEnabled(not is_locked)
+        self.cmd_input.setPlaceholderText(placeholder)
+        self.btn_send.setEnabled(not is_locked)
+
     def _on_speech_playback_started(self):
-        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
-        if tts_on:
-            if hasattr(self, "cmd_input") and self.cmd_input:
-                self.cmd_input.setEnabled(False)
-                self.cmd_input.setPlaceholderText("Speech playing... Text input locked until audio completes.")
-            if hasattr(self, "btn_send") and self.btn_send:
-                self.btn_send.setEnabled(False)
+        self._update_input_lock()
 
     def _on_speech_playback_finished(self):
-        if hasattr(self, "cmd_input") and self.cmd_input:
-            self.cmd_input.setEnabled(True)
-            self.cmd_input.setPlaceholderText("Type command or speak...")
-        if hasattr(self, "btn_send") and self.btn_send:
-            self.btn_send.setEnabled(True)
+        self._update_input_lock()
 
     def _send_text_command(self):
         cmd = self.cmd_input.text().strip()
@@ -2528,6 +2557,7 @@ class AgentMainWindow(QMainWindow):
             self.agent.abort()
 
         self._set_phase("generating", "THINKING...")
+        self._update_input_lock()
 
         def _worker():
             loop = asyncio.new_event_loop()
@@ -2665,6 +2695,7 @@ class AgentMainWindow(QMainWindow):
             self._set_phase("ready")
         else:
             self._set_phase("standby")
+        self._update_input_lock()
 
     def _open_session_selector(self):
         dlg = SessionSelectorDialog(self.agent.current_session, self.agent.session_manager, self)
@@ -2917,6 +2948,8 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_studio.setText("STUDIO: OFF")
             self.btn_t_studio.setStyleSheet("color: #708caa;")
             self.btn_t_studio.setChecked(False)
+            if hasattr(self.agent, "voice") and self.agent.voice:
+                self.agent.voice.reset_state()
             self._append_log("[MODE] Neural Studio Mode DISENGAGED.", C["text_dim"])
             self._update_status("STUDIO MODE: OFF", C["text_dim"])
 

@@ -2569,6 +2569,10 @@ class AlphaAgent:
 
     def _is_desktop_action_command(self, text: str) -> bool:
         """Determine whether Architect's input is an explicit OS desktop control command."""
+        t = text.lower().strip()
+        if "studio" in t:
+            return False
+            
         if getattr(self, "autonomous_mode", False) or getattr(self, "identity_mode", False):
             return True
         if not getattr(self, "desktop_control", True):

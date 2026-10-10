@@ -43,13 +43,13 @@ image = (
 
 from shared_app import app
 
-image = image.add_local_python_source("shared_app")
-
 with image.imports():
     import torch
     from diffusers import WanImageToVideoPipeline
     from diffusers.utils import export_to_video
     from PIL import Image
+
+image = image.add_local_python_source("shared_app")
 
 cache_volume = modal.Volume.from_name("hf-hub-cache", create_if_missing=True)
 outputs_volume = modal.Volume.from_name("outputs", create_if_missing=True)

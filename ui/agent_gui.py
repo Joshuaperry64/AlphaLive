@@ -1265,7 +1265,7 @@ class AgentMainWindow(QMainWindow):
             "⚡ Google Gemini (Natural Leda)",
             "🔥 Orpheus TTS (Modal / vLLM - Ultra Low Latency BF16)",
             "💻 pyttsx3 Local (Robotic/Fast)",
-            "🔇 OFF (Muted)"
+
         ])
         self.combo_tts_engine.setFixedHeight(30)
         self.combo_tts_engine.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
@@ -1586,7 +1586,7 @@ class AgentMainWindow(QMainWindow):
             elif idx == 2:
                 engine = "pyttsx3"
             else:
-                engine = "off"
+                engine = "gemini"
             
             from core.alpha_agent import normalize_endpoint
             orpheus_ep = normalize_endpoint(self.input_orpheus_endpoint.text().strip()) if hasattr(self, 'input_orpheus_endpoint') else ""
@@ -1667,12 +1667,11 @@ class AgentMainWindow(QMainWindow):
         f_layout.addWidget(lbl_funcs)
 
         self.btn_t_mic = QPushButton("MIC: ON")
-        self.btn_t_tts = QPushButton("TTS: ON")
         self.btn_t_desk = QPushButton("DESK: ON")
         self.btn_t_vis = QPushButton("VISION: ON")
         self.btn_t_proact = QPushButton("PROACTIVE: OFF")
 
-        for btn in [self.btn_t_mic, self.btn_t_tts, self.btn_t_desk, self.btn_t_vis, self.btn_t_proact]:
+        for btn in [self.btn_t_mic, self.btn_t_desk, self.btn_t_vis, self.btn_t_proact]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
             btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
@@ -1717,7 +1716,6 @@ class AgentMainWindow(QMainWindow):
         s_layout.addWidget(self.card_modes)
 
         self.btn_t_mic.clicked.connect(self._toggle_quick_mic)
-        self.btn_t_tts.clicked.connect(self._toggle_quick_tts)
         self.btn_t_auto.clicked.connect(self._toggle_quick_auto)
         self.btn_t_desk.clicked.connect(self._toggle_quick_desk)
         self.btn_t_vis.clicked.connect(self._toggle_quick_vis)
@@ -1731,7 +1729,6 @@ class AgentMainWindow(QMainWindow):
         self.autonomous_loop_timer.timeout.connect(self._on_autonomous_loop_tick)
         
         self.btn_t_mic.setToolTip("Toggle microphone streaming input (On/Off)")
-        self.btn_t_tts.setToolTip("Toggle synthetic speech voice feedback (On/Off)")
         self.btn_t_auto.setToolTip("Fast Automation Mode: Immediate tool execution with barge-in support")
         self.btn_t_desk.setToolTip("Desktop OS Control: Allow mouse clicks and keyboard actions")
         self.btn_t_vis.setToolTip("Optical Telemetry: Allow desktop screenshot captures")
@@ -2775,15 +2772,6 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_mic.setStyleSheet("color: #708caa;")
             self.btn_t_mic.setChecked(False)
 
-        if hasattr(self, 'combo_tts_engine') and self.combo_tts_engine.currentIndex() != 3:
-            self.btn_t_tts.setText("TTS: ON")
-            self.btn_t_tts.setStyleSheet("color: #00ff88;")
-            self.btn_t_tts.setChecked(True)
-        else:
-            self.btn_t_tts.setText("TTS: OFF")
-            self.btn_t_tts.setStyleSheet("color: #708caa;")
-            self.btn_t_tts.setChecked(False)
-
         if getattr(self.agent, "automation_mode", False):
             self.btn_t_auto.setText("AUTO: ON")
             self.btn_t_auto.setStyleSheet("color: #ffe600;")
@@ -2870,21 +2858,6 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_mic.setText("MIC: ON")
             self.btn_t_mic.setStyleSheet("color: #00ffdc;")
             self._update_status("MIC: ON", C["neon_cyan"])
-
-    def _toggle_quick_tts(self):
-        if self.combo_tts_engine.currentIndex() != 3:
-            self.combo_tts_engine.setCurrentIndex(3) # OFF
-            self._on_tts_engine_changed(3)
-            self._on_speech_playback_finished()
-            self.btn_t_tts.setText("TTS: OFF")
-            self.btn_t_tts.setStyleSheet("color: #708caa;")
-            self._update_status("TTS: OFF", C["neon_yellow"])
-        else:
-            self.combo_tts_engine.setCurrentIndex(0) # Standard
-            self._on_tts_engine_changed(0)
-            self.btn_t_tts.setText("TTS: ON")
-            self.btn_t_tts.setStyleSheet("color: #00ff88;")
-            self._update_status("TTS: ON", C["neon_green"])
 
     def _toggle_quick_auto(self):
         self.agent.automation_mode = not getattr(self.agent, "automation_mode", False)
@@ -3174,14 +3147,24 @@ def main():
     painter.drawRoundedRect(22, 182, 350, 8, 2, 2)
     painter.end()
 
-    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-    splash.show()
-    app.processEvents()
+    is_aster_worker = "--aster-worker" in sys.argv
 
-    win = AgentMainWindow()
-    win.show()
-    splash.finish(win)
-    app.exec()
+    if is_aster_worker:
+        print("[AlphaLive] Starting in ASTER Worker mode (Invisible Background Service)...", flush=True)
+        win = AgentMainWindow()
+        if hasattr(win, 'hud') and win.hud:
+            win.hud.hide()
+        # Do not show splash or main window
+        app.exec()
+    else:
+        splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+        splash.show()
+        app.processEvents()
+
+        win = AgentMainWindow()
+        win.show()
+        splash.finish(win)
+        app.exec()
 
 
 if __name__ == "__main__":

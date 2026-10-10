@@ -515,7 +515,7 @@ class VoiceEngine:
                             pass
 
     def _generate_and_play(self, clean_text: str):
-        if self._interrupted.is_set() or self.engine_type == "off":
+        if self._interrupted.is_set():
             return
 
         if self.engine_type == "pyttsx3" and self.pyttsx3_engine:
@@ -743,9 +743,7 @@ class VoiceListener:
         print("[VoiceListener] Stopped microphone listener.", flush=True)
 
     def _is_tts_active(self) -> bool:
-        if self.agent_voice and hasattr(self.agent_voice, "engine_type"):
-            return self.agent_voice.engine_type != "off"
-        return False
+        return self.agent_voice is not None
 
     def _listen_worker(self):
         """Self-healing loop that continuously captures speech phrases and auto-recovers
@@ -1597,6 +1595,8 @@ MOOD_PRESETS = {
 
 class AlphaAgent:
     def set_tts_engine(self, engine_type: str, orpheus_endpoint: str = None, orpheus_voice: str = None):
+        if engine_type == "off":
+            engine_type = "gemini"
         self.tts_engine = engine_type
         if hasattr(self, 'voice') and self.voice:
             self.voice.engine_type = engine_type
@@ -1617,6 +1617,8 @@ class AlphaAgent:
                 api_key = c.get("Global", {}).get("ApiKey", "")
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
         self.tts_engine = c.get("Global", {}).get("TTSEngine", "gemini") if 'c' in locals() else "gemini"
+        if self.tts_engine == "off":
+            self.tts_engine = "gemini"
         self.orpheus_endpoint = c.get("Global", {}).get("OrpheusEndpoint", "") if 'c' in locals() else ""
         self.orpheus_voice = c.get("Global", {}).get("OrpheusVoice", "tara") if 'c' in locals() else "tara"
         self.automation_mode = c.get("Global", {}).get("AutomationMode", False) if 'c' in locals() else False

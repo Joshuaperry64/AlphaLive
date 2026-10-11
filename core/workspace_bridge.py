@@ -21,6 +21,9 @@ import websockets
 
 logger = logging.getLogger("AlphaLive.WorkspaceBridge")
 
+PROTOCOL_VERSION = 2
+_EVENT_TELEMETRY_KEYS = {"monologue", "memory_event"}
+
 
 def get_local_ip() -> str:
     """Detect primary local IPv4 address on the LAN."""
@@ -64,22 +67,33 @@ class WorkspaceServer:
     Broadcasts live stream-of-consciousness monologue and telemetry to connected Overseer clients.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8766, token: Optional[str] = None):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8766, token: Optional[str] = None):
         self.host = host
         self.port = port
         self.token = resolve_bridge_token(token)
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
         self.on_command: Optional[Callable[[str, dict], None]] = None
+        # Fired with the new authenticated-Overseer count on every change.
+        self.on_overseer_change: Optional[Callable[[int], None]] = None
+        # Monotonic timestamp of the last authenticated Overseer contact.
+        self.last_presence: float = 0.0
+        self._presence_lock = threading.Lock()
         self._server = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._telemetry_sequence = 0
         self._latest_telemetry: dict = {
             "agent_state": "idle",
             "mood": "Tactical & Focused",
             "is_paused": False,
-            "monologue": "Workstation initialized. Standing by.",
             "active_task": "",
+            "is_connected": False,
+            "identity_mode": False,
+            "autonomous_mode": False,
+            "unobserved_mode": False,
+            "pacing": 30,
+            "max_steps": 3,
         }
 
     def start(self):
@@ -99,16 +113,54 @@ class WorkspaceServer:
             )
         print(f"[WorkspaceBridge] Server active on ws://{self.host}:{self.port} (LAN: {get_local_ip()}:{self.port})", flush=True)
 
+    def overseer_count(self) -> int:
+        """Number of authenticated Overseer clients currently attached."""
+        with self._presence_lock:
+            return len(self.clients)
+
+    def has_overseer(self) -> bool:
+        """True while at least one authenticated Overseer cockpit is connected.
+
+        Also refreshes the presence timestamp so callers can implement grace windows.
+        """
+        with self._presence_lock:
+            present = len(self.clients) > 0
+            if present:
+                self.last_presence = time.monotonic()
+            return present
+
+    def seconds_since_presence(self) -> float:
+        """Seconds since the last authenticated Overseer contact (inf if never)."""
+        with self._presence_lock:
+            if not self.last_presence:
+                return float("inf")
+            return time.monotonic() - self.last_presence
+
+    def _notify_presence(self):
+        """Notify listeners with the current authenticated-Overseer count."""
+        count = self.overseer_count()
+        if self.on_overseer_change:
+            try:
+                self.on_overseer_change(count)
+            except Exception:
+                pass
+
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._start_server())
-        self._loop.run_forever()
+        try:
+            self._loop.run_until_complete(self._start_server())
+            self._loop.run_forever()
+        finally:
+            self._loop.close()
 
     async def _start_server(self):
         while self._running:
             try:
-                self._server = await websockets.serve(self._handle_client, self.host, self.port)
+                self._server = await websockets.serve(
+                    self._handle_client, self.host, self.port,
+                    ping_interval=20, ping_timeout=20,
+                )
                 print(f"[WorkspaceBridge] Server active on ws://{self.host}:{self.port} (LAN: {get_local_ip()}:{self.port})", flush=True)
                 break
             except OSError as e:
@@ -116,7 +168,6 @@ class WorkspaceServer:
                 await asyncio.sleep(2.0)
 
     async def _handle_client(self, websocket):
-        self.clients.add(websocket)
         peer = getattr(websocket, "remote_address", "client")
 
         # Shared-secret authentication gate (enforced only when a token is configured).
@@ -139,18 +190,25 @@ class WorkspaceServer:
                     await websocket.close()
                 except Exception:
                     pass
-                self.clients.discard(websocket)
                 return
 
             print(f"[WorkspaceBridge] Overseer client authenticated from {peer}", flush=True)
         else:
             print(f"[WorkspaceBridge] Overseer client connected from {peer} (no auth token configured)", flush=True)
 
+        # Only authenticated Overseers count toward presence, which drives the fail-closed
+        # autonomy gate on the Worker node (no Overseer => the node must not self-drive).
+        with self._presence_lock:
+            self.clients.add(websocket)
+            self.last_presence = time.monotonic()
+        self._notify_presence()
+
         # Send initial handshake with current AI state
         try:
             handshake = {
                 "type": "handshake",
                 "status": "connected",
+                "protocol_version": PROTOCOL_VERSION,
                 "telemetry": self._latest_telemetry,
                 "timestamp": time.time(),
             }
@@ -163,36 +221,62 @@ class WorkspaceServer:
                 try:
                     data = json.loads(message)
                     action = data.get("action")
+                    # Any traffic from an authenticated client refreshes the presence clock.
+                    with self._presence_lock:
+                        self.last_presence = time.monotonic()
+                    if action in ("heartbeat", "ping", "keepalive"):
+                        continue
                     if action and self.on_command:
                         self.on_command(action, data)
+                        request_id = data.get("request_id")
+                        if request_id:
+                            await websocket.send(json.dumps({
+                                "type": "command_result",
+                                "request_id": request_id,
+                                "action": action,
+                                "status": "accepted",
+                                "timestamp": time.time(),
+                            }))
                 except Exception as e:
                     print(f"[WorkspaceBridge] Error processing message from client: {e}", flush=True)
         except websockets.exceptions.ConnectionClosed:
             pass
         finally:
-            self.clients.discard(websocket)
+            with self._presence_lock:
+                self.clients.discard(websocket)
+            self._notify_presence()
             print(f"[WorkspaceBridge] Overseer client disconnected: {peer}", flush=True)
 
     def broadcast_telemetry(self, data: dict):
         """Broadcast live AI state/monologue to all connected Overseer HUDs."""
-        self._latest_telemetry.update(data)
+        # State is retained for reconnect handshakes; transient events are sent once.
+        self._latest_telemetry.update({
+            key: value for key, value in data.items() if key not in _EVENT_TELEMETRY_KEYS
+        })
+        self._telemetry_sequence += 1
         if not self._running or not self._loop or not self.clients:
             return
 
         payload = json.dumps({
             "type": "telemetry",
-            "data": self._latest_telemetry,
+            "data": data,
+            "sequence": self._telemetry_sequence,
             "timestamp": time.time(),
         })
 
         async def _broadcast():
             to_remove = set()
-            for ws in list(self.clients):
+            with self._presence_lock:
+                targets = list(self.clients)
+            for ws in targets:
                 try:
                     await ws.send(payload)
                 except Exception:
                     to_remove.add(ws)
-            self.clients.difference_update(to_remove)
+            if to_remove:
+                with self._presence_lock:
+                    self.clients.difference_update(to_remove)
+                self._notify_presence()
 
         try:
             asyncio.run_coroutine_threadsafe(_broadcast(), self._loop)
@@ -203,9 +287,25 @@ class WorkspaceServer:
     def stop(self):
         """Shut down the server cleanly."""
         self._running = False
-        if self._server and self._loop:
-            self._server.close()
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._loop and self._loop.is_running():
+            async def _shutdown():
+                with self._presence_lock:
+                    clients = list(self.clients)
+                if clients:
+                    await asyncio.gather(*(ws.close() for ws in clients), return_exceptions=True)
+                if self._server:
+                    self._server.close()
+                    await self._server.wait_closed()
+
+            try:
+                fut = asyncio.run_coroutine_threadsafe(_shutdown(), self._loop)
+                fut.result(timeout=3.0)
+            except Exception:
+                pass
+            if not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive() and threading.current_thread() != self._thread:
+            self._thread.join(timeout=3.0)
 
 
 class WorkspaceClient:
@@ -222,11 +322,56 @@ class WorkspaceClient:
         self.token = resolve_bridge_token(token)
         self.on_connection_change: Optional[Callable[[bool, str], None]] = None
         self.on_telemetry: Optional[Callable[[dict], None]] = None
+        self.on_command_result: Optional[Callable[[dict], None]] = None
+        self._connection_listeners = []
+        self._telemetry_listeners = []
+        self._command_result_listeners = []
         self._websocket = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
         self._connected = False
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the bridge is authenticated and ready for commands."""
+        return self._connected
+
+    def add_connection_listener(self, callback: Callable[[bool, str], None]):
+        if callback not in self._connection_listeners:
+            self._connection_listeners.append(callback)
+
+    def add_telemetry_listener(self, callback: Callable[[dict], None]):
+        if callback not in self._telemetry_listeners:
+            self._telemetry_listeners.append(callback)
+
+    def add_command_result_listener(self, callback: Callable[[dict], None]):
+        if callback not in self._command_result_listeners:
+            self._command_result_listeners.append(callback)
+
+    def _emit_connection(self, connected: bool, message: str):
+        callbacks = ([self.on_connection_change] if self.on_connection_change else []) + list(self._connection_listeners)
+        for callback in callbacks:
+            try:
+                callback(connected, message)
+            except Exception:
+                logger.exception("Workspace connection listener failed")
+
+    def _emit_telemetry(self, telemetry: dict):
+        callbacks = ([self.on_telemetry] if self.on_telemetry else []) + list(self._telemetry_listeners)
+        for callback in callbacks:
+            try:
+                callback(telemetry)
+            except Exception:
+                logger.exception("Workspace telemetry listener failed")
+
+    def _emit_command_result(self, result: dict):
+        callbacks = ([self.on_command_result] if self.on_command_result else []) + list(self._command_result_listeners)
+        for callback in callbacks:
+            try:
+                callback(result)
+            except Exception:
+                logger.exception("Workspace command-result listener failed")
 
     def connect(self, host: Optional[str] = None, port: Optional[int] = None):
         """Start client background connection thread."""
@@ -245,25 +390,37 @@ class WorkspaceClient:
     def _run_loop(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
-        self._loop.run_until_complete(self._maintain_connection())
+        try:
+            self._loop.run_until_complete(self._maintain_connection())
+        finally:
+            self._loop.close()
 
     async def _maintain_connection(self):
         uri = f"ws://{self.host}:{self.port}"
         while self._running:
             try:
-                if self.on_connection_change:
-                    self.on_connection_change(False, f"Connecting to {uri}...")
+                self._emit_connection(False, f"Connecting to {uri}...")
 
                 async with websockets.connect(uri, ping_interval=15, ping_timeout=10) as ws:
                     self._websocket = ws
-                    self._connected = True
-                    print(f"[WorkspaceClient] Connected to AI Workstation at {uri}", flush=True)
-                    if self.on_connection_change:
-                        self.on_connection_change(True, f"LINKED // {self.host}:{self.port}")
-
-                    # Authenticate immediately when a shared token is configured.
                     if self.token:
                         await ws.send(json.dumps({"type": "auth", "token": self.token}))
+
+                    # The server handshake is the authentication boundary. Never expose a
+                    # ready state until it arrives successfully.
+                    first_raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                    first = json.loads(first_raw)
+                    if first.get("type") == "error":
+                        status = first.get("status", "unknown")
+                        self._emit_connection(False, f"Authentication failed: {status}")
+                        raise PermissionError(status)
+                    if first.get("type") != "handshake" or first.get("status") != "connected":
+                        raise ConnectionError("Invalid server handshake")
+
+                    self._connected = True
+                    print(f"[WorkspaceClient] Authenticated with AI Workstation at {uri}", flush=True)
+                    self._emit_connection(True, f"AUTHENTICATED // {self.host}:{self.port}")
+                    self._emit_telemetry(first.get("telemetry") or {})
 
                     async for message in ws:
                         try:
@@ -271,14 +428,21 @@ class WorkspaceClient:
                             msg_type = data.get("type")
                             if msg_type in ("telemetry", "handshake"):
                                 telem = data.get("data") or data.get("telemetry") or {}
-                                if self.on_telemetry:
-                                    self.on_telemetry(telem)
+                                self._emit_telemetry(telem)
+                            elif msg_type == "command_result":
+                                self._emit_command_result(data)
                             elif msg_type == "error":
                                 print(f"[WorkspaceClient] Server rejected connection: {data.get('status', 'unknown')}", flush=True)
                                 self._connected = False
                         except Exception as e:
                             print(f"[WorkspaceClient] Telemetry parse error: {e}", flush=True)
 
+                # Clean server-side close: back off before reconnecting to avoid a hot loop.
+                if self._running:
+                    self._connected = False
+                    self._websocket = None
+                    self._emit_connection(False, "Disconnected. Retrying in 2.5s...")
+                    await asyncio.sleep(2.5)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -286,8 +450,7 @@ class WorkspaceClient:
                     break
                 self._connected = False
                 self._websocket = None
-                if self.on_connection_change:
-                    self.on_connection_change(False, f"Offline: {e}")
+                self._emit_connection(False, f"Offline: {e}")
                 print(f"[WorkspaceClient] Connection to {uri} failed: {e}. Retrying in 2.5s...", flush=True)
                 try:
                     await asyncio.sleep(2.5)
@@ -298,9 +461,15 @@ class WorkspaceClient:
         """Thread-safe dispatch of a command to the AI Workstation."""
         if not self._connected or not self._websocket or not self._loop:
             print(f"[WorkspaceClient] Warning: Cannot send '{action}'; not connected.", flush=True)
-            return
+            return False
 
-        payload = json.dumps({"action": action, **kwargs})
+        request_id = secrets.token_hex(8)
+        payload = json.dumps({
+            "action": action,
+            "request_id": request_id,
+            "protocol_version": PROTOCOL_VERSION,
+            **kwargs,
+        })
 
         async def _send():
             try:
@@ -309,6 +478,7 @@ class WorkspaceClient:
                 print(f"[WorkspaceClient] Failed to send '{action}': {e}", flush=True)
 
         asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        return True
 
     def send_thought(self, text: str):
         self.send_command("inject_thought", text=text)
@@ -357,14 +527,15 @@ class WorkspaceClient:
         self._connected = False
         if self._websocket and self._loop:
             try:
-                asyncio.run_coroutine_threadsafe(self._websocket.close(), self._loop)
+                # Block briefly so the close handshake actually reaches the Host before
+                # we stop the loop -- otherwise the Host keeps seeing us as present.
+                fut = asyncio.run_coroutine_threadsafe(self._websocket.close(), self._loop)
+                fut.result(timeout=2.0)
             except Exception:
                 pass
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
         if self._thread and self._thread.is_alive() and threading.current_thread() != self._thread:
             try:
-                self._thread.join(timeout=1.0)
+                self._thread.join(timeout=3.0)
             except Exception:
                 pass
         self._thread = None

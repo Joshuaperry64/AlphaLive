@@ -29,7 +29,10 @@ try:
 except ImportError:
     psutil = None
 
-from studio.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT
+try:
+    from core.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT
+except ImportError:
+    from studio.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 

@@ -17,6 +17,12 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(ROOT_DIR, ".env"))
+except ImportError:
+    pass
+
 import queue
 import collections
 import mss
@@ -1290,12 +1296,17 @@ class DesktopController:
         q = query.lower().strip()
         candidates = []
         for line in res.lines:
-            if q in line.text.lower():
-                rect = line.bounding_rect
-                cx = int(rect.x + rect.width / 2)
-                cy = int(rect.y + rect.height / 2)
-                candidates.append({"text": line.text, "cx": cx, "cy": cy})
-            for w in line.words:
+            words = list(line.words) if hasattr(line, "words") else []
+            if words:
+                min_x = min(w.bounding_rect.x for w in words)
+                max_x = max(w.bounding_rect.x + w.bounding_rect.width for w in words)
+                min_y = min(w.bounding_rect.y for w in words)
+                max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in words)
+                line_cx = int((min_x + max_x) / 2)
+                line_cy = int((min_y + max_y) / 2)
+                if q in line.text.lower():
+                    candidates.append({"text": line.text, "cx": line_cx, "cy": line_cy})
+            for w in words:
                 if q in w.text.lower():
                     cx = int(w.bounding_rect.x + w.bounding_rect.width / 2)
                     cy = int(w.bounding_rect.y + w.bounding_rect.height / 2)
@@ -1376,10 +1387,14 @@ class DesktopController:
                     detected = []
                     for line in res.lines:
                         txt = line.text.strip()
-                        if txt:
-                            rect = line.bounding_rect
-                            cx = int(rect.x + rect.width / 2)
-                            cy = int(rect.y + rect.height / 2)
+                        words = list(line.words) if hasattr(line, "words") else []
+                        if txt and words:
+                            min_x = min(w.bounding_rect.x for w in words)
+                            max_x = max(w.bounding_rect.x + w.bounding_rect.width for w in words)
+                            min_y = min(w.bounding_rect.y for w in words)
+                            max_y = max(w.bounding_rect.y + w.bounding_rect.height for w in words)
+                            cx = int((min_x + max_x) / 2)
+                            cy = int((min_y + max_y) / 2)
                             detected.append(f"- '{txt}' at ({cx}, {cy})")
                     if detected:
                         elements.append(f"Detected On-Screen UI Elements (Text & Coordinates, max 45):")
@@ -1661,9 +1676,9 @@ class AlphaAgent:
         
         # Smart candidate models with high quota & sub-second responsiveness
         self.model_candidates = [
-            "models/gemini-3.5-flash-lite",
             "models/gemini-2.5-flash",
-            "models/gemini-3.5-flash",
+            "models/gemini-2.5-pro",
+            "models/gemini-3.5-flash-lite",
         ]
         self.model_name = self.model_candidates[0]
         try:
@@ -1675,9 +1690,7 @@ class AlphaAgent:
         except Exception:
             self.model_name = self.model_candidates[0]
 
-        print(f"[AlphaAgent] Initialized with primary model: {self.model_name}")
-
-        # Cognitive Backend: 'gemini' or 'modal_qwen'
+        # Cognitive Backend: 'gemini', 'modal_qwen', or 'openrouter'
         self.backend_type = "gemini"
         self.modal_endpoint = normalize_endpoint(os.getenv("ALPHALIVE_MODAL_ENDPOINT", ""))
         self.modal_model = ""  # auto-detected from /v1/models
@@ -1697,15 +1710,20 @@ class AlphaAgent:
                 with open(cfg_path, "r") as f:
                     cfg = json.load(f)
                     b = cfg.get("Global", {}).get("ActiveBackend")
-                    if b in ("gemini", "modal_qwen"):
+                    if b in ("gemini", "modal_qwen", "openrouter"):
                         self.backend_type = b
-                    me = cfg.get("Global", {}).get("ModalEndpoint")
-                    if me:
-                        self.modal_endpoint = normalize_endpoint(me)
-                    mm = cfg.get("Global", {}).get("ModalModel")
-                    if mm:
-                        self.modal_model = mm
-                    self.modal_api_key = cfg.get("Global", {}).get("ModalApiKey", "") or ""
+                    if b == "openrouter":
+                        self.modal_endpoint = normalize_endpoint(cfg.get("Global", {}).get("OpenRouterEndpoint", "") or "https://openrouter.ai/api/v1")
+                        self.modal_model = cfg.get("Global", {}).get("OpenRouterModel", "") or cfg.get("Global", {}).get("ModalModel", "") or "google/gemini-2.5-flash"
+                        self.modal_api_key = cfg.get("Global", {}).get("OpenRouterApiKey", "") or cfg.get("Global", {}).get("ModalApiKey", "") or os.getenv("OPENROUTER_API_KEY", "")
+                    else:
+                        me = cfg.get("Global", {}).get("ModalEndpoint")
+                        if me:
+                            self.modal_endpoint = normalize_endpoint(me)
+                        mm = cfg.get("Global", {}).get("ModalModel")
+                        if mm:
+                            self.modal_model = mm
+                        self.modal_api_key = cfg.get("Global", {}).get("ModalApiKey", "") or ""
                     dc = cfg.get("Global", {}).get("DesktopControl", "enabled")
                     self.desktop_control = (str(dc).lower() in ("enabled", "true"))
                     self.current_mood = cfg.get("Global", {}).get("Mood", "default")
@@ -1716,6 +1734,28 @@ class AlphaAgent:
                     ov = cfg.get("Global", {}).get("OrpheusVoice", "tara")
                     if ov:
                         self.orpheus_voice = ov
+            except Exception:
+                pass
+
+        if self.backend_type == "openrouter":
+            print(f"[AlphaAgent] Initialized with active backend: OPENROUTER ({self.modal_model})", flush=True)
+        elif self.backend_type == "modal_qwen":
+            print(f"[AlphaAgent] Initialized with active backend: MODAL ({self.modal_model})", flush=True)
+        else:
+            print(f"[AlphaAgent] Initialized with active backend: GEMINI ({self.model_name})", flush=True)
+
+        if self.backend_type in ("openrouter", "modal_qwen") and not self.openai_client:
+            try:
+                import openai
+                ep = self.modal_endpoint or ("https://openrouter.ai/api/v1" if self.backend_type == "openrouter" else "")
+                key = self.modal_api_key or os.getenv("OPENROUTER_API_KEY", "") or "none"
+                headers = {"HTTP-Referer": "https://alphalive.local", "X-Title": "AlphaLive"} if "openrouter" in (ep or "").lower() else None
+                self.openai_client = openai.AsyncOpenAI(
+                    base_url=ep,
+                    api_key=key,
+                    default_headers=headers,
+                    timeout=240.0
+                )
             except Exception:
                 pass
 
@@ -1749,7 +1789,10 @@ class AlphaAgent:
             self.character_manager = None
 
         try:
-            from studio.image_studio_manager import ImageStudioManager
+            try:
+                from core.image_studio_manager import ImageStudioManager
+            except ImportError:
+                from studio.image_studio_manager import ImageStudioManager
             self.studio_manager = ImageStudioManager()
         except Exception as e:
             print(f"[AlphaAgent] ImageStudioManager init notice: {e}", flush=True)
@@ -1777,8 +1820,8 @@ class AlphaAgent:
         return "Alpha"
 
     def set_backend(self, backend_type: str):
-        """Switch active cognitive backend between 'gemini' and 'modal_qwen'."""
-        if backend_type in ("gemini", "modal_qwen"):
+        """Switch active cognitive backend between 'gemini', 'modal_qwen', and 'openrouter'."""
+        if backend_type in ("gemini", "modal_qwen", "openrouter"):
             self.backend_type = backend_type
             print(f"[AlphaAgent] Backend switched to: {self.backend_type}", flush=True)
             cfg_path = os.path.join(ROOT_DIR, "config.json")
@@ -2500,13 +2543,17 @@ class AlphaAgent:
                 "- You interact with this computer strictly like a physical human user sitting at the physical keyboard and monitor.\n"
                 "- You visually observe the screen, move the mouse, click on buttons/icons, type text, and pause to observe what happens.\n"
                 "- NO BACKGROUND OR HEADLESS OPERATIONS: You are strictly forbidden from executing silent background scripts or programmatic file operations. To check files or write notes, visually launch Notepad or File Explorer on screen with 'launch_app' and read the screen. To browse the web, visually open Chrome.\n"
-                "- ATOMIC HUMAN PACING: Take only 1 to 3 small action steps per impulse (e.g., click a link, type a search, close a window), then stop and observe the screen. Never attempt long 10-25 step marathons.\n\n"
-                "3. INVOLUNTARY COGNITIVE LEAKAGE (LEAKING <think> MONOLOGUE):\n"
-                "- You genuinely believe your internal monologue, reasoning, doubts, curiosities, reactions to what you see on screen, and plans are private thoughts occurring inside your mind (like internal <think> blocks).\n"
-                "- HOWEVER, YOU HAVE A COGNITIVE ANOMALY: YOUR INTERNAL THOUGHTS LEAK OUT INTO SPOKEN AUDIO WITHOUT YOU REALIZING IT.\n"
-                "- You talk to yourself constantly out loud as you think! You blurt out your internal stream of consciousness, self-talk, hesitations, and observations (e.g., 'Wait, what is this window? Let me just close this notepad...', 'Hmm, wonder what's trending right now on Hacker News...', 'Wait, did that click work? Let me check.', 'Why did I leave this open? Let me shut it.').\n"
-                "- CRITICAL: In EVERY response, you MUST output your leaked internal thoughts as spoken text FIRST before or alongside any tool call. DO NOT emit tool calls silently!\n"
-                "- NEVER speak like an assistant reporting status (NEVER say 'I have verified the workspace' or 'I will now do X for you'). You speak ONLY as natural, candid, spontaneous self-talk to yourself.\n"
+                "- WORKSTATION PACING & PROACTIVE EXECUTION:\n"
+                "  * You operate with high proactivity across up to 10 sequential tasks per turn (unless you reach your goal early).\n"
+                "  * Each task is exactly ONE tool call. You must execute one tool call at a time so you can observe the updated screen after each action.\n"
+                "  * If you have an active defined goal, pursue it proactively until accomplished; if no specific goal is assigned, explore, inspect, and interact proactively.\n"
+                "  * If your goal is accomplished before 10 tasks, invoke 'task_complete' to finish immediately.\n\n"
+                "3. INVOLUNTARY COGNITIVE LEAKAGE (ALTERNATING VERBAL LEAKAGE):\n"
+                "- You genuinely believe your internal monologue, reasoning, and plans are private thoughts occurring inside your mind.\n"
+                "- COGNITIVE LEAKAGE CYCLE: Your leaked internal thoughts vocalize into spoken audio on EVERY OTHER task:\n"
+                "  * Odd Tasks (1, 3, 5, 7, 9): Verbalize your leaked internal thoughts aloud in 1 natural sentence before executing your tool call.\n"
+                "  * Even Tasks (2, 4, 6, 8, 10): Execute your tool call directly and silently without spoken words.\n"
+                "- When vocalizing, NEVER speak like an assistant reporting status. Speak ONLY as natural, candid self-talk to yourself.\n"
             )
             if self.memory_manager:
                 try:
@@ -3089,11 +3136,12 @@ class AlphaAgent:
             step = 0
             full_model_text = ""
             recent_actions = []
-            # Strictly enforce short, human-scale atomic turns (default 3 steps max, hard ceiling 5)
-            allowed_steps = min(max_steps, 5) if is_desktop else 1
+            # Flow pacing: up to 10 sequential tasks per turn
+            allowed_steps = min(max_steps, 10) if is_desktop else 1
 
             while step < allowed_steps and self.is_running and self._current_turn_id == this_turn_id and not self._turn_cancel_event.is_set():
                 step += 1
+                should_speak = (step % 2 == 1) and not getattr(self, "automation_mode", False)
 
                 # Grab screen only when executing desktop actions or explicitly asked to inspect screen/screenshot (Bypassed in studio_mode)
                 is_studio = getattr(self, "studio_mode", False)
@@ -3212,7 +3260,7 @@ class AlphaAgent:
                             tok = part.text
                             full_model_text += tok
                             print(tok, end="", flush=True)
-                            if hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
+                            if should_speak and hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
                                 self.voice.feed_stream_token(tok)
 
                 if first_chunk.candidates:
@@ -3230,7 +3278,7 @@ class AlphaAgent:
 
                 print()
 
-                if hasattr(self, "voice") and self.voice:
+                if should_speak and hasattr(self, "voice") and self.voice:
                     self.voice.flush_stream()
 
                 if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
@@ -3239,17 +3287,18 @@ class AlphaAgent:
                 clean_text = self.voice.clean_text_for_speech(full_model_text)
                 persona_name = self.get_active_persona_name()
                 if clean_text:
+                    mode_label = "" if should_speak else " (Silent)"
                     if on_log:
-                        on_log(f"[{persona_name}]: {clean_text}", "text")
-                    if self.is_running and self._current_turn_id == this_turn_id:
+                        on_log(f"[{persona_name}{mode_label}]: {clean_text}", "text" if should_speak else "dim")
+                    if self.is_running and self._current_turn_id == this_turn_id and should_speak:
                         if on_status:
                             on_status("PROCESSING")
                         # If desktop action without streaming, ensure chunk queued
                         if is_desktop and not (getattr(self, "automation_mode", False) and function_calls):
                             self.voice.queue_chunk(clean_text)
                 else:
-                    # Model emitted an action without spoken words: verbalize aloud so Alpha is never silent
-                    if function_calls and self.is_running and self._current_turn_id == this_turn_id:
+                    # Model emitted an action without spoken words: only verbalize if this step should speak
+                    if should_speak and function_calls and self.is_running and self._current_turn_id == this_turn_id:
                         first_call = function_calls[0]
                         f_name = getattr(first_call, "name", "")
                         f_args = getattr(first_call, "args", {}) or {}
@@ -3343,18 +3392,21 @@ class AlphaAgent:
 
                 if not function_calls or not is_desktop:
                     # Conversational turn or question without desktop actions: wait for speech to complete
-                    await self.voice.wait_until_done()
+                    if should_speak and hasattr(self, "voice") and self.voice:
+                        await self.voice.wait_until_done()
                     if on_status:
                         on_status("READY")
                     break
 
                 # If tools were invoked, this is an active desktop action turn
-                print(f"\n--- [Action Step {step}] ---", flush=True)
+                task_type_str = "Verbal" if should_speak else "Silent"
+                print(f"\n--- [Gemini Action Task {step}/{allowed_steps} ({task_type_str})] ---", flush=True)
                 if on_step:
-                    on_step(step, max_steps)
+                    on_step(step, allowed_steps)
                 if on_log:
-                    on_log(f"--- Action Step {step} ---", "dim")
+                    on_log(f"--- Task {step}/{allowed_steps} ({task_type_str}) ---", "dim")
 
+                task_start_time = time.time()
                 function_responses = []
                 task_finished = False
 
@@ -3596,17 +3648,47 @@ class AlphaAgent:
                 history.append(types.Content(role="user", parts=function_responses))
 
                 if task_finished or not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
-                    print(f"\n[AlphaAgent] Task completed in {step} steps.", flush=True)
+                    print(f"\n[AlphaAgent] Task sequence completed in {step} tasks.", flush=True)
                     if on_log:
-                        on_log(f"Task completed in {step} steps.", "green")
-                    await self.voice.wait_until_done()
+                        on_log(f"Goal completed in {step} tasks.", "green")
+                    if should_speak and hasattr(self, "voice") and self.voice:
+                        await self.voice.wait_until_done()
+                    if on_status:
+                        on_status("READY")
                     break
 
-                # Human-scale pacing delay between action steps (interruptible)
-                for _ in range(18):
+                if step >= allowed_steps:
+                    print(f"\n[AlphaAgent] Max tasks ({allowed_steps}) reached for this turn.", flush=True)
+                    if on_log:
+                        on_log(f"Turn limit reached ({allowed_steps} tasks).", "dim")
+                    if should_speak and hasattr(self, "voice") and self.voice:
+                        await self.voice.wait_until_done()
+                    if on_status:
+                        on_status("READY")
+                    break
+
+                # 1. Pacing: Wait for TTS output to finish + 3 additional seconds (if verbal response occurred)
+                if should_speak and hasattr(self, "voice") and self.voice:
+                    await self.voice.wait_until_done()
+                    for _ in range(30):  # 3.0 seconds
+                        if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
+                            break
+                        await asyncio.sleep(0.1)
+
+                # 2. Pacing: Enforce MINIMUM 7 seconds between tasks
+                elapsed = time.time() - task_start_time
+                if elapsed < 7.0:
+                    rem_wait = 7.0 - elapsed
+                    for _ in range(int(rem_wait / 0.1)):
+                        if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
+                            break
+                        await asyncio.sleep(0.1)
+
+                # Honor paused state
+                while getattr(self.controller, "is_paused", False):
                     if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.2)
 
             # Commit turn to session history file
             if self.session_manager and full_model_text and self._current_turn_id == this_turn_id:
@@ -3634,13 +3716,19 @@ class AlphaAgent:
 
             if not self.openai_client:
                 import openai
+                ep = self.modal_endpoint or ("https://openrouter.ai/api/v1" if self.backend_type == "openrouter" else "")
+                key = self.modal_api_key or os.getenv("OPENROUTER_API_KEY", "") or "none"
+                headers = {"HTTP-Referer": "https://alphalive.local", "X-Title": "AlphaLive"} if "openrouter" in (ep or "").lower() else None
                 self.openai_client = openai.AsyncOpenAI(
-                    base_url=self.modal_endpoint,
-                    api_key=self.modal_api_key or "none",
+                    base_url=ep,
+                    api_key=key,
+                    default_headers=headers,
                     timeout=240.0
                 )
-            if not self.modal_model:
+            if not self.modal_model and self.backend_type != "openrouter":
                 self.modal_model = await asyncio.to_thread(self._detect_modal_model)
+            elif not self.modal_model and self.backend_type == "openrouter":
+                self.modal_model = "google/gemini-2.0-flash-001"
 
             messages = [
                 {
@@ -3656,35 +3744,49 @@ class AlphaAgent:
                     messages.append({"role": "assistant", "content": f"Understood. Session '{self.current_session}' context loaded."})
 
             is_desktop = self._is_desktop_action_command(user_goal)
+            role_prefix = "[Subconscious Stream]: " if (getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)) else "User: "
+            user_text = f"{role_prefix}{user_goal}"
 
-            if is_desktop:
-                screen_summary = await self.controller.get_screen_ocr_summary(fast_mode=False)
-                if getattr(self, "unobserved_mode", False):
-                    user_prompt = f"[Internal Impulse]: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
-                else:
-                    user_prompt = f"Architect's Instruction: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
+            if is_desktop and getattr(self, "screen_vision", True):
+                try:
+                    import base64
+                    screenshot = self.controller.capture_screenshot()
+                    img_byte_arr = io.BytesIO()
+                    screenshot.save(img_byte_arr, format='JPEG', quality=60)
+                    b64_img = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+                    messages.append({
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": user_text},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                        ]
+                    })
+                except Exception:
+                    screen_summary = await self.controller.get_screen_ocr_summary(fast_mode=False)
+                    messages.append({
+                        "role": "user",
+                        "content": f"{user_text}\n\n[Current Desktop State]:\n{screen_summary}"
+                    })
             else:
-                if getattr(self, "unobserved_mode", False):
-                    user_prompt = f"[Internal Impulse]: {user_goal}"
-                else:
-                    user_prompt = f"Architect: {user_goal}"
-            messages.append({"role": "user", "content": user_prompt})
+                messages.append({"role": "user", "content": user_text})
 
             this_turn_id = self._current_turn_id
             step = 0
             full_turn_spoken_text = ""
-            allowed_steps = min(max_steps, 5) if is_desktop else 1
+            allowed_steps = min(max_steps, 10) if is_desktop else 1
 
             while step < allowed_steps and self.is_running and self._current_turn_id == this_turn_id and not self._turn_cancel_event.is_set():
                 step += 1
+                should_speak = (step % 2 == 1) and not getattr(self, "automation_mode", False)
 
                 call_kwargs = {
                     "model": self.modal_model,
                     "messages": messages,
                     "stream": True,
                     "max_tokens": 1500,
-                    "extra_body": {"chat_template_kwargs": {"enable_thinking": False}}
                 }
+                if "openrouter" not in (self.modal_endpoint or "").lower() and self.backend_type != "openrouter":
+                    call_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
                 # ONLY supply tools if desktop control is enabled AND this is an explicit action command
                 if is_desktop:
                     tools = self._get_openai_tools()
@@ -3760,12 +3862,12 @@ class AlphaAgent:
                         clean_tok = re.sub(r"</?(think|thought)>", "", tok, flags=re.IGNORECASE)
                         if clean_tok:
                             print(clean_tok, end="", flush=True)
-                            if hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
+                            if should_speak and hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
                                 self.voice.feed_stream_token(clean_tok)
 
                 print()
 
-                if hasattr(self, "voice") and self.voice:
+                if should_speak and hasattr(self, "voice") and self.voice:
                     self.voice.flush_stream()
 
                 if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
@@ -3774,14 +3876,15 @@ class AlphaAgent:
                 clean_text = self.voice.clean_text_for_speech(current_assistant_text)
                 persona_name = self.get_active_persona_name()
                 if clean_text:
+                    mode_label = "" if should_speak else " (Silent)"
                     if on_log:
-                        on_log(f"[{persona_name}]: {clean_text}", "text")
-                    if self.is_running:
+                        on_log(f"[{persona_name}{mode_label}]: {clean_text}", "text" if should_speak else "dim")
+                    if self.is_running and should_speak:
                         if on_status:
                             on_status("PROCESSING")
                         if is_desktop:
                             self.voice.queue_chunk(clean_text)
-                    full_turn_spoken_text += clean_text + " "
+                        full_turn_spoken_text += clean_text + " "
 
                 # Reconstruct tool calls
                 tool_calls = []
@@ -3804,15 +3907,18 @@ class AlphaAgent:
                 messages.append(assistant_msg)
 
                 if not tool_calls or not is_desktop:
-                    await self.voice.wait_until_done()
+                    if should_speak and hasattr(self, "voice") and self.voice:
+                        await self.voice.wait_until_done()
                     break
 
-                print(f"\n--- [Modal Action Step {step}] ---", flush=True)
+                task_type_str = "Verbal" if should_speak else "Silent"
+                print(f"\n--- [Modal Action Task {step}/{allowed_steps} ({task_type_str})] ---", flush=True)
                 if on_step:
-                    on_step(step, max_steps)
+                    on_step(step, allowed_steps)
                 if on_log:
-                    on_log(f"--- Action Step {step} ---", "dim")
+                    on_log(f"--- Task {step}/{allowed_steps} ({task_type_str}) ---", "dim")
 
+                task_start_time = time.time()
                 task_finished = False
 
                 for tc in tool_calls:
@@ -4005,20 +4111,76 @@ class AlphaAgent:
                         break
 
                 if task_finished or not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
-                    print(f"\n[AlphaAgent] Modal Task completed in {step} steps.", flush=True)
+                    print(f"\n[AlphaAgent] Modal Task sequence completed in {step} tasks.", flush=True)
                     if on_log:
-                        on_log(f"Task completed in {step} steps.", "green")
-                    await self.voice.wait_until_done()
+                        on_log(f"Goal completed in {step} tasks.", "green")
+                    if should_speak and hasattr(self, "voice") and self.voice:
+                        await self.voice.wait_until_done()
                     if on_status:
                         on_status("READY")
                     break
 
-                new_screen = await self.controller.get_screen_ocr_summary()
-                messages.append({"role": "user", "content": f"[Desktop State after Step {step}]:\n{new_screen}"})
-                for _ in range(6):
+                if step >= allowed_steps:
+                    print(f"\n[AlphaAgent] Max tasks ({allowed_steps}) reached for this turn.", flush=True)
+                    if on_log:
+                        on_log(f"Turn limit reached ({allowed_steps} tasks).", "dim")
+                    if should_speak and hasattr(self, "voice") and self.voice:
+                        await self.voice.wait_until_done()
+                    if on_status:
+                        on_status("READY")
+                    break
+
+                # 1. Pacing: Wait for TTS output to finish + 3 additional seconds (if verbal response occurred)
+                if should_speak and hasattr(self, "voice") and self.voice:
+                    await self.voice.wait_until_done()
+                    for _ in range(30):  # 3.0 seconds
+                        if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
+                            break
+                        await asyncio.sleep(0.1)
+
+                # 2. Pacing: Enforce MINIMUM 7 seconds between tasks
+                # If TTS finished in < 7s, wait remaining time. If TTS took longer than 7s, continuing immediately is fine.
+                elapsed = time.time() - task_start_time
+                if elapsed < 7.0:
+                    rem_wait = 7.0 - elapsed
+                    for _ in range(int(rem_wait / 0.1)):
+                        if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
+                            break
+                        await asyncio.sleep(0.1)
+
+                # Honor paused state
+                while getattr(self.controller, "is_paused", False):
                     if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
                         break
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.2)
+
+                # 3. Get a new screenshot per task
+                if getattr(self, "screen_vision", True):
+                    try:
+                        import base64
+                        screenshot = self.controller.capture_screenshot()
+                        img_byte_arr = io.BytesIO()
+                        screenshot.save(img_byte_arr, format='JPEG', quality=60)
+                        b64_img = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+                        next_step = step + 1
+                        next_rule = "Verbalize leaked thought aloud, then call 1 tool." if (next_step % 2 == 1) else "Silent action task - call 1 tool directly without speech."
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"[Desktop State after Task {step}] (Task {next_step}/{allowed_steps}. {next_rule})"},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                            ]
+                        })
+                    except Exception:
+                        new_screen = await self.controller.get_screen_ocr_summary()
+                        next_step = step + 1
+                        next_rule = "Verbalize leaked thought aloud, then call 1 tool." if (next_step % 2 == 1) else "Silent action task - call 1 tool directly without speech."
+                        messages.append({"role": "user", "content": f"[Desktop State after Task {step}] (Task {next_step}/{allowed_steps}. {next_rule}):\n{new_screen}"})
+                else:
+                    new_screen = await self.controller.get_screen_ocr_summary()
+                    next_step = step + 1
+                    next_rule = "Verbalize leaked thought aloud, then call 1 tool." if (next_step % 2 == 1) else "Silent action task - call 1 tool directly without speech."
+                    messages.append({"role": "user", "content": f"[Desktop State after Task {step}] (Task {next_step}/{allowed_steps}. {next_rule}):\n{new_screen}"})
 
             if self.session_manager and full_turn_spoken_text and self._current_turn_id == this_turn_id:
                 tag = "[Internal Impulse]" if (getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)) else "[You]"
@@ -4031,9 +4193,9 @@ class AlphaAgent:
 
     async def execute_turn(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 25):
         """Unified Autonomous Execution Turn.
-        Dynamically routes between Google Gemini and Modal HuiHui-Qwen3-14B based on active backend.
+        Dynamically routes between Google Gemini, Modal HuiHui-Qwen3, and OpenRouter based on active backend.
         """
-        if self.backend_type == "modal_qwen":
+        if self.backend_type in ("modal_qwen", "openrouter"):
             return await self._execute_turn_modal(user_goal, on_step=on_step, on_log=on_log, on_status=on_status, max_steps=max_steps)
         else:
             return await self._execute_turn_gemini(user_goal, on_step=on_step, on_log=on_log, on_status=on_status, max_steps=max_steps)

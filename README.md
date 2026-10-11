@@ -1,3 +1,15 @@
+# Process roles
+
+AlphaLive uses one implementation for each workstation role:
+
+- **Normal GUI:** `start.bat`
+- **Workplace 1 Overseer:** `start.bat --overseer --host 127.0.0.1`
+- **Workplace 2 worker:** `start.bat --aster-worker`
+
+`aster-worker/worker_main.py` is the sole Workplace 2 server and command dispatcher.
+The desktop GUI is always a client and never hosts a hidden worker. Worker network
+options such as `--host`, `--port`, and `--token` are forwarded to the isolated worker.
+
 # ⚡ AlphaLive // Autonomous Desktop Agent Suite v4.0
 
 AlphaLive is an advanced multimodal AI pair programmer and desktop automation agent.

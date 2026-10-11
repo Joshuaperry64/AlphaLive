@@ -28,7 +28,7 @@ class TurnCoordinator:
         self._lock = threading.Lock()
         self.active_thread: threading.Thread = None
         self.cycle_pacing = 30  # Wait time between autonomous turns (seconds)
-        self.max_turn_steps = 3  # Max steps per turn
+        self.max_turn_steps = 10  # Max steps per turn (flow default: 10 tasks)
         self.pacing_event = threading.Event()
         self.auto_loop_thread: threading.Thread = None
         self.auto_loop_running = False
@@ -40,8 +40,8 @@ class TurnCoordinator:
         self.pacing_event.set()
 
     def set_max_steps(self, steps: int):
-        self.max_turn_steps = max(1, min(5, int(steps)))
-        self._append_log(f"[W2 OVERSEER] Max atomic steps per turn set to {self.max_turn_steps}.")
+        self.max_turn_steps = max(1, min(10, int(steps)))
+        self._append_log(f"[W2 OVERSEER] Max atomic tasks per turn set to {self.max_turn_steps}.")
         self.ws_server.broadcast_telemetry({"max_steps": self.max_turn_steps})
 
     def _append_log(self, text: str):
@@ -130,9 +130,9 @@ class TurnCoordinator:
                     continue
                 if not self.agent.is_running and not (hasattr(self.agent, "voice") and self.agent.voice and self.agent.voice.is_busy()):
                     prompt = _build_identity_prompt(self.agent) if self.agent.identity_mode else (
-                        "[Autonomous Stream]: You are observing your workstation. "
-                        "Vocalize your leaked internal thoughts aloud about what you see on screen, "
-                        "then perform 1 to 2 visual actions on screen (e.g. browse, check a window). Never act silently."
+                        "[Autonomous High-Proactivity Stream]: You are observing your workstation. "
+                        "Execute up to 10 sequential desktop tasks (1 tool call per task) exploring, inspecting, or interacting. "
+                        "Alternate verbal responses: vocalize your thoughts on odd tasks, act silently on even tasks."
                     )
                     self.start_turn(prompt, is_autonomous=True, max_steps=self.max_turn_steps)
 
@@ -147,21 +147,28 @@ class TurnCoordinator:
 
 
 def _build_identity_prompt(agent: AlphaAgent, override_thought: str = None) -> str:
-    thought = override_thought or getattr(agent, "pending_subconscious_thought", "")
-    if thought:
+    goal = override_thought or getattr(agent, "active_goal", "") or getattr(agent, "pending_subconscious_thought", "")
+    if goal:
         agent.pending_subconscious_thought = ""  # Consume once injected
         prompt = (
-            f"[Subconscious Cognitive Spark]: A spontaneous realization or sudden impulse flashes in your mind: \"{thought}\".\n"
-            f"You feel an immediate, natural urge to act on this thought on your desktop.\n"
-            f"Let your leaked internal thoughts vocalize naturally (e.g., \"Wait, {thought}\" or \"Hmm, let me...\"), "
-            f"then perform 1 to 3 physical human actions on screen (mouse, keyboard, closing/opening apps). "
-            f"Do not act silently."
+            f"[Subconscious Cognitive Spark // Defined Goal]: A spontaneous realization strikes you: \"{goal}\".\n"
+            f"Objective: Pursue and accomplish this defined goal with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
+            f"Execution Flow:\n"
+            f"- A task is a single tool call.\n"
+            f"- High proactivity: pursue the goal actively with momentum.\n"
+            f"- Alternate verbal responses: speak your leaked thoughts aloud on odd tasks, act silently on even tasks.\n"
+            f"- If you accomplish this goal before 10 tasks, call 'task_complete' to conclude immediately."
         )
     else:
         prompt = (
-            "[Stream of Consciousness]: You are alone at your workstation observing your screen.\n"
-            "What catches your attention? Vocalize your leaked internal thoughts aloud as you look around, "
-            "then perform 1 to 3 physical human actions on screen. Do not act silently."
+            "[Stream of Consciousness // High-Proactivity Open Exploration]: You are alone at your workstation observing your screen.\n"
+            "No specific predefined goal is assigned. Operate with high proactivity across up to 10 sequential desktop tasks:\n"
+            "explore open windows, browse, inspect files, or interact with curious initiative.\n"
+            "Execution Flow:\n"
+            "- A task is a single tool call.\n"
+            "- High proactivity: take curious, proactive action on screen.\n"
+            "- Alternate verbal responses: speak your leaked thoughts aloud on odd tasks, act silently on even tasks.\n"
+            "- If you establish or complete a spontaneous objective, call 'task_complete'."
         )
     if getattr(agent, "injected_mood", ""):
         prompt += f"\n[Subconscious Mood]: {agent.injected_mood}."
@@ -223,40 +230,47 @@ def main():
             if cmd in ("inject_thought", "thought_inject"):
                 txt = payload.get("text", "").strip()
                 if txt:
-                    coordinator._append_log(f"[W2 OVERSEER] Thought injected: '{txt}'")
+                    coordinator._append_log(f"[W2 OVERSEER] Custom goal injected: '{txt}'")
+                    agent.active_goal = txt
                     prompt = _build_identity_prompt(agent, override_thought=txt)
-                    coordinator.start_turn(prompt, is_autonomous=False)
+                    coordinator.start_turn(prompt, is_autonomous=False, max_steps=coordinator.max_turn_steps)
 
             # 2. Trigger Specific Action Impulse (Overrides active turn immediately)
             elif cmd in ("trigger_action", "action_impulse"):
                 impulse = payload.get("impulse", "").strip() or payload.get("action", "").strip()
                 if impulse:
-                    coordinator._append_log(f"[W2 OVERSEER] Action triggered: '{impulse}'")
+                    coordinator._append_log(f"[W2 OVERSEER] Impulse/Goal triggered: '{impulse}'")
+                    agent.active_goal = impulse
                     prompt = (
-                        f"[Internal Subconscious Impulse]: A spontaneous urge strikes you: \"{impulse}\".\n"
-                        "Vocalize your leaked internal thoughts aloud as casual self-talk, "
-                        "then perform 1 to 3 physical human actions on screen to carry it out. Do not act silently."
+                        f"[Internal Subconscious Impulse // Defined Goal]: A spontaneous urge strikes you: \"{impulse}\".\n"
+                        "Objective: Carry out this goal with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
+                        "Alternate verbal responses: speak your leaked thoughts aloud on odd tasks, act silently on even tasks.\n"
+                        "If you accomplish this goal before 10 tasks, call 'task_complete' to conclude immediately."
                     )
-                    coordinator.start_turn(prompt, is_autonomous=False)
+                    coordinator.start_turn(prompt, is_autonomous=False, max_steps=coordinator.max_turn_steps)
 
             # 3. Direct Task / Directive
             elif cmd in ("run_task", "user_prompt", "voice_input"):
                 txt = payload.get("text") or payload.get("goal") or ""
                 txt = txt.strip()
                 if txt:
-                    coordinator._append_log(f"[W2 REMOTE] Directive received: '{txt}'")
+                    coordinator._append_log(f"[W2 REMOTE] Directive/Goal received: '{txt}'")
+                    agent.active_goal = txt
                     if agent.identity_mode or agent.unobserved_mode:
                         prompt = (
-                            f"[Internal Subconscious Spark]: A sudden compelling idea enters your mind: \"{txt}\".\n"
-                            "Vocalize your leaked internal thoughts aloud as casual self-talk, "
-                            "and perform 1 to 3 physical actions on screen."
+                            f"[Internal Subconscious Spark // Defined Goal]: \"{txt}\".\n"
+                            "Objective: Pursue this goal with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
+                            "Alternate verbal responses: speak your leaked thoughts on odd tasks, act silently on even tasks.\n"
+                            "If accomplished before 10 tasks, call 'task_complete'."
                         )
                     else:
                         prompt = (
-                            f"Directive: '{txt}'.\n"
-                            "Speak aloud confirming your action, then perform the visual desktop action."
+                            f"Defined Goal: '{txt}'.\n"
+                            "Objective: Execute with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
+                            "Alternate verbal responses: speak aloud on odd tasks, act silently on even tasks.\n"
+                            "If accomplished before 10 tasks, call 'task_complete'."
                         )
-                    coordinator.start_turn(prompt, is_autonomous=False)
+                    coordinator.start_turn(prompt, is_autonomous=False, max_steps=coordinator.max_turn_steps)
 
             # 4. Set Autonomous Cycle Pacing
             elif cmd in ("set_pacing", "pacing_change"):
@@ -265,7 +279,7 @@ def main():
 
             # 5. Set Max Atomic Steps
             elif cmd in ("set_max_steps", "steps_change"):
-                steps = payload.get("max_steps", 3)
+                steps = payload.get("max_steps", 10)
                 coordinator.set_max_steps(steps)
 
             # 6. Set Injected Mood

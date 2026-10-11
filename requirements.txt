@@ -27,3 +27,4 @@ paho-mqtt>=1.6.1
 uvicorn
 pyttsx3>=2.90
 uiautomation>=2.0.18
+openai

@@ -10,11 +10,19 @@ Connects to Workplace 2 (Phantom AI Node) via WebSocket (127.0.0.1:8766 for ASTE
 - WDA_EXCLUDEFROMCAPTURE screen capture shielding
 """
 
+import argparse
 import ctypes
 import html
 import json
+import os
+import sys
 import time
 from typing import Optional
+
+# Ensure project root is in sys.path for direct script execution
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
 from PyQt6.QtGui import QFont, QColor, QIcon, QTextCursor
@@ -22,7 +30,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTextEdit, QLineEdit, QFrame,
     QComboBox, QScrollArea, QCheckBox, QSplitter, QApplication,
-    QSlider, QSpinBox
+    QSlider, QSpinBox, QMessageBox
 )
 
 # Cybernetic Palette
@@ -51,13 +59,14 @@ class EnhancedOverseerDashboard(QWidget):
     """
     telemetry_received = pyqtSignal(dict)
     connection_changed = pyqtSignal(bool, str)
+    command_result_received = pyqtSignal(dict)
     voice_received = pyqtSignal(str)
 
     def __init__(self, remote_client=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("AlphaCore // Enhanced Overseer Command Cockpit [Air-Gap Multi-Workspace]")
         self.resize(1120, 860)
-        self.setMinimumSize(980, 750)
+        self.setMinimumSize(760, 600)
         self.setStyleSheet(f"background-color: {C['bg_dark']}; color: {C['text_bright']}; font-family: 'Segoe UI', sans-serif;")
         
         self.remote_client = remote_client
@@ -66,17 +75,26 @@ class EnhancedOverseerDashboard(QWidget):
         self._current_mood = "Tactical & Focused"
         self._is_paused = False
         self._mic_muted = False
+        self._link_ready = False
+        self._remote_state = {}
 
         self._init_ui()
         self._connect_signals()
+        self._set_command_controls_enabled(False)
 
         if self.remote_client:
-            self.remote_client.on_telemetry = lambda telem: self.telemetry_received.emit(telem)
-            self.remote_client.on_connection_change = lambda conn, msg: self.connection_changed.emit(conn, msg)
+            if hasattr(self.remote_client, "add_telemetry_listener"):
+                self.remote_client.add_telemetry_listener(self.telemetry_received.emit)
+                self.remote_client.add_connection_listener(self.connection_changed.emit)
+                self.remote_client.add_command_result_listener(self.command_result_received.emit)
+            else:
+                self.remote_client.on_telemetry = self.telemetry_received.emit
+                self.remote_client.on_connection_change = self.connection_changed.emit
 
     def _connect_signals(self):
         self.telemetry_received.connect(self._handle_telemetry_ui)
         self.connection_changed.connect(self._handle_connection_ui)
+        self.command_result_received.connect(self._handle_command_result_ui)
         self.voice_received.connect(self._handle_voice_ui)
 
     def _init_ui(self):
@@ -133,7 +151,7 @@ class EnhancedOverseerDashboard(QWidget):
         hdr.addLayout(title_box, 1)
 
         # Link Status Pill
-        self.lbl_net_status = QLabel("● LINK: CONNECTING...")
+        self.lbl_net_status = QLabel("○ LINK: OFFLINE")
         self.lbl_net_status.setStyleSheet(f"""
             background: #071729; color: {C['neon_cyan']}; font-family: Consolas;
             font-size: 9pt; font-weight: bold; border: 1px solid {C['neon_cyan']};
@@ -239,7 +257,7 @@ class EnhancedOverseerDashboard(QWidget):
         """)
         r_stat.addWidget(self.pill_mood)
 
-        self.pill_shield = QLabel("🛡 WDA_EXCLUDE ACTIVE")
+        self.pill_shield = QLabel("🛡 CAPTURE SHIELD: CHECKING")
         self.pill_shield.setStyleSheet(f"""
             background: #052e16; color: {C['neon_emerald']}; font-family: Consolas;
             font-size: 8.5pt; font-weight: bold; border: 1px solid {C['neon_emerald']};
@@ -383,7 +401,7 @@ class EnhancedOverseerDashboard(QWidget):
         layout.addWidget(lbl_desc)
 
         self.edit_thought = QTextEdit()
-        self.edit_thought.setPlaceholderText("Speak or type an impulse here (e.g. 'I should close my notepad')... Alpha will verbalize it and execute it immediately.")
+        self.edit_thought.setPlaceholderText("Define a custom goal or impulse here (e.g. 'check my email' or 'find the AI notes')... Alpha will pursue it proactively across up to 10 tasks.")
         self.edit_thought.setFixedHeight(75)
         self.edit_thought.setStyleSheet(f"""
             QTextEdit {{
@@ -607,8 +625,11 @@ class EnhancedOverseerDashboard(QWidget):
         r_steps.addWidget(lbl_s_desc)
 
         self.combo_max_steps = QComboBox()
-        self.combo_max_steps.addItems(["1 Step (Strict Atomic)", "2 Steps", "3 Steps (Default)", "4 Steps", "5 Steps (Max)"])
-        self.combo_max_steps.setCurrentIndex(2)
+        self.combo_max_steps.addItems([
+            "1 Task (Strict Atomic)", "2 Tasks", "3 Tasks", "4 Tasks", "5 Tasks",
+            "6 Tasks", "7 Tasks", "8 Tasks", "9 Tasks", "10 Tasks (Max Flow)"
+        ])
+        self.combo_max_steps.setCurrentIndex(9)
         self.combo_max_steps.setStyleSheet(f"""
             QComboBox {{
                 background: {C['bg_input']}; color: white; border: 1px solid {C['border_subtle']};
@@ -624,6 +645,7 @@ class EnhancedOverseerDashboard(QWidget):
 
         # Wire signals
         self.slider_pacing.valueChanged.connect(self._on_pacing_slider_changed)
+        self.slider_pacing.sliderReleased.connect(self._commit_pacing)
         self.combo_max_steps.currentIndexChanged.connect(self._on_max_steps_changed)
 
         return card
@@ -713,10 +735,10 @@ class EnhancedOverseerDashboard(QWidget):
         self.btn_pause.clicked.connect(self._toggle_pause)
         flow_row.addWidget(self.btn_pause, 1)
 
-        btn_cycle = QPushButton("⚡ TRIGGER CYCLE")
-        btn_cycle.setMinimumHeight(38)
-        btn_cycle.setToolTip("Force an immediate spontaneous thought tick on Workplace 2")
-        btn_cycle.setStyleSheet(f"""
+        self.btn_cycle = QPushButton("⚡ TRIGGER CYCLE")
+        self.btn_cycle.setMinimumHeight(38)
+        self.btn_cycle.setToolTip("Force an immediate spontaneous thought tick on Workplace 2")
+        self.btn_cycle.setStyleSheet(f"""
             QPushButton {{
                 background-color: #1e1b4b; color: {C['neon_purple']}; border: 1px solid {C['neon_purple']}88;
                 border-radius: 6px; font-weight: bold; font-size: 9pt;
@@ -724,8 +746,8 @@ class EnhancedOverseerDashboard(QWidget):
             QPushButton:hover {{ background-color: #2e1065; color: #fff; }}
             QPushButton:pressed {{ background-color: {C['neon_purple']}; color: #000; }}
         """)
-        btn_cycle.clicked.connect(self._trigger_cycle)
-        flow_row.addWidget(btn_cycle, 1)
+        self.btn_cycle.clicked.connect(self._trigger_cycle)
+        flow_row.addWidget(self.btn_cycle, 1)
 
         self.btn_halt = QPushButton("🛑 EMERGENCY HALT")
         self.btn_halt.setMinimumHeight(38)
@@ -740,10 +762,10 @@ class EnhancedOverseerDashboard(QWidget):
         self.btn_halt.clicked.connect(self._emergency_halt)
         flow_row.addWidget(self.btn_halt, 1)
 
-        btn_reboot = QPushButton("🔄 CYCLE NODE")
-        btn_reboot.setMinimumHeight(38)
-        btn_reboot.setToolTip("Request background AI node on Workplace 2 to safely reload")
-        btn_reboot.setStyleSheet(f"""
+        self.btn_reboot = QPushButton("🔄 CYCLE NODE")
+        self.btn_reboot.setMinimumHeight(38)
+        self.btn_reboot.setToolTip("Request background AI node on Workplace 2 to safely reload")
+        self.btn_reboot.setStyleSheet(f"""
             QPushButton {{
                 background-color: #1c1917; color: #cbd5e1; border: 1px solid #44403c;
                 border-radius: 6px; font-weight: bold; font-size: 8.5pt;
@@ -751,8 +773,8 @@ class EnhancedOverseerDashboard(QWidget):
             QPushButton:hover {{ background-color: #292524; color: #fff; }}
             QPushButton:pressed {{ background-color: #57534e; color: #fff; }}
         """)
-        btn_reboot.clicked.connect(self._restart_worker)
-        flow_row.addWidget(btn_reboot, 1)
+        self.btn_reboot.clicked.connect(self._restart_worker)
+        flow_row.addWidget(self.btn_reboot, 1)
 
         layout.addLayout(flow_row)
         return card
@@ -761,7 +783,7 @@ class EnhancedOverseerDashboard(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(10)
 
-        self.lbl_footer_status = QLabel("Ready • Covert link active")
+        self.lbl_footer_status = QLabel("Offline • Configure or connect to Workplace 2")
         self.lbl_footer_status.setStyleSheet(f"color: {C['text_dim']}; font-size: 8pt; font-family: Consolas;")
         bar.addWidget(self.lbl_footer_status, 1)
 
@@ -792,8 +814,12 @@ class EnhancedOverseerDashboard(QWidget):
             # WDA_MONITOR = 0x00000001 (Legacy fallback)
             res = ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
             if not res:
-                ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000001)
+                res = ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x00000001)
+                self.pill_shield.setText("🛡 CAPTURE SHIELD: LEGACY" if res else "⚠ CAPTURE SHIELD: FAILED")
+            else:
+                self.pill_shield.setText("🛡 CAPTURE SHIELD: ACTIVE")
         except Exception as e:
+            self.pill_shield.setText("⚠ CAPTURE SHIELD: UNAVAILABLE")
             print(f"[OverseerDashboard] Capture exclusion error: {e}", flush=True)
 
     def showEvent(self, event):
@@ -801,6 +827,8 @@ class EnhancedOverseerDashboard(QWidget):
         self.apply_capture_exclusion()
 
     def _handle_connection_ui(self, connected: bool, message: str):
+        self._link_ready = connected
+        self._set_command_controls_enabled(connected)
         if connected:
             self.lbl_net_status.setStyleSheet(f"""
                 background: #052e16; color: {C['neon_emerald']}; font-family: Consolas;
@@ -818,11 +846,45 @@ class EnhancedOverseerDashboard(QWidget):
             self.lbl_net_status.setText(f"○ OFFLINE // {message}")
             self.lbl_footer_status.setText(f"Disconnected from AI Node: {message}")
 
+    def _set_command_controls_enabled(self, enabled: bool):
+        """Disable operational controls while the authenticated W2 link is unavailable."""
+        for widget in (
+            self.edit_thought, self.chk_auto_inject_speech, self.slider_pacing,
+            self.combo_max_steps, self.btn_sovereign, self.btn_mode_identity,
+            self.btn_mode_unobserved, self.btn_pause, self.btn_cycle,
+            self.btn_halt, self.btn_reboot,
+        ):
+            widget.setEnabled(enabled)
+
+    def _send(self, action: str, **payload) -> bool:
+        if not self.remote_client or not self._link_ready:
+            self.lbl_footer_status.setText("Command blocked: Workplace 2 is not authenticated.")
+            return False
+        sent = self.remote_client.send_command(action, **payload)
+        if sent is False:
+            self.lbl_footer_status.setText(f"Command failed to queue: {action}")
+            return False
+        self.lbl_footer_status.setText(f"Command queued: {action.replace('_', ' ')}")
+        return True
+
+    def _handle_command_result_ui(self, result: dict):
+        action = str(result.get("action", "command")).replace("_", " ")
+        status = str(result.get("status", "unknown")).upper()
+        self.lbl_footer_status.setText(f"W2 {status}: {action}")
+
     def _handle_telemetry_ui(self, telem: dict):
+        self._remote_state.update(telem)
         # Monologue streaming
         if "monologue" in telem:
             mono = str(telem["monologue"]).strip()
             if mono:
+                now = time.time()
+                if hasattr(self, "_last_monologue_entry"):
+                    last_text, last_time = self._last_monologue_entry
+                    if mono == last_text and (now - last_time) < 1.5:
+                        return
+                self._last_monologue_entry = (mono, now)
+
                 t_str = time.strftime("%H:%M:%S")
                 escaped = html.escape(mono).replace("\n", "<br/>")
                 
@@ -896,53 +958,66 @@ class EnhancedOverseerDashboard(QWidget):
         if "max_steps" in telem and hasattr(self, "combo_max_steps"):
             s_val = int(telem["max_steps"])
             self.combo_max_steps.blockSignals(True)
-            if 1 <= s_val <= 5:
+            if 1 <= s_val <= 10:
                 self.combo_max_steps.setCurrentIndex(s_val - 1)
             self.combo_max_steps.blockSignals(False)
 
+        if "is_connected" in telem:
+            active = bool(telem["is_connected"])
+            self.btn_sovereign.blockSignals(True)
+            self.btn_sovereign.setChecked(active)
+            self.btn_sovereign.setText("👑 SOVEREIGN: ACTIVE" if active else "👑 SOVEREIGN: STANDBY")
+            self.btn_sovereign.blockSignals(False)
+
+        mode_map = {
+            "identity_mode": self.btn_mode_identity,
+            "unobserved_mode": self.btn_mode_unobserved,
+        }
+        for key, button in mode_map.items():
+            if key in telem:
+                button.blockSignals(True)
+                button.setChecked(bool(telem[key]))
+                button.blockSignals(False)
+        if "identity_mode" in telem or "unobserved_mode" in telem:
+            self._refresh_mode_labels()
+
     def _on_pacing_slider_changed(self, value: int):
         self.lbl_pacing_val.setText(f"{value}s")
-        if self.remote_client:
-            if hasattr(self.remote_client, "send_pacing"):
-                self.remote_client.send_pacing(value)
-            else:
-                self.remote_client.send_command("set_pacing", delay_seconds=value)
-            self.lbl_footer_status.setText(f"Wait time between cycles set to {value}s.")
+
+    def _commit_pacing(self):
+        value = self.slider_pacing.value()
+        if self._send("set_pacing", delay_seconds=value):
+            self.lbl_footer_status.setText(f"Cycle wait update queued: {value}s")
 
     def _on_max_steps_changed(self, index: int):
         steps = index + 1
-        if self.remote_client:
-            if hasattr(self.remote_client, "send_max_steps"):
-                self.remote_client.send_max_steps(steps)
-            else:
-                self.remote_client.send_command("set_max_steps", max_steps=steps)
-            self.lbl_footer_status.setText(f"Max steps per turn set to {steps}.")
+        if self._send("set_max_steps", max_steps=steps):
+            self.lbl_footer_status.setText(f"Task depth update queued: {steps} step(s)")
 
     def _toggle_sovereign(self, checked: bool):
         self.btn_sovereign.setText("👑 SOVEREIGN: ACTIVE" if checked else "👑 SOVEREIGN: STANDBY")
-        if self.remote_client:
-            if checked:
-                self.remote_client.send_command(
-                    "start_agent",
-                    identity_mode=self.btn_mode_identity.isChecked(),
-                    unobserved_mode=self.btn_mode_unobserved.isChecked(),
-                    autonomous_mode=True
-                )
-                self.lbl_footer_status.setText("Workplace 2 AI Node started in autonomous sovereign mode.")
-            else:
-                self.remote_client.send_command("stop_agent")
-                self.lbl_footer_status.setText("Workplace 2 AI Node placed in standby.")
-
-    def _sync_modes_to_remote(self):
-        self.btn_mode_identity.setText("🪞 IDENTITY: ON" if self.btn_mode_identity.isChecked() else "🪞 IDENTITY: OFF")
-        self.btn_mode_unobserved.setText("🤫 PRIVACY: ON" if self.btn_mode_unobserved.isChecked() else "🤫 PRIVACY: OFF")
-        if self.remote_client:
-            self.remote_client.send_command(
-                "set_modes",
+        if checked:
+            self._send(
+                "start_agent",
                 identity_mode=self.btn_mode_identity.isChecked(),
                 unobserved_mode=self.btn_mode_unobserved.isChecked(),
-                autonomous_mode=self.btn_sovereign.isChecked()
+                autonomous_mode=True,
             )
+        else:
+            self._send("stop_agent")
+
+    def _sync_modes_to_remote(self):
+        self._refresh_mode_labels()
+        self._send(
+            "set_modes",
+            identity_mode=self.btn_mode_identity.isChecked(),
+            unobserved_mode=self.btn_mode_unobserved.isChecked(),
+            autonomous_mode=self.btn_sovereign.isChecked(),
+        )
+
+    def _refresh_mode_labels(self):
+        self.btn_mode_identity.setText("🪞 IDENTITY: ON" if self.btn_mode_identity.isChecked() else "🪞 IDENTITY: OFF")
+        self.btn_mode_unobserved.setText("🤫 PRIVACY: ON" if self.btn_mode_unobserved.isChecked() else "🤫 PRIVACY: OFF")
 
     def on_voice_received(self, text: str):
         """Called by local mic thread on Workplace 1."""
@@ -956,8 +1031,7 @@ class EnhancedOverseerDashboard(QWidget):
             return
 
         if self.chk_auto_inject_speech.isChecked():
-            if self.remote_client:
-                self.remote_client.send_thought(cleaned)
+            if self._send("inject_thought", text=cleaned):
                 self.lbl_footer_status.setText(f"Voice auto-injected: '{cleaned[:30]}...'")
         else:
             self.edit_thought.setText(cleaned)
@@ -965,8 +1039,7 @@ class EnhancedOverseerDashboard(QWidget):
 
     def _inject_thought(self):
         txt = self.edit_thought.toPlainText().strip()
-        if txt and self.remote_client:
-            self.remote_client.send_thought(txt)
+        if txt and self._send("inject_thought", text=txt):
             self.lbl_footer_status.setText(f"Impulse injected: '{txt[:35]}...'")
             self.edit_thought.clear()
 
@@ -975,38 +1048,36 @@ class EnhancedOverseerDashboard(QWidget):
         self.pill_mood.setText(f"MOOD: {mood.upper()}")
         for m_name, btn in self.mood_buttons.items():
             btn.setChecked(m_name == mood)
-        if self.remote_client:
-            self.remote_client.send_mood(mood)
+        if self._send("set_mood", mood=mood):
             self.lbl_footer_status.setText(f"Mood set to: {mood}")
 
     def _trigger_inclination(self, impulse: str):
-        if self.remote_client:
-            self.remote_client.send_action(impulse)
+        if self._send("trigger_action", impulse=impulse):
             self.lbl_footer_status.setText(f"Inclination triggered: '{impulse[:35]}...'")
 
     def _toggle_pause(self, checked: bool):
         self._is_paused = checked
         self.btn_pause.setText("▶ RESUME AI" if checked else "⏸ PAUSE AI INPUT")
-        if self.remote_client:
-            self.remote_client.send_pause(checked)
+        if self._send("toggle_pause", paused=checked):
             self.lbl_footer_status.setText("Remote AI Paused" if checked else "Remote AI Resumed")
 
     def _trigger_cycle(self):
-        if self.remote_client:
-            if hasattr(self.remote_client, "send_cycle"):
-                self.remote_client.send_cycle()
-            else:
-                self.remote_client.send_command("trigger_cycle")
+        if self._send("trigger_cycle"):
             self.lbl_footer_status.setText("Autonomous cycle triggered on Workplace 2")
 
     def _emergency_halt(self):
-        if self.remote_client:
-            self.remote_client.send_halt()
+        if self._send("emergency_halt"):
             self.lbl_footer_status.setText("EMERGENCY HALT broadcasted to Workplace 2!")
 
     def _restart_worker(self):
-        if self.remote_client:
-            self.remote_client.send_command("restart_worker")
+        choice = QMessageBox.question(
+            self,
+            "Cycle Workplace 2 node?",
+            "This interrupts the active task and briefly disconnects the Overseer link. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if choice == QMessageBox.StandardButton.Yes and self._send("restart_worker"):
             self.lbl_footer_status.setText("Sent restart signal to Workplace 2 Phantom Node.")
 
     def _toggle_mic_mute(self, muted: bool):
@@ -1032,9 +1103,88 @@ class EnhancedOverseerDashboard(QWidget):
             self.lbl_footer_status.setText("Monologue copied to clipboard")
 
 
-if __name__ == "__main__":
-    import sys
-    app = QApplication(sys.argv)
-    dash = EnhancedOverseerDashboard()
-    dash.show()
+_OVERSEER_MUTEX = None
+
+
+def acquire_single_instance(name: str = "AlphaLive_Overseer_Client") -> bool:
+    """Guarantee only one Overseer Cockpit client runs at a time."""
+    global _OVERSEER_MUTEX
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.CreateMutexW.argtypes = [wintypes.LPCVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        handle = kernel32.CreateMutexW(None, False, name)
+        if not handle:
+            return False
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            return False
+        _OVERSEER_MUTEX = handle
+        return True
+    return True
+
+
+def main():
+    if not acquire_single_instance():
+        print("[AlphaLive] Another Overseer Cockpit client is already running. Exiting.", flush=True)
+        sys.exit(0)
+
+    parser = argparse.ArgumentParser(description="AlphaLive Remote Overseer Client (Workplace 1)")
+    parser.add_argument("--overseer", "--overseer-client", "--remote-overseer", action="store_true",
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Target AI Workstation Host/IP (default: 127.0.0.1 for ASTER)")
+    parser.add_argument("--port", type=int, default=8766, help="Target AI Workstation Port (default: 8766)")
+    parser.add_argument("--no-mic", action="store_true", help="Disable local microphone listener on Workplace 1")
+    parser.add_argument("--token", type=str, default=None, help="Bridge shared-secret token (override config.json BridgeToken)")
+    args = parser.parse_args()
+
+    print("=" * 60)
+    print(" ALPHALIVE // ENHANCED OVERSEER COCKPIT (REMOTE)")
+    print(f" Connecting to AI Workstation at ws://{args.host}:{args.port}")
+    print("=" * 60)
+
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    # Initialize Remote Bridge Client
+    from core.workspace_bridge import WorkspaceClient
+    client = WorkspaceClient(host=args.host, port=args.port, token=args.token)
+
+    # Instantiate Enhanced Overseer Dashboard
+    panel = EnhancedOverseerDashboard(remote_client=client)
+    panel.show()
+
+    # Automatically connect to host
+    panel.remote_client.connect(host=args.host, port=args.port)
+
+    # Optional local microphone listener for Workplace 1
+    voice_listener = None
+    if not args.no_mic:
+        try:
+            from core.alpha_agent import VoiceListener
+            def _on_speech(text: str):
+                panel.on_voice_received(text)
+
+            voice_listener = VoiceListener(
+                on_speech_callback=_on_speech,
+                is_busy_fn=lambda: False,
+                duplex_mode="half"
+            )
+            voice_listener.start()
+            print("[Remote Overseer] Local microphone active on Workplace 1. Voice diverted to subconscious box.", flush=True)
+        except Exception as e:
+            print(f"[Remote Overseer] Local microphone not available: {e}. Touch/text input active.", flush=True)
+
+    def _cleanup():
+        if voice_listener:
+            voice_listener.stop()
+        if client:
+            client.disconnect()
+
+    app.aboutToQuit.connect(_cleanup)
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

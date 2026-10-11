@@ -39,10 +39,13 @@ except ImportError:
 from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener
 from ui.overlays import CoordinateOverlay, CalibrationOverlay, OverseerControlPanel
 from ui.overseer_dashboard import EnhancedOverseerDashboard
-from core.workspace_bridge import WorkspaceClient, WorkspaceServer
+from core.workspace_bridge import WorkspaceClient
 from memory.memory_manager import MemoryManager
 from memory.character_manager import CharacterManager
-from studio.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
+try:
+    from core.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
+except ImportError:
+    from studio.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
 from ui.agent_tabs import AgentMemoryTab, AgentStudioTab, AgentCharactersTab, AgentMonitorTab
 from ui.agent_comms_tab import AgentCommsTab
 
@@ -496,116 +499,9 @@ class AgentMainWindow(QMainWindow):
 
         self._build_ui()
         
-        # --- Multi-Workspace Bridge Server (Runs ONLY on Host AI Node / Workplace 2) ---
+        # Workplace 2 is hosted exclusively by aster-worker/worker_main.py. Keeping
+        # the GUI client-only prevents protocol and safety behavior from diverging.
         self.ws_server = None
-        is_worker = ("--aster-worker" in sys.argv) or ("--worker" in sys.argv) or ("--host" in sys.argv)
-        if is_worker:
-            try:
-                from core.workspace_bridge import WorkspaceServer
-
-                def _argv_flag(flag, default):
-                    try:
-                        idx = sys.argv.index(flag)
-                        return sys.argv[idx + 1]
-                    except (ValueError, IndexError):
-                        return default
-
-                worker_host = _argv_flag("--host", "127.0.0.1")
-                worker_port = int(_argv_flag("--port", "8766"))
-                self.ws_server = WorkspaceServer(host=worker_host, port=worker_port)
-                
-                def handle_remote_command(cmd, payload):
-                    def _dispatch():
-                        try:
-                            if cmd in ("inject_thought", "thought_inject"):
-                                txt = payload.get("text", "").strip()
-                                if txt:
-                                    if getattr(self.agent, "identity_mode", False):
-                                        self._on_overseer_thought_injected(txt)
-                                    else:
-                                        self._run_task(txt)
-                            elif cmd in ("voice_input", "inject_voice", "voice_inject"):
-                                txt = payload.get("text", "").strip()
-                                if txt:
-                                    if getattr(self.agent, "identity_mode", False):
-                                        self._on_overseer_thought_injected(txt)
-                                    else:
-                                        self._run_task(txt)
-                            elif cmd in ("run_task", "user_prompt"):
-                                txt = payload.get("text") or payload.get("goal") or ""
-                                txt = txt.strip()
-                                if txt:
-                                    self._run_task(txt)
-                            elif cmd in ("start_agent", "power_on"):
-                                self.is_connected = True
-                                ident = bool(payload.get("identity_mode", False))
-                                unobs = bool(payload.get("unobserved_mode", False))
-                                auto = bool(payload.get("autonomous_mode", False))
-                                self.agent.identity_mode = ident
-                                self.agent.unobserved_mode = unobs
-                                self.agent.autonomous_mode = auto
-                                if ident or auto:
-                                    self.autonomous_loop_timer.start(30000)
-                                self._append_log("[REMOTE] Overseer started AI Node.", C["neon_green"])
-                                self._update_status("ACTIVE // SOVEREIGN", C["neon_green"])
-                                if hasattr(self, "ws_server") and self.ws_server:
-                                    self.ws_server.broadcast_telemetry({"agent_state": "ACTIVE // SOVEREIGN", "is_connected": True})
-                            elif cmd in ("stop_agent", "power_off"):
-                                self.is_connected = False
-                                if self.agent.is_running:
-                                    self.agent.abort()
-                                self.autonomous_loop_timer.stop()
-                                self._append_log("[REMOTE] Overseer stopped AI Node.", C["neon_yellow"])
-                                self._update_status("STANDBY // SLEEPING", C["text_dim"])
-                                if hasattr(self, "ws_server") and self.ws_server:
-                                    self.ws_server.broadcast_telemetry({"agent_state": "STANDBY // SLEEPING", "is_connected": False})
-                            elif cmd in ("set_mood", "mood_inject"):
-                                mood = payload.get("mood", "").strip()
-                                if mood:
-                                    self._on_overseer_mood_selected(mood)
-                            elif cmd in ("trigger_action", "action_inject"):
-                                impulse = payload.get("impulse", "").strip()
-                                if impulse:
-                                    self.is_connected = True
-                                    self._on_overseer_action_requested(impulse)
-                            elif cmd in ("toggle_pause", "pause"):
-                                paused = bool(payload.get("paused", False))
-                                self._on_overseer_pause_toggled(paused)
-                            elif cmd in ("emergency_halt", "halt"):
-                                self._on_overseer_emergency_halt()
-                            elif cmd in ("trigger_cycle", "tick"):
-                                self.is_connected = True
-                                if not getattr(self.agent, "identity_mode", False) and not getattr(self.agent, "autonomous_mode", False):
-                                    self.agent.identity_mode = True
-                                self._on_autonomous_loop_tick()
-                            elif cmd in ("set_modes", "modes_sync"):
-                                ident = payload.get("identity_mode", getattr(self.agent, "identity_mode", False))
-                                unobs = payload.get("unobserved_mode", getattr(self.agent, "unobserved_mode", False))
-                                auto = payload.get("autonomous_mode", getattr(self.agent, "autonomous_mode", False))
-                                self.agent.identity_mode = bool(ident)
-                                self.agent.unobserved_mode = bool(unobs)
-                                self.agent.autonomous_mode = bool(auto)
-                                if "is_connected" in payload:
-                                    self.is_connected = bool(payload["is_connected"])
-                                if self.is_connected and (self.agent.identity_mode or self.agent.autonomous_mode):
-                                    self.autonomous_loop_timer.start(5000)
-                                    print("[AlphaLive Remote] Identity/Autonomous Mode active on Workplace 2.", flush=True)
-                                else:
-                                    self.autonomous_loop_timer.stop()
-                                    print("[AlphaLive Remote] Identity/Autonomous Mode stopped on Workplace 2.", flush=True)
-                            elif cmd in ("restart_worker", "shutdown_worker", "kill_worker"):
-                                print("[AlphaLive Remote] Received shutdown/restart request from Overseer.", flush=True)
-                                QApplication.quit()
-                        except Exception as err:
-                            print(f"[AlphaLive] Remote command dispatch error ({cmd}): {err}", flush=True)
-                    self.signals.run_on_gui.emit(_dispatch)
-                
-                self.ws_server.on_command = handle_remote_command
-                self.ws_server.start()
-                print("[AlphaLive] Workspace Bridge Server actively listening on port 8766.", flush=True)
-            except Exception as e:
-                print(f"[AlphaLive] Failed to start WorkspaceServer: {e}", flush=True)
-            
         self._update_mic_ui_style()
         self._update_session_display()
         self._replay_session_history_into_console(self.agent.current_session, max_turns=15)
@@ -667,6 +563,10 @@ class AgentMainWindow(QMainWindow):
         if self.calib_overlay: self.calib_overlay.close()
         if self.overseer_panel: self.overseer_panel.close()
         if self.voice_listener: self.voice_listener.stop()
+        if hasattr(self, "ws_client") and self.ws_client:
+            self.ws_client.disconnect()
+        if hasattr(self, "ws_server") and self.ws_server:
+            self.ws_server.stop()
         event.accept()
 
     def _load_saved_mic_index(self) -> int | None:
@@ -3300,7 +3200,7 @@ class AgentMainWindow(QMainWindow):
         if not hasattr(self, "overseer_panel") or not self.overseer_panel:
             return
         # Suppress floating HUD overlay in Multi-Workspace mode since we use the embedded OVERSEER tab
-        if getattr(self, "is_remote_workspace_mode", False) or "--aster-worker" in sys.argv:
+        if getattr(self, "is_remote_workspace_mode", False):
             if self.overseer_panel.isVisible():
                 self.overseer_panel.hide()
             return
@@ -3474,6 +3374,13 @@ class AgentMainWindow(QMainWindow):
         if connected:
             self._append_log(f"[MULTI-WS] {message}", C["neon_green"])
             self._update_status("OVERSEER LINKED // W2 ONLINE", C["neon_green"])
+            if self.is_remote_workspace_mode:
+                self.ws_client.send_command(
+                    "set_modes",
+                    identity_mode=getattr(self.agent, "identity_mode", False),
+                    unobserved_mode=getattr(self.agent, "unobserved_mode", False),
+                    autonomous_mode=getattr(self.agent, "autonomous_mode", False),
+                )
         else:
             self._append_log(f"[MULTI-WS] Link status: {message}", C["text_dim"])
 
@@ -3514,28 +3421,14 @@ def main():
     painter.drawRoundedRect(22, 182, 350, 8, 2, 2)
     painter.end()
 
-    is_aster_worker = "--aster-worker" in sys.argv
+    splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
+    splash.show()
+    app.processEvents()
 
-    if is_aster_worker:
-        print("[AlphaLive] Starting in ASTER Worker mode (Invisible Background Service)...", flush=True)
-        win = AgentMainWindow()
-        win.is_connected = True
-        win.agent.desktop_control = True
-        if hasattr(win, 'hud') and win.hud:
-            win.hud.hide()
-        if hasattr(win, 'overseer_panel') and win.overseer_panel:
-            win.overseer_panel.hide()
-        # Do not show splash or main window
-        app.exec()
-    else:
-        splash = QSplashScreen(splash_pix, Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.FramelessWindowHint)
-        splash.show()
-        app.processEvents()
-
-        win = AgentMainWindow()
-        win.showMaximized()
-        splash.finish(win)
-        app.exec()
+    win = AgentMainWindow()
+    win.showMaximized()
+    splash.finish(win)
+    app.exec()
 
 
 if __name__ == "__main__":

@@ -14,3 +14,5 @@ alphacore.txt
 *.sqlite
 .pytest_cache/
 scratch/
+System Volume Information/
+$RECYCLE.BIN/

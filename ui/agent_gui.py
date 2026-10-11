@@ -3044,6 +3044,22 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_unobserved.setText("🕶 PRIVACY: OFF")
             self.btn_t_unobserved.setStyleSheet("color: #708caa;")
             self.btn_t_unobserved.setChecked(False)
+        # Sync settings tab checkboxes
+        for chk_name, attr_name in [
+            ("chk_identity_mode", "identity_mode"),
+            ("chk_unobserved_mode", "unobserved_mode"),
+            ("chk_studio_mode", "studio_mode"),
+            ("chk_autonomous_mode", "autonomous_mode"),
+            ("chk_automation_mode", "automation_mode"),
+        ]:
+            if hasattr(self, chk_name):
+                chk = getattr(self, chk_name)
+                val = getattr(self.agent, attr_name, False)
+                if chk.isChecked() != val:
+                    chk.blockSignals(True)
+                    chk.setChecked(val)
+                    chk.blockSignals(False)
+
         self._sync_overseer_panel_visibility()
 
     def _toggle_quick_mic(self):
@@ -3187,7 +3203,7 @@ class AgentMainWindow(QMainWindow):
             self.ws_client.send_command("set_modes", identity_mode=self.agent.identity_mode, unobserved_mode=getattr(self.agent, "unobserved_mode", False), autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
             self._append_log(f"[MULTI-WS] Synced Identity Mode ({'ON' if self.agent.identity_mode else 'OFF'}) to Workplace 2.", C["neon_green"])
 
-        self._sync_overseer_panel_visibility()
+        self._sync_toggles()
 
     def _toggle_quick_unobserved(self):
         if not getattr(self.agent, "identity_mode", False):
@@ -3210,7 +3226,7 @@ class AgentMainWindow(QMainWindow):
             self.ws_client.send_command("set_modes", identity_mode=getattr(self.agent, "identity_mode", False), unobserved_mode=self.agent.unobserved_mode, autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
             self._append_log(f"[MULTI-WS] Synced Privacy/Sanctuary Mode ({'ON' if self.agent.unobserved_mode else 'OFF'}) to Workplace 2.", C["neon_cyan"])
 
-        self._sync_overseer_panel_visibility()
+        self._sync_toggles()
 
     def _on_alone_mode_toggled(self, checked: bool):
         self.agent.alone_mode = bool(checked)
@@ -3404,7 +3420,7 @@ class AgentMainWindow(QMainWindow):
                 self.chk_ws_placeholder.blockSignals(False)
             if hasattr(self, "hud") and self.hud:
                 self.hud.set_state("standby")
-        self._sync_overseer_panel_visibility()
+        self._sync_toggles()
 
     def _on_remote_telemetry(self, telem: dict):
         if "monologue" in telem:

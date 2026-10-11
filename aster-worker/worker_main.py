@@ -9,7 +9,6 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
 from core.alpha_agent import AlphaAgent
 from core.workspace_bridge import WorkspaceServer
-from memory.memory_manager import MemoryManager
 
 def main():
     print("[AlphaLive W2 Worker] Booting lightweight ASTER Worker...", flush=True)
@@ -21,10 +20,6 @@ def main():
 
     # Initialize Cognitive Engine
     agent = AlphaAgent(api_key=api_key)
-    
-    # Initialize Memory
-    if hasattr(agent, "session_manager"):
-        agent.memory_mgr = MemoryManager(agent.session_manager.db_path)
     
     # Allow desktop control
     agent.desktop_control = True

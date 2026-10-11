@@ -44,12 +44,6 @@ def main():
             run_overseer_client.main()
             return
 
-        # Start Alexa Ingress Webhook Listener in background thread
-        try:
-            from integrations.alexa_ingress import start_ingress_server_thread
-            start_ingress_server_thread(host="0.0.0.0", port=8765)
-        except Exception as err:
-            if sys.stdout: print(f"[AlphaLive] Warning: Could not start Ingress Listener: {err}")
 
         try:
             import ctypes

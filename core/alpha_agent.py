@@ -348,8 +348,8 @@ class VoiceEngine:
             self._clause_buffer = ""
         self._clause_buffer += token
 
-        # Split on sentence boundaries, punctuation pauses, or clause delimiters
-        clause_pattern = re.compile(r'([.?!;:\n]+|,\s+|\s+(?:and|but|however|because|then)\s+)', re.IGNORECASE)
+        # Split on sentence boundaries to avoid stuttering and Orpheus API drops on tiny fragments
+        clause_pattern = re.compile(r'([.?!;:\n]+)', re.IGNORECASE)
         match = clause_pattern.search(self._clause_buffer)
         if match:
             split_idx = match.end()

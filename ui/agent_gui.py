@@ -588,8 +588,7 @@ class AgentMainWindow(QMainWindow):
                                 QApplication.quit()
                         except Exception as err:
                             print(f"[AlphaLive] Remote command dispatch error ({cmd}): {err}", flush=True)
-
-                    QTimer.singleShot(0, _dispatch)
+                    self.signals.run_on_gui.emit(_dispatch)
                 
                 self.ws_server.on_command = handle_remote_command
                 self.ws_server.start()
@@ -1621,7 +1620,7 @@ class AgentMainWindow(QMainWindow):
         btn_launch_ws_ph.setEnabled(True)
         btn_launch_ws_ph.setStyleSheet(f"background: #08111d; color: #00f0ff; border: 1px dashed {C['border']}; border-radius: 4px; padding: 4px 8px; font-family: Consolas; font-size: 10px; font-weight: bold;")
         row_ws_ph.addWidget(btn_launch_ws_ph, 1)
-        btn_launch_ws_ph.clicked.connect(lambda: (self.btn_t_workspace.setChecked(True), self._toggle_multi_workspace_mode(), self.main_tabs.setCurrentWidget(self.overseer_tab)))
+        btn_launch_ws_ph.clicked.connect(lambda: (self.btn_t_workspace.setChecked(True), self._toggle_multi_workspace_mode(), None))
         ws_layout.addLayout(row_ws_ph)
         l_auto.addWidget(grp_multi_ws)
 
@@ -3232,6 +3231,7 @@ class AgentMainWindow(QMainWindow):
             self._update_status("ALONE MODE: OFF", C["text_dim"])
 
     def _on_autonomous_loop_tick(self):
+        print(f"[_on_autonomous_loop_tick] Triggered. is_remote_workspace_mode={getattr(self, 'is_remote_workspace_mode', False)} is_connected={getattr(self, 'is_connected', False)} is_running={self.agent.is_running} voice_busy={self.agent.voice.is_busy()} identity_mode={getattr(self.agent, 'identity_mode', False)} autonomous_mode={getattr(self.agent, 'autonomous_mode', False)}", flush=True)
         if getattr(self, "is_remote_workspace_mode", False):
             # Do NOT run autonomous turns locally on Workplace 1 Overseer
             return
@@ -3387,9 +3387,6 @@ class AgentMainWindow(QMainWindow):
                         is_connected=self.is_connected
                     )
             QTimer.singleShot(1500, _sync)
-
-            if hasattr(self, "overseer_tab") and hasattr(self, "main_tabs"):
-                self.main_tabs.setCurrentWidget(self.overseer_tab)
             if hasattr(self, "chk_ws_placeholder"):
                 self.chk_ws_placeholder.blockSignals(True)
                 self.chk_ws_placeholder.setChecked(True)

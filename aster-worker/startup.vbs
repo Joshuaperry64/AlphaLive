@@ -1,5 +1,10 @@
-Set WshShell = CreateObject("WScript.Shell")
-' Hardcoded to Z:\ since this file will be moved to the Windows Startup folder
-WshShell.CurrentDirectory = "Z:\"
-WshShell.Run chr(34) & "Z:\.venv\Scripts\python.exe" & Chr(34) & " worker_main.py", 0
-Set WshShell = Nothing
+Set objShell = CreateObject("WScript.Shell")
+
+' Enforce execution strictly in the local Worker directory
+workerDir = "C:\Users\AlphaAI\Documents\Worker"
+
+' Construct the silent execution command using the global python executable
+cmd = "cmd.exe /c cd /d """ & workerDir & """ && py worker_main.py --aster-worker"
+
+' Run the command completely hidden (0) and do not wait for it to return (False)
+objShell.Run cmd, 0, False

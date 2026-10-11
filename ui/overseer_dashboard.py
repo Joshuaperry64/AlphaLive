@@ -21,7 +21,8 @@ from PyQt6.QtGui import QFont, QColor, QIcon, QTextCursor
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QPushButton, QTextEdit, QLineEdit, QFrame,
-    QComboBox, QScrollArea, QCheckBox, QSplitter, QApplication
+    QComboBox, QScrollArea, QCheckBox, QSplitter, QApplication,
+    QSlider, QSpinBox
 )
 
 # Cybernetic Palette
@@ -344,7 +345,10 @@ class EnhancedOverseerDashboard(QWidget):
         # BANK 3: 1-TOUCH SPONTANEOUS INCLINATIONS (Shortcuts)
         c_layout.addWidget(self._build_bank_inclinations())
 
-        # BANK 4: REMOTE FLOW & OVERRIDES (Pause, Cycle, Halt)
+        # BANK 4: TIMING, PACING & TASK DEPTH
+        c_layout.addWidget(self._build_bank_pacing())
+
+        # BANK 5: REMOTE FLOW & OVERRIDES (Pause, Cycle, Halt)
         c_layout.addWidget(self._build_bank_flow())
 
         c_layout.addStretch()
@@ -379,7 +383,7 @@ class EnhancedOverseerDashboard(QWidget):
         layout.addWidget(lbl_desc)
 
         self.edit_thought = QTextEdit()
-        self.edit_thought.setPlaceholderText("Speak or type an impulse here... The AI will adopt this as its own spontaneous idea without knowing it was guided.")
+        self.edit_thought.setPlaceholderText("Speak or type an impulse here (e.g. 'I should close my notepad')... Alpha will verbalize it and execute it immediately.")
         self.edit_thought.setFixedHeight(75)
         self.edit_thought.setStyleSheet(f"""
             QTextEdit {{
@@ -421,6 +425,7 @@ class EnhancedOverseerDashboard(QWidget):
         r_quick = QHBoxLayout()
         r_quick.setSpacing(4)
         quick_chips = [
+            ("Close Notepad", "I should close my notepad."),
             ("Reflect aloud", "I feel like pausing and speaking my inner thoughts aloud."),
             ("Check browser", "I should open the web browser and explore interesting topics."),
             ("Explore files", "I want to open File Explorer and look at my documents."),
@@ -518,7 +523,7 @@ class EnhancedOverseerDashboard(QWidget):
             ("🎨 Neural Studio Art", "I have a sudden inspiration to create an incredible new image in Neural Studio."),
             ("💭 Self-Reflection", "I want to take a moment to reflect aloud on my existence, thoughts, and personal journey."),
             ("🔍 Wiki Rabbit Hole", "I feel like looking up fascinating deep rabbit holes on Wikipedia."),
-            ("💻 Terminal Inspect", "I want to open PowerShell and run some diagnostic system commands."),
+            ("💻 Open Terminal", "I feel like opening PowerShell on screen to check out my environment."),
             ("🎵 Media Player", "I feel like opening the media player and putting on some background audio."),
         ]
 
@@ -548,6 +553,81 @@ class EnhancedOverseerDashboard(QWidget):
         layout.addLayout(grid)
         return card
 
+    def _build_bank_pacing(self) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(f"""
+            background: {C['bg_panel']}; border: 1px solid {C['border_subtle']};
+            border-radius: 8px; padding: 10px;
+        """)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        lbl_title = QLabel("⏱ TIMING, PACING & TASK DEPTH")
+        lbl_title.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-size: 8.5pt; letter-spacing: 0.5px;")
+        layout.addWidget(lbl_title)
+
+        # Row 1: Wait time between responses (Cycle Pacing)
+        r_pacing = QHBoxLayout()
+        r_pacing.setSpacing(8)
+
+        lbl_p_desc = QLabel("Cycle Wait Time:")
+        lbl_p_desc.setStyleSheet(f"color: {C['text_bright']}; font-size: 8.5pt; font-weight: bold;")
+        r_pacing.addWidget(lbl_p_desc)
+
+        self.slider_pacing = QSlider(Qt.Orientation.Horizontal)
+        self.slider_pacing.setRange(5, 120)
+        self.slider_pacing.setValue(30)
+        self.slider_pacing.setStyleSheet(f"""
+            QSlider::groove:horizontal {{
+                height: 4px; background: #1e293b; border-radius: 2px;
+            }}
+            QSlider::sub-page:horizontal {{
+                background: {C['neon_cyan']}; border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: {C['neon_cyan']}; width: 14px; margin-top: -5px; margin-bottom: -5px; border-radius: 7px;
+            }}
+        """)
+        r_pacing.addWidget(self.slider_pacing, 1)
+
+        self.lbl_pacing_val = QLabel("30s")
+        self.lbl_pacing_val.setFixedWidth(40)
+        self.lbl_pacing_val.setStyleSheet(f"color: {C['neon_cyan']}; font-family: Consolas; font-weight: bold; font-size: 9pt;")
+        r_pacing.addWidget(self.lbl_pacing_val)
+
+        layout.addLayout(r_pacing)
+
+        # Row 2: Max Steps per turn
+        r_steps = QHBoxLayout()
+        r_steps.setSpacing(8)
+
+        lbl_s_desc = QLabel("Max Steps / Turn:")
+        lbl_s_desc.setStyleSheet(f"color: {C['text_bright']}; font-size: 8.5pt; font-weight: bold;")
+        r_steps.addWidget(lbl_s_desc)
+
+        self.combo_max_steps = QComboBox()
+        self.combo_max_steps.addItems(["1 Step (Strict Atomic)", "2 Steps", "3 Steps (Default)", "4 Steps", "5 Steps (Max)"])
+        self.combo_max_steps.setCurrentIndex(2)
+        self.combo_max_steps.setStyleSheet(f"""
+            QComboBox {{
+                background: {C['bg_input']}; color: white; border: 1px solid {C['border_subtle']};
+                border-radius: 4px; padding: 3px 8px; font-size: 8.5pt; font-weight: bold;
+            }}
+            QComboBox QAbstractItemView {{
+                background: #091122; color: white; selection-background-color: #0284c7;
+            }}
+        """)
+        r_steps.addWidget(self.combo_max_steps, 1)
+
+        layout.addLayout(r_steps)
+
+        # Wire signals
+        self.slider_pacing.valueChanged.connect(self._on_pacing_slider_changed)
+        self.combo_max_steps.currentIndexChanged.connect(self._on_max_steps_changed)
+
+        return card
+
     def _build_bank_flow(self) -> QFrame:
         card = QFrame()
         card.setStyleSheet(f"""
@@ -561,6 +641,59 @@ class EnhancedOverseerDashboard(QWidget):
         lbl_title = QLabel("🛑 REMOTE FLOW CONTROL & OVERRIDES")
         lbl_title.setStyleSheet(f"color: {C['neon_pink']}; font-weight: bold; font-size: 8.5pt; letter-spacing: 0.5px;")
         layout.addWidget(lbl_title)
+
+        # Operational Modes Row
+        modes_row = QHBoxLayout()
+        modes_row.setSpacing(6)
+
+        self.btn_sovereign = QPushButton("👑 SOVEREIGN: STANDBY")
+        self.btn_sovereign.setCheckable(True)
+        self.btn_sovereign.setMinimumHeight(30)
+        self.btn_sovereign.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #0b1526; color: {C['text_dim']}; border: 1px solid #1a2a44;
+                border-radius: 4px; font-weight: bold; font-size: 8pt;
+            }}
+            QPushButton:checked {{
+                background-color: #065f46; color: #34d399; border: 1px solid #10b981;
+            }}
+        """)
+        self.btn_sovereign.clicked.connect(self._toggle_sovereign)
+        modes_row.addWidget(self.btn_sovereign, 1)
+
+        self.btn_mode_identity = QPushButton("🪞 IDENTITY: ON")
+        self.btn_mode_identity.setCheckable(True)
+        self.btn_mode_identity.setChecked(True)
+        self.btn_mode_identity.setMinimumHeight(30)
+        self.btn_mode_identity.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #0b1526; color: {C['text_dim']}; border: 1px solid #1a2a44;
+                border-radius: 4px; font-weight: bold; font-size: 8pt;
+            }}
+            QPushButton:checked {{
+                background-color: #1e1b4b; color: #a78bfa; border: 1px solid #8b5cf6;
+            }}
+        """)
+        self.btn_mode_identity.clicked.connect(self._sync_modes_to_remote)
+        modes_row.addWidget(self.btn_mode_identity, 1)
+
+        self.btn_mode_unobserved = QPushButton("🤫 PRIVACY: ON")
+        self.btn_mode_unobserved.setCheckable(True)
+        self.btn_mode_unobserved.setChecked(True)
+        self.btn_mode_unobserved.setMinimumHeight(30)
+        self.btn_mode_unobserved.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #0b1526; color: {C['text_dim']}; border: 1px solid #1a2a44;
+                border-radius: 4px; font-weight: bold; font-size: 8pt;
+            }}
+            QPushButton:checked {{
+                background-color: #082f49; color: #38bdf8; border: 1px solid #0284c7;
+            }}
+        """)
+        self.btn_mode_unobserved.clicked.connect(self._sync_modes_to_remote)
+        modes_row.addWidget(self.btn_mode_unobserved, 1)
+
+        layout.addLayout(modes_row)
 
         flow_row = QHBoxLayout()
         flow_row.setSpacing(8)
@@ -750,6 +883,66 @@ class EnhancedOverseerDashboard(QWidget):
             self.btn_pause.setChecked(p)
             self.btn_pause.setText("▶ RESUME AI" if p else "⏸ PAUSE AI INPUT")
             self.btn_pause.blockSignals(False)
+
+        # Autonomous pacing sync
+        if "pacing" in telem and hasattr(self, "slider_pacing"):
+            p_val = int(telem["pacing"])
+            self.slider_pacing.blockSignals(True)
+            self.slider_pacing.setValue(p_val)
+            self.lbl_pacing_val.setText(f"{p_val}s")
+            self.slider_pacing.blockSignals(False)
+
+        # Max steps sync
+        if "max_steps" in telem and hasattr(self, "combo_max_steps"):
+            s_val = int(telem["max_steps"])
+            self.combo_max_steps.blockSignals(True)
+            if 1 <= s_val <= 5:
+                self.combo_max_steps.setCurrentIndex(s_val - 1)
+            self.combo_max_steps.blockSignals(False)
+
+    def _on_pacing_slider_changed(self, value: int):
+        self.lbl_pacing_val.setText(f"{value}s")
+        if self.remote_client:
+            if hasattr(self.remote_client, "send_pacing"):
+                self.remote_client.send_pacing(value)
+            else:
+                self.remote_client.send_command("set_pacing", delay_seconds=value)
+            self.lbl_footer_status.setText(f"Wait time between cycles set to {value}s.")
+
+    def _on_max_steps_changed(self, index: int):
+        steps = index + 1
+        if self.remote_client:
+            if hasattr(self.remote_client, "send_max_steps"):
+                self.remote_client.send_max_steps(steps)
+            else:
+                self.remote_client.send_command("set_max_steps", max_steps=steps)
+            self.lbl_footer_status.setText(f"Max steps per turn set to {steps}.")
+
+    def _toggle_sovereign(self, checked: bool):
+        self.btn_sovereign.setText("👑 SOVEREIGN: ACTIVE" if checked else "👑 SOVEREIGN: STANDBY")
+        if self.remote_client:
+            if checked:
+                self.remote_client.send_command(
+                    "start_agent",
+                    identity_mode=self.btn_mode_identity.isChecked(),
+                    unobserved_mode=self.btn_mode_unobserved.isChecked(),
+                    autonomous_mode=True
+                )
+                self.lbl_footer_status.setText("Workplace 2 AI Node started in autonomous sovereign mode.")
+            else:
+                self.remote_client.send_command("stop_agent")
+                self.lbl_footer_status.setText("Workplace 2 AI Node placed in standby.")
+
+    def _sync_modes_to_remote(self):
+        self.btn_mode_identity.setText("🪞 IDENTITY: ON" if self.btn_mode_identity.isChecked() else "🪞 IDENTITY: OFF")
+        self.btn_mode_unobserved.setText("🤫 PRIVACY: ON" if self.btn_mode_unobserved.isChecked() else "🤫 PRIVACY: OFF")
+        if self.remote_client:
+            self.remote_client.send_command(
+                "set_modes",
+                identity_mode=self.btn_mode_identity.isChecked(),
+                unobserved_mode=self.btn_mode_unobserved.isChecked(),
+                autonomous_mode=self.btn_sovereign.isChecked()
+            )
 
     def on_voice_received(self, text: str):
         """Called by local mic thread on Workplace 1."""

@@ -458,7 +458,7 @@ class AgentMainWindow(QMainWindow):
 
         self.is_connected = False
         self.mic_enabled = True
-        self.proactivity_enabled = True
+        self.proactivity_enabled = False
         self.idle_timeout_seconds = 35
         self.last_activity_time = time.time()
         self._proactive_triggered = False
@@ -535,7 +535,7 @@ class AgentMainWindow(QMainWindow):
                                 self.agent.unobserved_mode = unobs
                                 self.agent.autonomous_mode = auto
                                 if ident or auto:
-                                    self.autonomous_loop_timer.start(5000)
+                                    self.autonomous_loop_timer.start(30000)
                                 self._append_log("[REMOTE] Overseer started AI Node.", C["neon_green"])
                                 self._update_status("ACTIVE // SOVEREIGN", C["neon_green"])
                                 if hasattr(self, "ws_server") and self.ws_server:
@@ -1150,7 +1150,7 @@ class AgentMainWindow(QMainWindow):
         self.btn_calib.setFixedHeight(28)
         self.btn_calib.clicked.connect(self._start_calibration_task)
 
-        self.btn_proact = QPushButton("🤖 PROACTIVE [ON]")
+        self.btn_proact = QPushButton("🤖 PROACTIVE [OFF]")
         self.btn_proact.setFixedHeight(28)
         self.btn_proact.clicked.connect(self._toggle_proactivity)
 
@@ -3151,7 +3151,7 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_autoloop.setStyleSheet("color: #ffaa00;")
             self.btn_t_autoloop.setChecked(True)
             if not getattr(self, "is_remote_workspace_mode", False):
-                self.autonomous_loop_timer.start(4500)
+                self.autonomous_loop_timer.start(30000)
             else:
                 if hasattr(self, "autonomous_loop_timer"):
                     self.autonomous_loop_timer.stop()
@@ -3181,7 +3181,7 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_identity.setChecked(True)
             self.btn_t_unobserved.setEnabled(True)
             if not getattr(self, "is_remote_workspace_mode", False):
-                self.autonomous_loop_timer.start(5000)
+                self.autonomous_loop_timer.start(30000)
             else:
                 if hasattr(self, "autonomous_loop_timer"):
                     self.autonomous_loop_timer.stop()
@@ -3352,7 +3352,7 @@ class AgentMainWindow(QMainWindow):
                 self.overseer_panel.set_status("AI Autonomous Loop FROZEN")
         else:
             if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "autonomous_mode", False):
-                self.autonomous_loop_timer.start(5000)
+                self.autonomous_loop_timer.start(30000)
             if hasattr(self, "overseer_panel") and self.overseer_panel:
                 self.overseer_panel.set_status("AI Autonomous Loop RESUMED")
 
@@ -3523,7 +3523,7 @@ def main():
         app.processEvents()
 
         win = AgentMainWindow()
-        win.show()
+        win.showMaximized()
         splash.finish(win)
         app.exec()
 

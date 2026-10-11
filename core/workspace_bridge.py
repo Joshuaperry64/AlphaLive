@@ -266,8 +266,36 @@ class WorkspaceClient:
     def send_restart_worker(self):
         self.send_command("restart_worker")
 
+    def send_pacing(self, delay_seconds: int):
+        self.send_command("set_pacing", delay_seconds=int(delay_seconds))
+
+    def send_max_steps(self, max_steps: int):
+        self.send_command("set_max_steps", max_steps=int(max_steps))
+
+    def send_start_agent(self, identity_mode: bool = True, autonomous_mode: bool = False, unobserved_mode: bool = False):
+        self.send_command("start_agent", identity_mode=identity_mode, autonomous_mode=autonomous_mode, unobserved_mode=unobserved_mode)
+
+    def send_stop_agent(self):
+        self.send_command("stop_agent")
+
+    def send_sync_modes(self, identity_mode: bool, autonomous_mode: bool, unobserved_mode: bool):
+        self.send_command("set_modes", identity_mode=identity_mode, autonomous_mode=autonomous_mode, unobserved_mode=unobserved_mode)
+
     def disconnect(self):
         self._running = False
         self._connected = False
+        if self._websocket and self._loop:
+            try:
+                asyncio.run_coroutine_threadsafe(self._websocket.close(), self._loop)
+            except Exception:
+                pass
         if self._loop:
             self._loop.call_soon_threadsafe(self._loop.stop)
+        if self._thread and self._thread.is_alive() and threading.current_thread() != self._thread:
+            try:
+                self._thread.join(timeout=1.0)
+            except Exception:
+                pass
+        self._thread = None
+        self._websocket = None
+        self._loop = None

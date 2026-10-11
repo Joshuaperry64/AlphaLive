@@ -11,6 +11,8 @@ Zero-latency loopback support for IBIK ASTER on 127.0.0.1, or LAN IP for multi-P
 import asyncio
 import json
 import logging
+import os
+import secrets
 import socket
 import threading
 import time
@@ -32,6 +34,29 @@ def get_local_ip() -> str:
         return "127.0.0.1"
 
 
+def resolve_bridge_token(override: Optional[str] = None) -> str:
+    """Resolve the Overseer bridge shared-secret token.
+
+    Priority: explicit argument -> ALPHALIVE_BRIDGE_TOKEN env -> config.json 'BridgeToken'.
+    Returns '' when no token is configured (authentication then remains disabled).
+    """
+    if override:
+        return str(override).strip()
+    env = os.getenv("ALPHALIVE_BRIDGE_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        cfg_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config.json"
+        )
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return str(json.load(f).get("Global", {}).get("BridgeToken", "") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
 class WorkspaceServer:
     """
     WebSocket Server running on the Host (AI Workstation / Workplace 2).
@@ -39,9 +64,10 @@ class WorkspaceServer:
     Broadcasts live stream-of-consciousness monologue and telemetry to connected Overseer clients.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8766):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8766, token: Optional[str] = None):
         self.host = host
         self.port = port
+        self.token = resolve_bridge_token(token)
         self.clients: Set[websockets.WebSocketServerProtocol] = set()
         self.on_command: Optional[Callable[[str, dict], None]] = None
         self._server = None
@@ -64,6 +90,13 @@ class WorkspaceServer:
         self._thread = threading.Thread(target=self._run_loop, name="OverseerBridgeServer", daemon=True)
         self._thread.start()
         time.sleep(0.3)
+        if not self.token and self.host not in ("127.0.0.1", "localhost", "::1"):
+            print(
+                f"[WorkspaceBridge] WARNING: server bound to {self.host} WITHOUT an auth token. "
+                f"Anyone on the LAN can send desktop-control commands. Set 'BridgeToken' in config.json "
+                f"or ALPHALIVE_BRIDGE_TOKEN to enable authentication.",
+                flush=True,
+            )
         print(f"[WorkspaceBridge] Server active on ws://{self.host}:{self.port} (LAN: {get_local_ip()}:{self.port})", flush=True)
 
     def _run_loop(self):
@@ -85,7 +118,33 @@ class WorkspaceServer:
     async def _handle_client(self, websocket):
         self.clients.add(websocket)
         peer = getattr(websocket, "remote_address", "client")
-        print(f"[WorkspaceBridge] Overseer client connected from {peer}", flush=True)
+
+        # Shared-secret authentication gate (enforced only when a token is configured).
+        if self.token:
+            authenticated = False
+            try:
+                first = await asyncio.wait_for(websocket.recv(), timeout=10)
+                data = json.loads(first)
+                authenticated = (
+                    data.get("type") == "auth"
+                    and secrets.compare_digest(str(data.get("token", "")), self.token)
+                )
+            except Exception:
+                authenticated = False
+
+            if not authenticated:
+                print(f"[WorkspaceBridge] Rejected unauthenticated Overseer client from {peer}", flush=True)
+                try:
+                    await websocket.send(json.dumps({"type": "error", "status": "unauthorized"}))
+                    await websocket.close()
+                except Exception:
+                    pass
+                self.clients.discard(websocket)
+                return
+
+            print(f"[WorkspaceBridge] Overseer client authenticated from {peer}", flush=True)
+        else:
+            print(f"[WorkspaceBridge] Overseer client connected from {peer} (no auth token configured)", flush=True)
 
         # Send initial handshake with current AI state
         try:
@@ -135,7 +194,11 @@ class WorkspaceServer:
                     to_remove.add(ws)
             self.clients.difference_update(to_remove)
 
-        asyncio.run_coroutine_threadsafe(_broadcast(), self._loop)
+        try:
+            asyncio.run_coroutine_threadsafe(_broadcast(), self._loop)
+        except Exception:
+            # The event loop may not be running yet during startup bind retries.
+            pass
 
     def stop(self):
         """Shut down the server cleanly."""
@@ -153,9 +216,10 @@ class WorkspaceClient:
     Receives live monologue telemetry from the remote AI.
     """
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 8766):
+    def __init__(self, host: str = "127.0.0.1", port: int = 8766, token: Optional[str] = None):
         self.host = host
         self.port = port
+        self.token = resolve_bridge_token(token)
         self.on_connection_change: Optional[Callable[[bool, str], None]] = None
         self.on_telemetry: Optional[Callable[[dict], None]] = None
         self._websocket = None
@@ -197,6 +261,10 @@ class WorkspaceClient:
                     if self.on_connection_change:
                         self.on_connection_change(True, f"LINKED // {self.host}:{self.port}")
 
+                    # Authenticate immediately when a shared token is configured.
+                    if self.token:
+                        await ws.send(json.dumps({"type": "auth", "token": self.token}))
+
                     async for message in ws:
                         try:
                             data = json.loads(message)
@@ -205,6 +273,9 @@ class WorkspaceClient:
                                 telem = data.get("data") or data.get("telemetry") or {}
                                 if self.on_telemetry:
                                     self.on_telemetry(telem)
+                            elif msg_type == "error":
+                                print(f"[WorkspaceClient] Server rejected connection: {data.get('status', 'unknown')}", flush=True)
+                                self._connected = False
                         except Exception as e:
                             print(f"[WorkspaceClient] Telemetry parse error: {e}", flush=True)
 

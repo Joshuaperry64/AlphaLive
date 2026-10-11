@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import argparse
 import threading
 import time
 import subprocess
@@ -61,6 +62,10 @@ class TurnCoordinator:
 
             steps = max_steps or self.max_turn_steps
             turn_id = self.agent._current_turn_id
+            # Claim the execution slot while still holding the lock so a concurrent
+            # start_turn() can never launch a second overlapping turn (race fix).
+            self.agent.is_running = True
+            self.agent.controller.is_paused = False
             self.active_thread = threading.Thread(
                 target=self._run_turn_worker,
                 args=(prompt, steps, turn_id, is_autonomous),
@@ -72,8 +77,7 @@ class TurnCoordinator:
     def _run_turn_worker(self, prompt: str, steps: int, turn_id: int, is_autonomous: bool):
         import asyncio
 
-        self.agent.is_running = True
-        self.agent.controller.is_paused = False
+        # (is_running / is_paused are already claimed by start_turn under the lock.)
 
         def _on_log(txt: str, lvl: str = "text"):
             clean = str(txt).strip()
@@ -172,6 +176,19 @@ def main():
     load_dotenv()
     api_key = os.getenv("GEMINI_API_KEY")
 
+    # Worker network configuration: loopback by default (secure single-PC ASTER).
+    # Use --host 0.0.0.0 for LAN multi-PC, and set a shared BridgeToken in config.json.
+    parser = argparse.ArgumentParser(description="AlphaLive W2 ASTER Worker")
+    parser.add_argument("--aster-worker", "--worker", "--host-node", action="store_true",
+                        help="Run as the ASTER host worker node")
+    parser.add_argument("--host", type=str, default="127.0.0.1",
+                        help="Bridge server bind address (default 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8766,
+                        help="Bridge server port (default 8766)")
+    parser.add_argument("--token", type=str, default=None,
+                        help="Bridge shared-secret token override")
+    args, _ = parser.parse_known_args()
+
     # Initialize Cognitive Engine
     agent = AlphaAgent(api_key=api_key)
 
@@ -184,7 +201,7 @@ def main():
     agent.pending_subconscious_thought = ""
 
     # Initialize Workspace Server
-    ws_server = WorkspaceServer(host="0.0.0.0", port=8766)
+    ws_server = WorkspaceServer(host=args.host, port=args.port, token=args.token)
 
     # Initialize Turn Coordinator
     coordinator = TurnCoordinator(agent=agent, ws_server=ws_server)
@@ -320,8 +337,17 @@ def main():
             # 13. Reboot / Cycle Node
             elif cmd in ("restart_worker", "shutdown_worker", "kill_worker", "cycle_node"):
                 coordinator._append_log("[W2] Cycling worker node. Relaunching process...")
+                coordinator.stop_auto_loop()
                 try:
-                    subprocess.Popen([sys.executable, os.path.abspath(__file__)] + sys.argv[1:], cwd=os.path.abspath(os.path.dirname(__file__)))
+                    ws_server.stop()  # release the port/bind before re-spawning to avoid TIME_WAIT
+                except Exception as ex:
+                    print(f"[W2 Restart] Failed to stop bridge server: {ex}", flush=True)
+                try:
+                    subprocess.Popen(
+                        [sys.executable, os.path.abspath(__file__)] + sys.argv[1:],
+                        cwd=os.path.abspath(os.path.dirname(__file__)),
+                        close_fds=True,
+                    )
                 except Exception as ex:
                     print(f"[W2 Restart Error]: {ex}", flush=True)
                 time.sleep(0.5)
@@ -334,7 +360,7 @@ def main():
 
     # Start WebSocket Server
     ws_server.start()
-    print("[AlphaLive W2] Workspace Bridge Server listening on 0.0.0.0:8766", flush=True)
+    print(f"[AlphaLive W2] Workspace Bridge Server listening on {args.host}:{args.port}", flush=True)
 
     # Keep alive loop
     try:

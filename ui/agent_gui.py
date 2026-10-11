@@ -502,7 +502,17 @@ class AgentMainWindow(QMainWindow):
         if is_worker:
             try:
                 from core.workspace_bridge import WorkspaceServer
-                self.ws_server = WorkspaceServer(host="0.0.0.0", port=8766)
+
+                def _argv_flag(flag, default):
+                    try:
+                        idx = sys.argv.index(flag)
+                        return sys.argv[idx + 1]
+                    except (ValueError, IndexError):
+                        return default
+
+                worker_host = _argv_flag("--host", "127.0.0.1")
+                worker_port = int(_argv_flag("--port", "8766"))
+                self.ws_server = WorkspaceServer(host=worker_host, port=worker_port)
                 
                 def handle_remote_command(cmd, payload):
                     def _dispatch():

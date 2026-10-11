@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Target AI Workstation Host/IP (default: 127.0.0.1 for ASTER)")
     parser.add_argument("--port", type=int, default=8766, help="Target AI Workstation Port (default: 8766)")
     parser.add_argument("--no-mic", action="store_true", help="Disable local microphone listener on Workplace 1")
+    parser.add_argument("--token", type=str, default=None, help="Bridge shared-secret token (override config.json BridgeToken)")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -37,7 +38,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
 
     # Initialize Remote Bridge Client
-    client = WorkspaceClient(host=args.host, port=args.port)
+    client = WorkspaceClient(host=args.host, port=args.port, token=args.token)
 
     # Instantiate Enhanced Overseer Dashboard
     panel = EnhancedOverseerDashboard(remote_client=client)

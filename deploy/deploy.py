@@ -14,7 +14,7 @@ Capabilities:
      - Qwen2.5-32B AWQ vLLM (OpenAI-compatible LLM on A100)
      - Orpheus TTS vLLM + SNAC (24kHz Neural Audio Codec on L4)
   3. AssetSync Engine:
-     - Downloads and verifies all required SDXL Checkpoints & LoRAs on Modal Volume.
+     - Downloads and verifies SDXL checkpoints, LoRAs, Qwen weights, and Orpheus/SNAC weights.
 
 Usage:
   - Download all models into volume:
@@ -91,13 +91,26 @@ def _get_secrets():
 
 sync_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("requests", "tqdm", "fastapi[standard]", "pydantic", "Pillow", "numpy")
+    .pip_install(
+        "requests",
+        "tqdm",
+        "fastapi[standard]",
+        "pydantic",
+        "Pillow",
+        "numpy",
+        "huggingface_hub[hf_transfer]",
+    )
     .add_local_python_source("shared_app", "upscaler", "vid2audio")
 )
 
+hf_cache_vol = modal.Volume.from_name("huggingface-cache", create_if_missing=True)
+
 @app.cls(
     image=sync_image,
-    volumes={CACHE_DIR: cache_volume},
+    volumes={
+        CACHE_DIR: cache_volume,
+        "/root/.cache/huggingface": hf_cache_vol,
+    },
     secrets=_get_secrets(),
     timeout=3600
 )
@@ -302,6 +315,34 @@ class AssetSync:
         print("ALPHALIVE SYNC COMPLETED")
         print("=" * 60)
         return summary
+
+    @modal.method()
+    def download_qwen_weights(self):
+        """Downloads and caches Qwen 32B weights to the shared Hugging Face volume."""
+        from huggingface_hub import snapshot_download
+
+        model_name = "SamCrowdwave/Qwen2.5-32B-Instruct-abliterated-AWQ"
+        print(f"[AssetSync] Downloading {model_name} into persistent volume...")
+        started_at = time.time()
+        snapshot_download(model_name, ignore_patterns=["*.pt", "*.bin"])
+        print(f"[AssetSync] Qwen weights cached in {time.time() - started_at:.2f}s")
+        hf_cache_vol.commit()
+
+    @modal.method()
+    def download_orpheus_weights(self):
+        """Downloads and caches Orpheus and SNAC weights to the shared Hugging Face volume."""
+        from huggingface_hub import snapshot_download
+
+        model_names = (
+            "canopylabs/orpheus-3b-0.1-ft",
+            "hubertsiuzdak/snac_24khz",
+        )
+        started_at = time.time()
+        for model_name in model_names:
+            print(f"[AssetSync] Downloading {model_name} into persistent volume...")
+            snapshot_download(model_name, ignore_patterns=["*.pt", "*.bin"])
+        print(f"[AssetSync] Orpheus and SNAC weights cached in {time.time() - started_at:.2f}s")
+        hf_cache_vol.commit()
 
 # --- PYDANTIC SCHEMAS ---
 class Vid2AudioRequest(BaseModel):

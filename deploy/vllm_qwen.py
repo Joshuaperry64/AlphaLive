@@ -14,11 +14,8 @@ Optimizations:
   5. --tool-call-parser hermes: Parses native Qwen function calling for agentic tools.
 """
 
-import json
 import os
 import subprocess
-import time
-from typing import Any
 import modal
 
 # --- Model & Server Configuration ---
@@ -63,31 +60,6 @@ vllm_image = (
 )
 
 
-# --- Optional Pre-warm / Weight Download Helper ---
-@app.function(
-    image=vllm_image,
-    volumes={"/root/.cache/huggingface": hf_cache_vol},
-    timeout=20 * MINUTES,
-    secrets=[hf_secret],
-)
-def download_qwen_weights():
-    """
-    Pre-downloads and caches the 32B model weights to the persistent volume.
-    Run before initial deployment:
-        modal run modal_vllm.py::download_weights
-    """
-    from huggingface_hub import snapshot_download
-
-    print(f"[AlphaCore] Downloading {MODEL_NAME} into persistent volume...")
-    t0 = time.time()
-    snapshot_download(
-        MODEL_NAME,
-        ignore_patterns=["*.pt", "*.bin"],
-    )
-    print(f"[AlphaCore] Model weights cached in {time.time() - t0:.2f}s")
-    hf_cache_vol.commit()
-
-
 # --- Server Function ---
 @app.function(
     image=vllm_image,
@@ -103,7 +75,7 @@ def download_qwen_weights():
 )
 @modal.concurrent(max_inputs=MAX_NUM_SEQS)
 @modal.web_server(port=VLLM_PORT, startup_timeout=10 * MINUTES)
-def serve():
+def vllm():
     """Starts the vLLM OpenAI-compatible server for Qwen2.5-32B AWQ."""
     os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
     
@@ -153,7 +125,7 @@ if __name__ == "__main__":
         """
         import aiohttp
 
-        url = await serve.get_web_url.aio()
+        url = await vllm.get_web_url.aio()
         api_base = f"{url}/v1"
 
         print("\n" + "=" * 65)

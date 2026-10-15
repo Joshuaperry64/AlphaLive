@@ -18,7 +18,6 @@ Target Architecture:
 import io
 import json
 import os
-import time
 import wave
 from typing import Optional
 
@@ -70,23 +69,6 @@ orpheus_image = (
     )
     .add_local_python_source("shared_app")
 )
-
-
-@app.function(
-    image=orpheus_image,
-    volumes={"/root/.cache/huggingface": hf_cache_vol},
-    timeout=20 * MINUTES,
-    secrets=[hf_secret],
-)
-def download_orpheus_weights():
-    """Pre-downloads and caches Orpheus 3B weights and SNAC codec to persistent volume."""
-    from huggingface_hub import snapshot_download
-    print(f"[Orpheus Modal] Caching {MODEL_NAME} weights into persistent volume...")
-    t0 = time.time()
-    snapshot_download(MODEL_NAME, ignore_patterns=["*.pt", "*.bin"])
-    snapshot_download(SNAC_MODEL_NAME)
-    print(f"[Orpheus Modal] Weights cached successfully in {time.time() - t0:.2f}s")
-    hf_cache_vol.commit()
 
 
 def deinterleave_orpheus_tokens(token_ids: list[int]) -> tuple[list[int], list[int], list[int]]:

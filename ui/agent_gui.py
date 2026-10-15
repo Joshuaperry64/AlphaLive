@@ -2426,7 +2426,7 @@ class AgentMainWindow(QMainWindow):
                         if match:
                             candidate = match.group(0).rstrip("/.,:;)")
                             cand_low = candidate.lower()
-                            if "qwen" in cand_low or "serve" in cand_low:
+                            if "qwen" in cand_low or "vllm" in cand_low:
                                 qwen_url = candidate
                             elif "orpheus" in cand_low:
                                 orpheus_url = candidate
@@ -2453,7 +2453,7 @@ class AgentMainWindow(QMainWindow):
 
                     if profile:
                         if not qwen_url:
-                            qwen_url = f"https://{profile}--alphalive-backend-serve.modal.run"
+                            qwen_url = f"https://{profile}--alphalive-backend-vllm.modal.run"
                         if not orpheus_url:
                             orpheus_url = f"https://{profile}--alphalive-backend-orpheusttsserver-web-app.modal.run"
 
@@ -3530,8 +3530,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
 
 

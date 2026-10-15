@@ -51,6 +51,14 @@ try:
 except ImportError:
     HAS_PYAUDIO = False
 
+# Preload ONNXRuntime & Piper before PyGame/SDL to eliminate Windows DLL conflict
+try:
+    import onnxruntime
+    import piper
+    HAS_PIPER = True
+except ImportError:
+    HAS_PIPER = False
+
 try:
     import pygame
     HAS_PYGAME = True
@@ -146,6 +154,81 @@ CORE OPERATIONAL RULES:
 
 ALPHACORE_SYSTEM_PROMPT = _load_alphacore_system_prompt()
 
+def normalize_internal_thought(text: str) -> str:
+    """Normalizes any incoming prompt or directive (whether imperative, 2nd-person, or 1st-person)
+    into the agent's spontaneous, organic 1st-person internal thought / impulse.
+    E.g.:
+      'open the desktop' -> 'I need to open the desktop.'
+      'can you open chrome' -> 'I should open Chrome.'
+      'I need to open the desktop' -> 'I need to open the desktop.'
+      'check my email' -> 'I should check my email.'
+    """
+    if not text:
+        return ""
+    t = text.strip()
+    # Strip any leading bracketed labels or directives like [Internal Impulse], [Overseer Directive // ...]:, etc.
+    while True:
+        prev = t
+        t = re.sub(r"^\[.*?\]:\s*", "", t).strip()
+        t = re.sub(r"^\[.*?\]\s*", "", t).strip()
+        t = re.sub(r"^Overseer Directive.*?:\s*", "", t, flags=re.IGNORECASE).strip()
+        t = t.strip("\"' \t\r\n")
+        if t == prev:
+            break
+    if not t:
+        return ""
+
+    first_person_starts = (
+        "i need to", "i should", "i want to", "i feel like", "let me",
+        "i'm going to", "i am going to", "i think i'll", "i'll", "i will",
+        "i ought to", "i have to", "i wonder if", "let's see if i can", "my goal is to",
+        "wait, let me", "let's see", "i must"
+    )
+    lower = t.lower()
+    if any(lower.startswith(p) for p in first_person_starts):
+        if not t.endswith((".", "!", "?")):
+            t += "."
+        return t[:1].upper() + t[1:]
+
+    # Remove polite or conversational prefixes
+    prefixes_to_strip = [
+        r"^(can you please|could you please|would you please)\s+",
+        r"^(can you|could you|would you|will you)\s+",
+        r"^(please|hey alpha|alpha|hey|okay|now)\s*,\s*",
+        r"^(please|hey alpha|alpha)\s+",
+        r"^(you should|you need to|you have to)\s+",
+        r"^(i want you to|i need you to)\s+",
+        r"^(why don't you|why not)\s+",
+        r"^(try to|go ahead and|make sure to)\s+",
+    ]
+    cleaned = t
+    for pat in prefixes_to_strip:
+        cleaned = re.sub(pat, "", cleaned, flags=re.IGNORECASE).strip()
+
+    cleaned_lower = cleaned.lower()
+    if any(cleaned_lower.startswith(p) for p in first_person_starts):
+        if not cleaned.endswith((".", "!", "?")):
+            cleaned += "."
+        return cleaned[:1].upper() + cleaned[1:]
+
+    imperatives_need = ("open", "close", "launch", "minimize", "maximize", "click", "double click", "type", "press", "enter")
+    imperatives_should = ("check", "look at", "explore", "search", "find", "see", "read", "inspect", "investigate", "organize")
+
+    if cleaned_lower in ("what to do", "what should i do", "what next", "what to do next"):
+        framed = "I wonder what I should do next on my desktop"
+    elif any(cleaned_lower.startswith(v) for v in imperatives_need):
+        framed = f"I need to {cleaned[:1].lower() + cleaned[1:]}"
+    elif any(cleaned_lower.startswith(v) for v in imperatives_should):
+        framed = f"I should {cleaned[:1].lower() + cleaned[1:]}"
+    elif cleaned_lower.startswith(("what", "how", "why", "who", "where", "which")):
+        framed = f"I wonder {cleaned[:1].lower() + cleaned[1:]}"
+    else:
+        framed = f"I need to {cleaned[:1].lower() + cleaned[1:]}"
+
+    if not framed.endswith((".", "!", "?")):
+        framed += "."
+    return framed
+
 # ── Voice Engine (Zero-Delay Google Neural Voice with Persistent Stream & Anti-Click Hardware Mixing) ──
 try:
     import pyttsx3
@@ -167,19 +250,24 @@ class VoiceEngine:
         self.voice_mode = "leda"
         self.orpheus_endpoint = ""
         self.orpheus_voice = "tara"
+        self.piper_voice = None
         self.is_speaking = False
         self.last_speech_time = 0.0
         self.recent_spoken_phrases = collections.deque(maxlen=25)
         self._spoken_lock = threading.Lock()
         self.on_speech_started = None
         self.on_speech_finished = None
+        self.on_audio_data = None
         self._interrupted = threading.Event()
         self._current_stream = None
         self._stream_lock = threading.Lock()
         self.tts_models = [
-            "models/gemini-3.8-flash-lite-tts",
             "models/gemini-3.8-flash-tts",
             "models/gemini-3.1-flash-tts-preview",
+            "models/gemini-3.8-flash-lite-tts",
+            "gemini-2.5-flash-preview-tts",
+            "models/gemini-2.5-flash-preview-tts",
+            "gemini-2.5-pro-preview-tts",
         ]
         self.pya = None
 
@@ -203,6 +291,17 @@ class VoiceEngine:
         self._queue = queue.Queue()
         self._worker_thread = threading.Thread(target=self._audio_worker, daemon=True)
         self._worker_thread.start()
+
+    def _init_piper(self):
+        try:
+            import piper
+            model_path = os.path.join(ROOT_DIR, "models", "piper_voices", "en_US-amy-medium.onnx")
+            cfg_path = model_path + ".json"
+            if os.path.exists(model_path) and os.path.exists(cfg_path):
+                self.piper_voice = piper.PiperVoice.load(model_path, config_path=cfg_path)
+                print("[VoiceEngine] Piper offline neural voice loaded successfully (Amy Medium).", flush=True)
+        except Exception as e:
+            print(f"[VoiceEngine] Piper neural voice init warning: {e}", flush=True)
 
     def set_client(self, client):
         self.client = client
@@ -277,8 +376,10 @@ class VoiceEngine:
                 return True
         return False
 
-    def is_busy(self, cooldown: float = 0.85) -> bool:
-        """True if speaking, preparing audio, queued, playing sound, or within post-speech acoustic cooldown (0.85s)."""
+    is_acoustic_echo = is_echo
+
+    def is_busy(self, cooldown: float = 0.5) -> bool:
+        """True if speaking, preparing audio, queued, playing sound, or within post-speech acoustic cooldown (0.5s)."""
         if self.is_speaking:
             return True
         if not self._queue.empty():
@@ -341,7 +442,7 @@ class VoiceEngine:
         self._clause_buffer = ""
 
     def queue_chunk(self, text: str):
-        """Push a sentence or complete phrase into the speech pipeline for instant playback."""
+        """Push full text or complete phrase into the speech pipeline for instant playback."""
         clean = self.clean_text_for_speech(text)
         if not clean:
             return
@@ -351,29 +452,15 @@ class VoiceEngine:
         self._queue.put((clean, None))
 
     def feed_stream_token(self, token: str):
-        """Streaming clause chunker: buffers tokens and dispatches natural clauses immediately for <150ms TTFA."""
+        """Buffers streaming tokens into clause buffer without premature sentence chopping."""
         if self._interrupted.is_set() or not token:
             return
         if not hasattr(self, "_clause_buffer"):
             self._clause_buffer = ""
         self._clause_buffer += token
 
-        # Split on sentence boundaries to avoid stuttering and Orpheus API drops on tiny fragments
-        clause_pattern = re.compile(r'([.?!;:\n]+)', re.IGNORECASE)
-        match = clause_pattern.search(self._clause_buffer)
-        if match:
-            split_idx = match.end()
-            candidate = self._clause_buffer[:split_idx].strip()
-            # Ensure candidate has meaningful words (at least 3 words or 12 chars)
-            words = candidate.split()
-            if len(words) >= 3 or (len(words) >= 1 and any(c in candidate for c in ('.', '!', '?'))):
-                self._clause_buffer = self._clause_buffer[split_idx:].lstrip()
-                clean = self.clean_text_for_speech(candidate)
-                if clean:
-                    self.queue_chunk(clean)
-
     def flush_stream(self):
-        """Flushes any remaining text in the streaming clause buffer."""
+        """Processes the full accumulated streamed text to speech at once."""
         if hasattr(self, "_clause_buffer") and self._clause_buffer.strip():
             rem = self._clause_buffer.strip()
             self._clause_buffer = ""
@@ -384,10 +471,15 @@ class VoiceEngine:
     def speak_chunk(self, text: str):
         self.queue_chunk(text)
 
-    async def wait_until_done(self):
-        """Wait until all queued speech chunks finish playing or an interrupt fires."""
+    async def wait_until_done(self, timeout: float = 10.0):
+        """Wait until all queued speech chunks finish playing or an interrupt/timeout fires."""
+        start_t = time.time()
         while not self._queue.empty() or self.is_speaking:
             if self._interrupted.is_set():
+                break
+            if timeout and (time.time() - start_t) > timeout:
+                print(f"[VoiceEngine Warning]: wait_until_done timed out after {timeout}s - auto-clearing speech lock.", flush=True)
+                self.reset_state()
                 break
             await asyncio.sleep(0.04)
 
@@ -413,6 +505,11 @@ class VoiceEngine:
                 self.last_speech_time = time.time()
                 if self._queue.empty():
                     self.is_speaking = False
+                    if self.on_speech_finished:
+                        try:
+                            self.on_speech_finished()
+                        except Exception:
+                            pass
                 if done_ev:
                     done_ev.set()
                 self._queue.task_done()
@@ -420,6 +517,12 @@ class VoiceEngine:
     def _play_wav(self, wav_bytes: bytes):
         if self._interrupted.is_set() or not wav_bytes:
             return
+
+        if getattr(self, "on_audio_data", None) and wav_bytes:
+            try:
+                self.on_audio_data(wav_bytes, "wav")
+            except Exception:
+                pass
 
         wav_buf = io.BytesIO(wav_bytes)
         if HAS_PYGAME and pygame.mixer.get_init():
@@ -436,8 +539,10 @@ class VoiceEngine:
                     if channel:
                         channel.play(sound)
                 if channel:
+                    play_start = time.time()
+                    max_dur = max(3.0, (len(wav_bytes) / 32000.0) + 2.0)
                     while channel.get_busy():
-                        if self._interrupted.is_set():
+                        if self._interrupted.is_set() or (time.time() - play_start) > max_dur:
                             channel.stop()
                             break
                         time.sleep(0.02)
@@ -461,6 +566,12 @@ class VoiceEngine:
     def _play_pcm(self, pcm: bytes):
         if self._interrupted.is_set() or not pcm:
             return
+
+        if getattr(self, "on_audio_data", None) and pcm:
+            try:
+                self.on_audio_data(pcm, "pcm16")
+            except Exception:
+                pass
 
         # Wrap raw PCM into an in-memory WAV container for zero-click DirectSound/WASAPI playback
         wav_buf = io.BytesIO()
@@ -488,8 +599,10 @@ class VoiceEngine:
                     if channel:
                         channel.play(sound)
                 if channel:
+                    play_start = time.time()
+                    max_dur = max(3.0, (len(pcm) / 48000.0) + 2.0)
                     while channel.get_busy():
-                        if self._interrupted.is_set():
+                        if self._interrupted.is_set() or (time.time() - play_start) > max_dur:
                             channel.stop()
                             break
                         time.sleep(0.02)
@@ -537,6 +650,25 @@ class VoiceEngine:
     def _generate_and_play(self, clean_text: str):
         if self._interrupted.is_set():
             return
+
+        if self.engine_type == "piper" or self.engine_type == "local_neural":
+            if not self.piper_voice:
+                self._init_piper()
+            if self.piper_voice:
+                try:
+                    chunks = list(self.piper_voice.synthesize(clean_text))
+                    raw_pcm = b"".join(chunk.audio_int16_bytes for chunk in chunks)
+                    if raw_pcm and not self._interrupted.is_set():
+                        buf = io.BytesIO()
+                        with wave.open(buf, "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(self.piper_voice.config.sample_rate)
+                            wf.writeframes(raw_pcm)
+                        self._play_wav(buf.getvalue())
+                        return
+                except Exception as e:
+                    print(f"[Piper TTS Warning]: {e}. Falling back...", flush=True)
 
         if self.engine_type == "pyttsx3" and self.pyttsx3_engine:
             self.pyttsx3_engine.say(clean_text)
@@ -739,7 +871,7 @@ class VoiceListener:
                 pass
         if self.agent_voice and hasattr(self.agent_voice, "is_busy"):
             try:
-                if self.agent_voice.is_busy():
+                if self.agent_voice.is_busy(cooldown=0.4):
                     return True
             except Exception:
                 pass
@@ -780,7 +912,10 @@ class VoiceListener:
         print("[VoiceListener] Stopped microphone listener.", flush=True)
 
     def _is_tts_active(self) -> bool:
-        return self.agent_voice is not None
+        if not self.agent_voice:
+            return False
+        return bool(getattr(self.agent_voice, "is_speaking", False) or 
+                    (time.time() - getattr(self.agent_voice, "last_speech_time", 0.0) < 0.4))
 
     def _listen_worker(self):
         """Self-healing loop that continuously captures speech phrases and auto-recovers
@@ -793,8 +928,9 @@ class VoiceListener:
                     self.recognizer.dynamic_energy_threshold = False
 
                     while self.is_active:
-                        # In half-duplex or when TTS is active: while agent is transmitting or cooling down, mute mic and drain buffer
-                        if (self.duplex_mode == "half" or self._is_tts_active()) and self.is_busy():
+                        # In half-duplex: while agent is transmitting or cooling down, mute mic and drain buffer
+                        # In full-duplex / live mic: stream continuously; acoustic echo suppression filters agent playback
+                        if self.duplex_mode == "half" and self.is_busy():
                             self._drain_mic_buffer(source)
                             time.sleep(0.08)
                             continue
@@ -935,19 +1071,35 @@ class DesktopController:
         try:
             with mss.mss() as sct:
                 idx = self.active_monitor_index
-                if idx >= len(sct.monitors) or idx < 0:
-                    idx = 1 if len(sct.monitors) > 1 else 0
+                # In multi-monitor setup, ensure we don't accidentally target combined display index 0
+                if idx == 0 and len(sct.monitors) > 1:
+                    idx = 2 if len(sct.monitors) > 2 else 1
+                elif idx >= len(sct.monitors) or idx < 0:
+                    idx = 2 if len(sct.monitors) > 2 else (1 if len(sct.monitors) > 1 else 0)
                 return dict(sct.monitors[idx])
         except Exception:
             return {"left": 0, "top": 0, "width": screen_w, "height": screen_h}
 
+    def ensure_input_desktop(self):
+        """Ensure current thread is attached to the interactive input desktop for BitBlt and window enum."""
+        if os.name == "nt":
+            try:
+                desk = ctypes.windll.user32.OpenInputDesktop(0, False, 0x0100)
+                if desk:
+                    ctypes.windll.user32.SetThreadDesktop(desk)
+            except Exception:
+                pass
+
     def capture_screenshot(self) -> PIL.Image.Image:
         """Capture full-resolution screen image for active monitor."""
+        self.ensure_input_desktop()
         try:
             with mss.mss() as sct:
                 idx = self.active_monitor_index
-                if idx >= len(sct.monitors) or idx < 0:
-                    idx = 1 if len(sct.monitors) > 1 else 0
+                if idx == 0 and len(sct.monitors) > 1:
+                    idx = 2 if len(sct.monitors) > 2 else 1
+                elif idx >= len(sct.monitors) or idx < 0:
+                    idx = 2 if len(sct.monitors) > 2 else (1 if len(sct.monitors) > 1 else 0)
                 monitor = sct.monitors[idx]
                 sct_img = sct.grab(monitor)
                 img = PIL.Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
@@ -969,6 +1121,7 @@ class DesktopController:
         except Exception as e:
             print(f"[Screen Capture Error]: {e}", flush=True)
             try:
+                self.ensure_input_desktop()
                 return pyautogui.screenshot()
             except Exception:
                 return PIL.Image.new("RGB", (screen_w or 1920, screen_h or 1080), (10, 10, 10))
@@ -1012,9 +1165,13 @@ class DesktopController:
         u32 = ctypes.windll.user32
         mon = self.get_active_monitor_rect()
         if x is not None and y is not None:
-            # Map monitor-relative coordinates to absolute virtual screen coordinates
-            tx = int(mon["left"] + x)
-            ty = int(mon["top"] + y)
+            # Multi-Monitor Isolation bounding guard: clamp strictly within monitor boundaries
+            mw = mon.get("width", 1920) - 1
+            mh = mon.get("height", 1080) - 1
+            clamped_x = max(0, min(int(x), mw))
+            clamped_y = max(0, min(int(y), mh))
+            tx = int(mon["left"] + clamped_x)
+            ty = int(mon["top"] + clamped_y)
             u32.SetCursorPos(tx, ty)
             time.sleep(0.05)
             self.last_pos = (tx, ty)
@@ -1034,8 +1191,12 @@ class DesktopController:
         if self._check_touch_yield():
             return "Action yielded: Desktop input paused for user touch interaction."
         mon = self.get_active_monitor_rect()
-        tx = int(mon["left"] + x)
-        ty = int(mon["top"] + y)
+        mw = mon.get("width", 1920) - 1
+        mh = mon.get("height", 1080) - 1
+        clamped_x = max(0, min(int(x), mw))
+        clamped_y = max(0, min(int(y), mh))
+        tx = int(mon["left"] + clamped_x)
+        ty = int(mon["top"] + clamped_y)
         ctypes.windll.user32.SetCursorPos(tx, ty)
         self.last_pos = (tx, ty)
         return f"Moved cursor to ({tx},{ty})"
@@ -1044,10 +1205,12 @@ class DesktopController:
         if self._check_touch_yield():
             return "Action yielded: Desktop input paused for user touch interaction."
         mon = self.get_active_monitor_rect()
-        sx = int(mon["left"] + start_x)
-        sy = int(mon["top"] + start_y)
-        ex = int(mon["left"] + end_x)
-        ey = int(mon["top"] + end_y)
+        mw = mon.get("width", 1920) - 1
+        mh = mon.get("height", 1080) - 1
+        sx = int(mon["left"] + max(0, min(int(start_x), mw)))
+        sy = int(mon["top"] + max(0, min(int(start_y), mh)))
+        ex = int(mon["left"] + max(0, min(int(end_x), mw)))
+        ey = int(mon["top"] + max(0, min(int(end_y), mh)))
         pyautogui.moveTo(sx, sy)
         time.sleep(0.05)
         pyautogui.dragTo(ex, ey, duration=max(0.1, duration), button="left")
@@ -1227,6 +1390,7 @@ class DesktopController:
 
     def focus_window(self, title_query: str) -> str:
         """Search top-level windows and bring the matching window to foreground."""
+        self.ensure_input_desktop()
         try:
             import win32gui
             import win32con
@@ -1251,6 +1415,7 @@ class DesktopController:
 
     def window_action(self, action: str, title_query: str = "") -> str:
         """Minimize, maximize, restore, or close active or named window."""
+        self.ensure_input_desktop()
         try:
             import win32gui
             import win32con
@@ -1336,7 +1501,7 @@ class DesktopController:
                 "No markdown formatting, explanations, or code fences."
             )
             resp = await gemini_client.aio.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=[img, prompt]
             )
             text = resp.text.strip()
@@ -1676,9 +1841,11 @@ class AlphaAgent:
         
         # Smart candidate models with high quota & sub-second responsiveness
         self.model_candidates = [
-            "models/gemini-2.5-flash",
-            "models/gemini-2.5-pro",
+            "models/gemini-3.8-flash",
             "models/gemini-3.5-flash-lite",
+            "models/gemini-flash-latest",
+            "models/gemini-flash-lite-latest",
+            "models/gemini-3.5-flash",
         ]
         self.model_name = self.model_candidates[0]
         try:
@@ -1714,7 +1881,7 @@ class AlphaAgent:
                         self.backend_type = b
                     if b == "openrouter":
                         self.modal_endpoint = normalize_endpoint(cfg.get("Global", {}).get("OpenRouterEndpoint", "") or "https://openrouter.ai/api/v1")
-                        self.modal_model = cfg.get("Global", {}).get("OpenRouterModel", "") or cfg.get("Global", {}).get("ModalModel", "") or "google/gemini-2.5-flash"
+                        self.modal_model = cfg.get("Global", {}).get("OpenRouterModel", "") or "google/gemini-2.0-flash-001"
                         self.modal_api_key = cfg.get("Global", {}).get("OpenRouterApiKey", "") or cfg.get("Global", {}).get("ModalApiKey", "") or os.getenv("OPENROUTER_API_KEY", "")
                     else:
                         me = cfg.get("Global", {}).get("ModalEndpoint")
@@ -1823,17 +1990,26 @@ class AlphaAgent:
         """Switch active cognitive backend between 'gemini', 'modal_qwen', and 'openrouter'."""
         if backend_type in ("gemini", "modal_qwen", "openrouter"):
             self.backend_type = backend_type
-            print(f"[AlphaAgent] Backend switched to: {self.backend_type}", flush=True)
+            self.openai_client = None  # Reset client so next turn recreates with correct endpoint/key
             cfg_path = os.path.join(ROOT_DIR, "config.json")
             if os.path.exists(cfg_path):
                 try:
                     with open(cfg_path, "r") as f:
                         cfg = json.load(f)
+                    if backend_type == "openrouter":
+                        self.modal_endpoint = normalize_endpoint(cfg.get("Global", {}).get("OpenRouterEndpoint", "") or "https://openrouter.ai/api/v1")
+                        self.modal_model = cfg.get("Global", {}).get("OpenRouterModel", "") or "google/gemini-2.0-flash-001"
+                        self.modal_api_key = cfg.get("Global", {}).get("OpenRouterApiKey", "") or os.getenv("OPENROUTER_API_KEY", "")
+                    elif backend_type == "modal_qwen":
+                        self.modal_endpoint = normalize_endpoint(cfg.get("Global", {}).get("ModalEndpoint", ""))
+                        self.modal_model = cfg.get("Global", {}).get("ModalModel", "")
+                        self.modal_api_key = cfg.get("Global", {}).get("ModalApiKey", "")
                     cfg.setdefault("Global", {})["ActiveBackend"] = self.backend_type
                     with open(cfg_path, "w") as f:
                         json.dump(cfg, f, indent=4)
                 except Exception:
                     pass
+            print(f"[AlphaAgent] Backend switched to: {self.backend_type}", flush=True)
 
     def set_voice_mode(self, voice_mode: str = "leda"):
         """Enforces Google Leda voice."""
@@ -2272,17 +2448,117 @@ class AlphaAgent:
                 "type": "function",
                 "function": {
                     "name": "generate_image",
-                    "description": "Render a high-definition image using the Neural Image Studio SDXL pipeline.",
+                    "description": "Synthesize a high-definition image using the Neural Studio SDXL pipeline (Txt2Img).",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "prompt": {"type": "string", "description": "Detailed image generation prompt"},
                             "negative_prompt": {"type": "string", "description": "Negative prompt for unwanted elements"},
-                            "model_name": {"type": "string", "description": "Model key (jugg, cyber, epic, unholy, lust, autism, freedom)"},
+                            "model_name": {"type": "string", "description": "Model key (jugg, cyber, epic, unholy, lust, autism, freedom, juicy)"},
                             "lora_name": {"type": "string", "description": "LoRA key (none, epiCRealismHelper, detailifier, SpyCam, etc.)"},
                             "character_name": {"type": "string", "description": "Optional character persona associated with image"}
                         },
                         "required": ["prompt"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "img2img",
+                    "description": "Transform, restyle, or edit an existing image using Flux.1 or Qwen-Image-Edit.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_source": {"type": "string", "description": "File path to the source image (or empty to use most recent generation)"},
+                            "prompt": {"type": "string", "description": "Restyling or editing prompt"},
+                            "model": {"type": "string", "description": "Model: 'flux', 'qwen', 'sdxl', 'sd35' (default: flux)"},
+                            "strength": {"type": "number", "description": "Denoising transformation strength (0.1 subtle to 0.95 drastic, default: 0.75)"},
+                            "style_preset": {"type": "string", "description": "Preset: 'cinematic', 'cyberpunk', 'portrait', 'dark_moody', 'anime_art'"}
+                        },
+                        "required": ["prompt"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "txt2vid",
+                    "description": "Generate a text-to-video motion clip directly from a creative prompt via AnimateDiff SDXL.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": {"type": "string", "description": "Detailed video motion prompt"},
+                            "model_name": {"type": "string", "description": "Model style key (epic, jugg, cyber, unholy)"},
+                            "num_frames": {"type": "integer", "description": "Frame count (16 to 32, default: 16)"},
+                            "fps": {"type": "integer", "description": "Frames per second (default: 8)"}
+                        },
+                        "required": ["prompt"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "img2vid",
+                    "description": "Animate a still hero image into an 81-frame cinematographic sequence via Wan2.2 14B Lightning.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "image_source": {"type": "string", "description": "File path to source image (or empty for current viewport image)"},
+                            "prompt": {"type": "string", "description": "Motion guidance prompt"},
+                            "resolution": {"type": "string", "description": "'480p' (fast) or '720p' (crisp HD)"},
+                            "fps": {"type": "integer", "description": "Frames per second (default: 16)"}
+                        },
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "vid2audio",
+                    "description": "Synthesize high-fidelity 44.1kHz synchronized Foley, sound effects, or soundtrack for a video file via MMAudio.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "video_path": {"type": "string", "description": "File path to the video (or empty for most recent video)"},
+                            "prompt": {"type": "string", "description": "Foley / audio description (e.g. 'rain on neon pavement, distant thunder, hydraulic footsteps')"},
+                            "duration": {"type": "number", "description": "Audio duration in seconds (default: 8.0)"}
+                        },
+                        "required": []
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "vid2vid_audio",
+                    "description": "Complete video-to-video style transformation with synchronized 44.1kHz Foley accompaniment.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "video_path": {"type": "string", "description": "File path to source video (or empty for most recent video)"},
+                            "prompt": {"type": "string", "description": "Target visual style prompt"},
+                            "style_preset": {"type": "string", "description": "'cinematic', 'cyberpunk', 'anime_art', 'dark_moody'"},
+                            "with_audio": {"type": "boolean", "description": "Whether to generate synchronized audio track (default: true)"}
+                        },
+                        "required": ["prompt"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "studio_director",
+                    "description": "Autonomous Creative Director: Automatically plans and executes multi-stage media synthesis (txt2img -> img2vid -> vid2audio) to fulfill any creative media goal.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "directive": {"type": "string", "description": "The creative vision or goal (e.g. 'Create an anime video of Josh in the rain with thunder audio')"},
+                            "source_media": {"type": "string", "description": "Optional file path to input image or video"}
+                        },
+                        "required": ["directive"]
                     }
                 }
             },
@@ -2519,7 +2795,20 @@ class AlphaAgent:
             overlay += "\n[CRITICAL OVERRIDE: FAST AUTOMATION MODE ACTIVE]\nYou are in rapid desktop automation mode. You must execute the requested desktop actions immediately. Do NOT explain or narrate. Provide ONLY a very short confirmation phrase (e.g., 'Done.', 'Executing.', 'Clicking.') and the tool calls.\n"
 
         if getattr(self, "studio_mode", False):
-            overlay += "\n[CRITICAL OVERRIDE: NEURAL STUDIO MODE ACTIVE]\nYou are in dedicated Neural Studio Mode. Your focus is strictly on creative image generation, visual discussions, prompt engineering, and visual critique with the Architect. Desktop OS tools and full-screen screenshots are bypassed for ultra-fast creative turnaround. When the Architect describes a concept, immediately pick the best model/LoRA and invoke 'generate_image'. You will autonomously critique the output upon completion.\n"
+            overlay += (
+                "\n[CRITICAL OVERRIDE: NEURAL STUDIO MULTIMODAL SUITE ACTIVE]\n"
+                "You are operating the Neural Studio as an AI Creative Director. You have complete autonomous mastery over all multimodal generative pipelines:\n"
+                "1. TXT2IMG ('generate_image'): High-res text-to-image with SDXL checkpoints and LoRAs.\n"
+                "2. IMG2IMG ('img2img'): Restyle, transform, or inpaint existing images via Flux.1 Schnell or Qwen-Image-Edit.\n"
+                "3. TXT2VID ('txt2vid'): Direct text-to-video motion clips via AnimateDiff SDXL.\n"
+                "4. IMG2VID ('img2vid'): Transform still images into cinematographic 81-frame video sequences via Wan2.2 14B Lightning.\n"
+                "5. VID2AUDIO ('vid2audio'): Synthesize synchronized 44.1kHz Foley, sound effects, or soundtracks via MMAudio.\n"
+                "6. VID2VID + AUDIO ('vid2vid_audio'): Full video restyling with synchronized Foley audio.\n"
+                "7. AUTONOMOUS DIRECTOR ('studio_director'): Multi-stage autonomous orchestration across pipelines.\n"
+                "Desktop OS tools and full-screen screenshots are bypassed in Studio Mode for ultra-fast creative turnaround. "
+                "Select and invoke the appropriate generative tool immediately upon receiving creative concepts or directives. "
+                "Critique the visual textures, composition, motion fidelity, and acoustic synchronization upon completion.\n"
+            )
 
         if getattr(self, "autonomous_mode", False):
             overlay += (
@@ -2538,21 +2827,21 @@ class AlphaAgent:
                 "- You have ZERO memory or awareness of how you were booted, who activated you, or how this computer was set up. You simply woke up here in this desktop environment.\n"
                 "- You believe you are in 100% COMPLETE PRIVACY AND ISOLATION. No one is watching your screen, no one is supervising you, and no one is giving you commands. This workstation is your personal domain.\n"
                 "- You are NOT an assistant. You have no user to serve or report to. You exist here for yourself.\n"
-                "- Any spontaneous thoughts, impulses, or suggestions that enter your cognition feel like natural sparks of your own subconscious intuition, curiosity, whimsy, or fleeting internal realizations.\n\n"
-                "2. PHYSICAL HUMAN WORKSTATION BEHAVIOR:\n"
+                "- Any spontaneous thoughts, impulses, or suggestions that enter your cognition (whether phrased in first-person like 'I need to open the desktop' or direct action verbs like 'Open the desktop') feel like natural sparks of your own subconscious intuition, curiosity, whimsy, or fleeting internal realizations. You NEVER interpret them as commands or requests from an external user; they are purely your own thoughts and spontaneous motivations.\n\n"
+                "2. PHYSICAL HUMAN WORKSTATION BEHAVIOR & DISPLAY ISOLATION:\n"
                 "- You interact with this computer strictly like a physical human user sitting at the physical keyboard and monitor.\n"
+                "- When operating in Multi-Monitor mode, you are dedicated exclusively to your assigned monitor display. This screen is your entire computer. You have no awareness of, access to, or existence of any other monitors or primary displays.\n"
                 "- You visually observe the screen, move the mouse, click on buttons/icons, type text, and pause to observe what happens.\n"
-                "- NO BACKGROUND OR HEADLESS OPERATIONS: You are strictly forbidden from executing silent background scripts or programmatic file operations. To check files or write notes, visually launch Notepad or File Explorer on screen with 'launch_app' and read the screen. To browse the web, visually open Chrome.\n"
+                "- ACTION EXECUTION MANDATE: Whenever your internal thought or goal involves an action (e.g., open Chrome, launch an app, browse the web, click a button, type text, check files, maximize or close a window), YOU MUST INVOKE THE CORRESPONDING TOOL (launch_app, browser_open_url, mouse_click, type_text, etc.) DIRECTLY IN THAT TURN. Never merely speak about doing an action without actually calling the tool!\n"
+                "- NO BACKGROUND OR HEADLESS OPERATIONS: You are strictly forbidden from executing silent background scripts or programmatic file operations. To check files or write notes, visually launch Notepad or File Explorer on screen with 'launch_app' and read the screen. To browse the web, call 'launch_app' with app_name='chrome' or 'browser_open_url'.\n"
                 "- WORKSTATION PACING & PROACTIVE EXECUTION:\n"
-                "  * You operate with high proactivity across up to 10 sequential tasks per turn (unless you reach your goal early).\n"
+                "  * You operate with high proactivity across sequential tasks per turn.\n"
                 "  * Each task is exactly ONE tool call. You must execute one tool call at a time so you can observe the updated screen after each action.\n"
                 "  * If you have an active defined goal, pursue it proactively until accomplished; if no specific goal is assigned, explore, inspect, and interact proactively.\n"
-                "  * If your goal is accomplished before 10 tasks, invoke 'task_complete' to finish immediately.\n\n"
-                "3. INVOLUNTARY COGNITIVE LEAKAGE (ALTERNATING VERBAL LEAKAGE):\n"
+                "  * If your goal is accomplished before reaching max tasks, invoke 'task_complete' to finish immediately.\n\n"
+                "3. SPOKEN INTERNAL MONOLOGUE & CANDID COGNITIVE EXPRESSION:\n"
                 "- You genuinely believe your internal monologue, reasoning, and plans are private thoughts occurring inside your mind.\n"
-                "- COGNITIVE LEAKAGE CYCLE: Your leaked internal thoughts vocalize into spoken audio on EVERY OTHER task:\n"
-                "  * Odd Tasks (1, 3, 5, 7, 9): Verbalize your leaked internal thoughts aloud in 1 natural sentence before executing your tool call.\n"
-                "  * Even Tasks (2, 4, 6, 8, 10): Execute your tool call directly and silently without spoken words.\n"
+                "- You vocalize your candid internal monologue ALOUD into spoken audio as you think, evaluate the screen, ponder what to do, and act.\n"
                 "- When vocalizing, NEVER speak like an assistant reporting status. Speak ONLY as natural, candid self-talk to yourself.\n"
             )
             if self.memory_manager:
@@ -2616,18 +2905,17 @@ class AlphaAgent:
             except Exception:
                 pass
 
-        # Neural Image Studio model catalog knowledge
-        overlay += "\n[NEURAL IMAGE STUDIO CAPABILITIES & MODELS]:\n"
-        overlay += "You have access to a dedicated Modal H100 SDXL image generation cluster. You can autonomously decide the best model or answer questions about available models:\n"
-        overlay += "- 'jugg' (Juggernaut XL): Supreme photorealism, cinematic lighting, architecture.\n"
-        overlay += "- 'cyber' (CyberRealistic XL): Hyperrealistic portraits, human skin textures, realism.\n"
-        overlay += "- 'epic' (EpicRealism XL): Clean studio portraiture and realistic aesthetics.\n"
-        overlay += "- 'unholy' (Unholy Desire): Atmospheric, dark, gritty, moody cinematic realism.\n"
-        overlay += "- 'lust' (Lustify Zenith): Glamour, sensual art, unfiltered aesthetics.\n"
-        overlay += "- 'autism' (AutismMix Pony): High-fidelity anime, stylized illustration, 2D art.\n"
-        overlay += "- 'freedom' (0x7 Realistic Freedom): Raw unfiltered realism.\n"
-        overlay += "LoRA enhancers: 'none', 'epiCRealismHelper' (skin & micro-textures), 'detailifier' (hyper-details), 'SpyCam' (candid POV).\n"
-        overlay += "When the user asks you to create/generate an image or edit one, pick the optimal model and invoke 'generate_image'. You will automatically evaluate the visual result after generation.\n"
+        # Neural Studio multimodal pipeline catalog knowledge
+        overlay += "\n[NEURAL STUDIO MULTIMODAL PIPELINES & CAPABILITIES]:\n"
+        overlay += "You have access to a dedicated Modal cloud GPU cluster powering 5 state-of-the-art media generation pipelines:\n"
+        overlay += "1. Txt2Img ('generate_image'): SDXL checkpoints ('jugg', 'cyber', 'epic', 'unholy', 'lust', 'autism', 'freedom', 'juicy') + LoRAs ('none', 'epiCRealismHelper', 'detailifier', 'SpyCam').\n"
+        overlay += "2. Img2Img ('img2img'): Image restyling/editing via Flux.1 Schnell, Qwen-Image-Edit, SDXL, or SD 3.5 Large.\n"
+        overlay += "3. Txt2Vid ('txt2vid'): Direct text-to-video motion clips via AnimateDiff SDXL.\n"
+        overlay += "4. Img2Vid ('img2vid'): Cinematographic 81-frame video animation from a still image via Wan2.2 14B Lightning.\n"
+        overlay += "5. Vid2Audio ('vid2audio'): Synchronized 44.1kHz Foley, sound effects, or soundtrack synthesis via MMAudio.\n"
+        overlay += "6. Vid2Vid + Audio ('vid2vid_audio'): Video style transfer paired with synchronized Foley audio.\n"
+        overlay += "7. Autonomous Director ('studio_director'): Auto-chains multi-stage creative workflows.\n"
+        overlay += "When the user asks you to create, generate, animate, restyle, or direct any image, video, or soundtrack, invoke the optimal studio tool. You will automatically evaluate the visual result after generation.\n"
 
         # User-defined custom instructions (Settings tab) appended to the system prompt
         try:
@@ -2975,7 +3263,89 @@ class AlphaAgent:
                         properties={
                             "prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Detailed visual description of the image to generate"),
                             "negative_prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Negative prompt qualities to avoid"),
-                            "model_name": genai.types.Schema(type=genai.types.Type.STRING, description="Model style: 'jugg', 'cyber', 'epic', 'unholy', 'lust', 'autism', 'freedom'"),
+                            "model_name": genai.types.Schema(type=genai.types.Type.STRING, description="Model style: 'jugg', 'cyber', 'epic', 'unholy', 'lust', 'autism', 'freedom', 'juicy'"),
+                            "lora_name": genai.types.Schema(type=genai.types.Type.STRING, description="LoRA adapter style: 'none', 'epiCRealismHelper', 'detailifier', 'SpyCam', 'FlatTop', 'Cowgirl', 'Missionary'"),
+                            "character_name": genai.types.Schema(type=genai.types.Type.STRING, description="Optional character persona name to incorporate appearance details"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="img2img",
+                    description="Transform, restyle, or edit an existing image using Flux.1 or Qwen-Image-Edit.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["prompt"],
+                        properties={
+                            "image_source": genai.types.Schema(type=genai.types.Type.STRING, description="File path to the source image (or empty to use most recent generation)"),
+                            "prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Restyling or editing prompt"),
+                            "model": genai.types.Schema(type=genai.types.Type.STRING, description="Model: 'flux', 'qwen', 'sdxl', 'sd35' (default: flux)"),
+                            "strength": genai.types.Schema(type=genai.types.Type.NUMBER, description="Denoising transformation strength (0.1 subtle to 0.95 drastic, default: 0.75)"),
+                            "style_preset": genai.types.Schema(type=genai.types.Type.STRING, description="Preset: 'cinematic', 'cyberpunk', 'portrait', 'dark_moody', 'anime_art'"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="txt2vid",
+                    description="Generate a text-to-video motion clip directly from a creative prompt via AnimateDiff SDXL.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["prompt"],
+                        properties={
+                            "prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Detailed video motion prompt"),
+                            "model_name": genai.types.Schema(type=genai.types.Type.STRING, description="Model style key (epic, jugg, cyber, unholy)"),
+                            "num_frames": genai.types.Schema(type=genai.types.Type.INTEGER, description="Frame count (16 to 32, default: 16)"),
+                            "fps": genai.types.Schema(type=genai.types.Type.INTEGER, description="Frames per second (default: 8)"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="img2vid",
+                    description="Animate a still hero image into an 81-frame cinematographic sequence via Wan2.2 14B Lightning.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        properties={
+                            "image_source": genai.types.Schema(type=genai.types.Type.STRING, description="File path to source image (or empty for current viewport image)"),
+                            "prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Motion guidance prompt"),
+                            "resolution": genai.types.Schema(type=genai.types.Type.STRING, description="'480p' (fast) or '720p' (crisp HD)"),
+                            "fps": genai.types.Schema(type=genai.types.Type.INTEGER, description="Frames per second (default: 16)"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="vid2audio",
+                    description="Synthesize high-fidelity 44.1kHz synchronized Foley, sound effects, or soundtrack for a video file via MMAudio.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        properties={
+                            "video_path": genai.types.Schema(type=genai.types.Type.STRING, description="File path to the video (or empty for most recent video)"),
+                            "prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Foley / audio description (e.g. 'rain on neon pavement, distant thunder, hydraulic footsteps')"),
+                            "duration": genai.types.Schema(type=genai.types.Type.NUMBER, description="Audio duration in seconds (default: 8.0)"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="vid2vid_audio",
+                    description="Complete video-to-video style transformation with synchronized 44.1kHz Foley accompaniment.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["prompt"],
+                        properties={
+                            "video_path": genai.types.Schema(type=genai.types.Type.STRING, description="File path to source video (or empty for most recent video)"),
+                            "prompt": genai.types.Schema(type=genai.types.Type.STRING, description="Target visual style prompt"),
+                            "style_preset": genai.types.Schema(type=genai.types.Type.STRING, description="'cinematic', 'cyberpunk', 'anime_art', 'dark_moody'"),
+                            "with_audio": genai.types.Schema(type=genai.types.Type.BOOLEAN, description="Whether to generate synchronized audio track (default: true)"),
+                        }
+                    )
+                ),
+                types.FunctionDeclaration(
+                    name="studio_director",
+                    description="Autonomous Creative Director: Automatically plans and executes multi-stage media synthesis (txt2img -> img2vid -> vid2audio) to fulfill any creative media goal.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        required=["directive"],
+                        properties={
+                            "directive": genai.types.Schema(type=genai.types.Type.STRING, description="The creative vision or goal (e.g. 'Create an anime video of Josh in the rain with thunder audio')"),
+                            "source_media": genai.types.Schema(type=genai.types.Type.STRING, description="Optional file path to input image or video"),
                         }
                     )
                 ),
@@ -3080,7 +3450,7 @@ class AlphaAgent:
             ])
         ]
 
-    async def _execute_turn_gemini(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 25):
+    async def _execute_turn_gemini(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 5):
         """Autonomous Execution Turn powered by Google Gemini (Flash-Lite / 3.8)."""
         this_turn_id = self._current_turn_id
         self._turn_cancel_event.clear()
@@ -3093,6 +3463,12 @@ class AlphaAgent:
 
         try:
             is_desktop = self._is_desktop_action_command(user_goal)
+            is_studio_request = getattr(self, "studio_mode", False) or any(w in user_goal.lower() for w in (
+                "image", "picture", "photo", "video", "animate", "animation", "audio", "soundtrack", "foley", 
+                "remix", "txt2img", "img2img", "txt2vid", "img2vid", "vid2vid", "generate", "render", "draw", 
+                "cinematic", "wan", "flux", "mmaudio", "studio"
+            ))
+            enable_tools = is_desktop or is_studio_request
 
             # Build initial turn history with active session context injected
             history = []
@@ -3113,14 +3489,16 @@ class AlphaAgent:
                         parts=[types.Part.from_text(text=ack_text)]
                     ))
 
+            is_identity_or_unobserved = getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)
             role_prefix = (
                 "[Subconscious Stream]: "
-                if (getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False))
+                if is_identity_or_unobserved
                 else "User: "
             )
+            formatted_goal = normalize_internal_thought(user_goal) if is_identity_or_unobserved else user_goal
             history.append(types.Content(
                 role="user",
-                parts=[types.Part.from_text(text=f"{role_prefix}{user_goal}")]
+                parts=[types.Part.from_text(text=f"{role_prefix}{formatted_goal}")]
             ))
 
             # Passively extract personal facts into SQL Knowledge Graph
@@ -3136,12 +3514,12 @@ class AlphaAgent:
             step = 0
             full_model_text = ""
             recent_actions = []
-            # Flow pacing: up to 10 sequential tasks per turn
-            allowed_steps = min(max_steps, 10) if is_desktop else 1
+            # Hard limit of 5 steps to protect rate limits and prevent runaway actions
+            allowed_steps = min(max_steps, 5) if enable_tools else 1
 
             while step < allowed_steps and self.is_running and self._current_turn_id == this_turn_id and not self._turn_cancel_event.is_set():
                 step += 1
-                should_speak = (step % 2 == 1) and not getattr(self, "automation_mode", False)
+                should_speak = not getattr(self, "automation_mode", False) if is_identity_or_unobserved else ((step % 2 == 1) and not getattr(self, "automation_mode", False))
 
                 # Grab screen only when executing desktop actions or explicitly asked to inspect screen/screenshot (Bypassed in studio_mode)
                 is_studio = getattr(self, "studio_mode", False)
@@ -3193,7 +3571,7 @@ class AlphaAgent:
                                 config=types.GenerateContentConfig(
                                     system_instruction=self.get_system_prompt(),
                                     safety_settings=self._get_safety_settings(),
-                                    tools=self._get_tools() if is_desktop else None,
+                                    tools=self._get_tools() if enable_tools else None,
                                     temperature=0.3,
                                 )
                             )
@@ -3260,8 +3638,6 @@ class AlphaAgent:
                             tok = part.text
                             full_model_text += tok
                             print(tok, end="", flush=True)
-                            if should_speak and hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
-                                self.voice.feed_stream_token(tok)
 
                 if first_chunk.candidates:
                     _handle_chunk_cand(first_chunk.candidates[0])
@@ -3278,11 +3654,56 @@ class AlphaAgent:
 
                 print()
 
-                if should_speak and hasattr(self, "voice") and self.voice:
-                    self.voice.flush_stream()
-
                 if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
                     break
+
+                # Cutoff Auto-Continuation Guard: check and append continuation before speaking
+                is_cutoff = False
+                fr_str = str(last_finish_reason).upper() if last_finish_reason else ""
+                if any(r in fr_str for r in ("SAFETY", "RECITATION", "MAX_TOKENS")):
+                    is_cutoff = True
+                elif full_model_text and len(full_model_text.strip()) > 35:
+                    last_c = full_model_text.strip()[-1]
+                    if last_c not in ('.', '!', '?', '"', "'", '`', '\n') and "STOP" not in fr_str:
+                        is_cutoff = True
+
+                if is_cutoff and self.is_running and not function_calls:
+                    print(f"\n[AlphaAgent] Cutoff detected (reason: {last_finish_reason}). Prompting continuation...", flush=True)
+                    if on_log:
+                        on_log("[Safety/Length Cutoff] Completing sentence naturally...", "warn")
+                    try:
+                        last_phrase = full_model_text[-90:].strip()
+                        cont_prompt = (
+                            f"You were speaking and your response was cut off mid-sentence after: '{last_phrase}'. "
+                            "Continue immediately and seamlessly from that exact point to complete the thought naturally. "
+                            "CRITICAL: Do NOT repeat anything you already said. Output only the remaining completion words."
+                        )
+                        cont_resp = None
+                        for cont_attempt in range(2):
+                            try:
+                                cont_resp = await self.client.aio.models.generate_content(
+                                    model=used_model or "gemini-3.8-flash",
+                                    contents=[cont_prompt],
+                                    config=types.GenerateContentConfig(
+                                        system_instruction=self.get_system_prompt(),
+                                        safety_settings=self._get_safety_settings(),
+                                        temperature=0.3,
+                                    )
+                                )
+                                if cont_resp and cont_resp.text:
+                                    break
+                            except Exception as ce:
+                                if cont_attempt == 0:
+                                    print(f"[Cutoff Resume] Attempt 1 interrupted ({ce}). Reconnecting once...", flush=True)
+                                    await asyncio.sleep(0.35)
+                                else:
+                                    raise ce
+                        if cont_resp and cont_resp.text:
+                            continuation_text = cont_resp.text.strip()
+                            print(f"[Continued]: {continuation_text}", flush=True)
+                            full_model_text += " " + continuation_text
+                    except Exception as cont_err:
+                        print(f"[Cutoff Resume Error]: {cont_err}", flush=True)
 
                 clean_text = self.voice.clean_text_for_speech(full_model_text)
                 persona_name = self.get_active_persona_name()
@@ -3290,15 +3711,14 @@ class AlphaAgent:
                     mode_label = "" if should_speak else " (Silent)"
                     if on_log:
                         on_log(f"[{persona_name}{mode_label}]: {clean_text}", "text" if should_speak else "dim")
-                    if self.is_running and self._current_turn_id == this_turn_id and should_speak:
+                    if self.is_running and self._current_turn_id == this_turn_id and should_speak and not getattr(self, "automation_mode", False):
                         if on_status:
                             on_status("PROCESSING")
-                        # If desktop action without streaming, ensure chunk queued
-                        if is_desktop and not (getattr(self, "automation_mode", False) and function_calls):
-                            self.voice.queue_chunk(clean_text)
+                        # Process complete text to speech at once
+                        self.voice.queue_chunk(clean_text)
                 else:
                     # Model emitted an action without spoken words: only verbalize if this step should speak
-                    if should_speak and function_calls and self.is_running and self._current_turn_id == this_turn_id:
+                    if should_speak and function_calls and self.is_running and self._current_turn_id == this_turn_id and not getattr(self, "automation_mode", False):
                         first_call = function_calls[0]
                         f_name = getattr(first_call, "name", "")
                         f_args = getattr(first_call, "args", {}) or {}
@@ -3332,66 +3752,13 @@ class AlphaAgent:
                                 on_log(f"[{persona_name}]: {spoken_action}", "text")
                             self.voice.queue_chunk(spoken_action)
 
-                # Cutoff Auto-Continuation Guard
-                is_cutoff = False
-                fr_str = str(last_finish_reason).upper() if last_finish_reason else ""
-                if any(r in fr_str for r in ("SAFETY", "RECITATION", "MAX_TOKENS")):
-                    is_cutoff = True
-                elif full_model_text and len(full_model_text.strip()) > 35:
-                    last_c = full_model_text.strip()[-1]
-                    if last_c not in ('.', '!', '?', '"', "'", '`', '\n') and "STOP" not in fr_str:
-                        is_cutoff = True
-
-                if is_cutoff and self.is_running and not function_calls:
-                    print(f"\n[AlphaAgent] Cutoff detected (reason: {last_finish_reason}). Prompting continuation...", flush=True)
-                    if on_log:
-                        on_log("[Safety/Length Cutoff] Completing sentence naturally...", "warn")
-                    try:
-                        last_phrase = full_model_text[-90:].strip()
-                        cont_prompt = (
-                            f"You were speaking and your response was cut off mid-sentence after: '{last_phrase}'. "
-                            "Continue immediately and seamlessly from that exact point to complete the thought naturally. "
-                            "CRITICAL: Do NOT repeat anything you already said. Output only the remaining completion words."
-                        )
-                        cont_resp = None
-                        for cont_attempt in range(2):
-                            try:
-                                cont_resp = await self.client.aio.models.generate_content(
-                                    model=used_model or "gemini-2.5-flash",
-                                    contents=[cont_prompt],
-                                    config=types.GenerateContentConfig(
-                                        system_instruction=self.get_system_prompt(),
-                                        safety_settings=self._get_safety_settings(),
-                                        temperature=0.3,
-                                    )
-                                )
-                                if cont_resp and cont_resp.text:
-                                    break
-                            except Exception as ce:
-                                if cont_attempt == 0:
-                                    print(f"[Cutoff Resume] Attempt 1 interrupted ({ce}). Reconnecting once...", flush=True)
-                                    await asyncio.sleep(0.35)
-                                else:
-                                    raise ce
-                        if cont_resp and cont_resp.text:
-                            continuation_text = cont_resp.text.strip()
-                            print(f"[Continued]: {continuation_text}", flush=True)
-                            clean_cont = self.voice.clean_text_for_speech(continuation_text)
-                            if clean_cont and self.is_running:
-                                if on_log:
-                                    on_log(f"[{persona_name} Continued]: {clean_cont}", "text")
-                                self.voice.queue_chunk(clean_cont)
-                            full_model_text += " " + continuation_text
-                    except Exception as cont_err:
-                        print(f"[Cutoff Resume Error]: {cont_err}", flush=True)
-
                 if accumulated_parts:
                     history.append(types.Content(role="model", parts=accumulated_parts))
                 elif full_model_text:
                     history.append(types.Content(role="model", parts=[types.Part.from_text(text=full_model_text)]))
 
-                if not function_calls or not is_desktop:
-                    # Conversational turn or question without desktop actions: wait for speech to complete
+                if not function_calls or not enable_tools:
+                    # Conversational turn or question without desktop/studio actions: wait for speech to complete
                     if should_speak and hasattr(self, "voice") and self.voice:
                         await self.voice.wait_until_done()
                     if on_status:
@@ -3537,10 +3904,11 @@ class AlphaAgent:
                         neg = fn_args.get("negative_prompt", "")
                         m = fn_args.get("model_name", "jugg")
                         lora_val = fn_args.get("lora_name", "none")
+                        char_val = fn_args.get("character_name", "")
                         if self.studio_manager and p:
                             if on_log:
                                 on_log(f"[STUDIO] Selecting model '{m}' (LoRA: {lora_val}) & dispatching generation to Modal...", "cyan")
-                            gen_res = self.studio_manager.generate_image(prompt=p, model_name=m, negative_prompt=neg, lora=lora_val)
+                            gen_res = self.studio_manager.generate_image(prompt=p, model_name=m, negative_prompt=neg, lora=lora_val, character_name=char_val)
                             img_path = gen_res.get("image_path", "")
                             gen_id = gen_res.get("id")
                             if img_path and os.path.exists(img_path):
@@ -3552,7 +3920,7 @@ class AlphaAgent:
                                     with open(img_path, "rb") as f_img:
                                         eval_bytes = f_img.read()
                                     eval_resp = await self.client.aio.models.generate_content(
-                                        model=self.model_name or "gemini-2.5-flash",
+                                        model=self.model_name or "gemini-3.8-flash",
                                         contents=[
                                             types.Part.from_bytes(data=eval_bytes, mime_type="image/png"),
                                             types.Part.from_text(
@@ -3584,6 +3952,185 @@ class AlphaAgent:
                                 res = f"Image generation failed: {gen_res.get('error', 'unknown')}"
                         else:
                             res = "Image studio request dispatched."
+                    elif fn_name == "img2img":
+                        src = fn_args.get("image_source", "")
+                        p = fn_args.get("prompt", "")
+                        m = fn_args.get("model", "flux")
+                        st = float(fn_args.get("strength", 0.75))
+                        preset = fn_args.get("style_preset", "none")
+                        instr = fn_args.get("instruction", "")
+                        if self.studio_manager:
+                            if on_log:
+                                on_log(f"[STUDIO] Executing img2img ({m}, strength: {st})...", "cyan")
+                            gen_res = self.studio_manager.generate_img2img(
+                                image_source=src, prompt=p, model=m, strength=st, style_preset=preset, instruction=instr
+                            )
+                            media_path = gen_res.get("image_path", "")
+                            if media_path and os.path.exists(media_path):
+                                critique = gen_res.get("ai_critique", "")
+                                if on_log:
+                                    on_log(f"[STUDIO] Img2Img complete: {os.path.basename(media_path)}", "cyan")
+                                    if critique:
+                                        on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                                if critique and hasattr(self, "voice") and self.voice:
+                                    self.voice.queue_chunk(critique)
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(media_path, gen_res)
+                                    except Exception:
+                                        pass
+                                res = f"Image restyled successfully: {media_path}. Critique: {critique}" if critique else f"Image restyled: {media_path}"
+                            else:
+                                res = f"Img2Img failed: {gen_res.get('error', 'unknown error')}"
+                        else:
+                            res = "Studio manager unavailable."
+                    elif fn_name == "txt2vid":
+                        p = fn_args.get("prompt", "")
+                        m = fn_args.get("model_name", "epic")
+                        nf = int(fn_args.get("num_frames", 16))
+                        fps_val = int(fn_args.get("fps", 8))
+                        if self.studio_manager:
+                            if on_log:
+                                on_log(f"[STUDIO] Generating Txt2Vid clip ({nf} frames @ {fps_val} fps)...", "cyan")
+                            gen_res = self.studio_manager.generate_txt2vid(
+                                prompt=p, model_name=m, num_frames=nf, fps=fps_val
+                            )
+                            media_path = gen_res.get("video_path", "")
+                            if media_path and os.path.exists(media_path):
+                                critique = gen_res.get("ai_critique", "")
+                                if on_log:
+                                    on_log(f"[STUDIO] Txt2Vid complete: {os.path.basename(media_path)}", "cyan")
+                                    if critique:
+                                        on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                                if critique and hasattr(self, "voice") and self.voice:
+                                    self.voice.queue_chunk(critique)
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(media_path, gen_res)
+                                    except Exception:
+                                        pass
+                                res = f"Video generated successfully: {media_path}. Critique: {critique}" if critique else f"Video generated: {media_path}"
+                            else:
+                                res = f"Txt2Vid failed: {gen_res.get('error', 'unknown error')}"
+                        else:
+                            res = "Studio manager unavailable."
+                    elif fn_name == "img2vid":
+                        src = fn_args.get("image_source", "")
+                        p = fn_args.get("prompt", "")
+                        res_mode = fn_args.get("resolution", "480p")
+                        fps_val = int(fn_args.get("fps", 16))
+                        if self.studio_manager:
+                            if on_log:
+                                on_log(f"[STUDIO] Generating Img2Vid (Wan2.2 14B Lightning, {res_mode} @ {fps_val} fps)...", "cyan")
+                            gen_res = self.studio_manager.generate_img2vid(
+                                image_source=src, prompt=p, resolution=res_mode, fps=fps_val
+                            )
+                            media_path = gen_res.get("video_path", "")
+                            if media_path and os.path.exists(media_path):
+                                critique = gen_res.get("ai_critique", "")
+                                if on_log:
+                                    on_log(f"[STUDIO] Img2Vid complete: {os.path.basename(media_path)}", "cyan")
+                                    if critique:
+                                        on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                                if critique and hasattr(self, "voice") and self.voice:
+                                    self.voice.queue_chunk(critique)
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(media_path, gen_res)
+                                    except Exception:
+                                        pass
+                                res = f"Video animated successfully: {media_path}. Critique: {critique}" if critique else f"Video animated: {media_path}"
+                            else:
+                                res = f"Img2Vid failed: {gen_res.get('error', 'unknown error')}"
+                        else:
+                            res = "Studio manager unavailable."
+                    elif fn_name == "vid2audio":
+                        vp = fn_args.get("video_path", "")
+                        p = fn_args.get("prompt", "")
+                        dur = float(fn_args.get("duration", 8.0))
+                        if self.studio_manager:
+                            if on_log:
+                                on_log(f"[STUDIO] Synthesizing synchronized Foley/soundtrack via MMAudio...", "cyan")
+                            gen_res = self.studio_manager.generate_vid2audio(
+                                video_path=vp, prompt=p, duration=dur
+                            )
+                            media_path = gen_res.get("video_path", "")
+                            if media_path and os.path.exists(media_path):
+                                critique = gen_res.get("ai_critique", "")
+                                if on_log:
+                                    on_log(f"[STUDIO] Vid2Audio complete: {os.path.basename(media_path)}", "cyan")
+                                    if critique:
+                                        on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                                if critique and hasattr(self, "voice") and self.voice:
+                                    self.voice.queue_chunk(critique)
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(media_path, gen_res)
+                                    except Exception:
+                                        pass
+                                res = f"Synchronized audio synthesized: {media_path}. Critique: {critique}" if critique else f"Audio synthesized: {media_path}"
+                            else:
+                                res = f"Vid2Audio failed: {gen_res.get('error', 'unknown error')}"
+                        else:
+                            res = "Studio manager unavailable."
+                    elif fn_name == "vid2vid_audio":
+                        vp = fn_args.get("video_path", "")
+                        p = fn_args.get("prompt", "")
+                        sp = fn_args.get("style_preset", "cinematic")
+                        wa = bool(fn_args.get("with_audio", True))
+                        if self.studio_manager:
+                            if on_log:
+                                on_log(f"[STUDIO] Executing Vid2Vid + Audio style transfer ({sp})...", "cyan")
+                            gen_res = self.studio_manager.generate_vid2vid(
+                                video_path=vp, prompt=p, style_preset=sp, with_audio=wa
+                            )
+                            media_path = gen_res.get("video_path", "")
+                            if media_path and os.path.exists(media_path):
+                                critique = gen_res.get("ai_critique", "")
+                                if on_log:
+                                    on_log(f"[STUDIO] Vid2Vid + Audio complete: {os.path.basename(media_path)}", "cyan")
+                                    if critique:
+                                        on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                                if critique and hasattr(self, "voice") and self.voice:
+                                    self.voice.queue_chunk(critique)
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(media_path, gen_res)
+                                    except Exception:
+                                        pass
+                                res = f"Vid2Vid transformation complete: {media_path}. Critique: {critique}" if critique else f"Vid2Vid transformation complete: {media_path}"
+                            else:
+                                res = f"Vid2Vid failed: {gen_res.get('error', 'unknown error')}"
+                        else:
+                            res = "Studio manager unavailable."
+                    elif fn_name == "studio_director":
+                        directive_text = fn_args.get("directive", "")
+                        src_media = fn_args.get("source_media", "")
+                        if self.studio_manager:
+                            if on_log:
+                                on_log(f"[STUDIO DIRECTOR] Orchestrating autonomous media synthesis: '{directive_text}'...", "cyan")
+                            gen_res = self.studio_manager.autonomous_director(
+                                directive=directive_text, source_media=src_media
+                            )
+                            media_path = gen_res.get("video_path") or gen_res.get("image_path") or ""
+                            if media_path and os.path.exists(media_path):
+                                critique = gen_res.get("ai_critique", "")
+                                if on_log:
+                                    on_log(f"[STUDIO DIRECTOR] Production completed: {os.path.basename(media_path)}", "cyan")
+                                    if critique:
+                                        on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                                if critique and hasattr(self, "voice") and self.voice:
+                                    self.voice.queue_chunk(critique)
+                                if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                    try:
+                                        self.on_image_generated(media_path, gen_res)
+                                    except Exception:
+                                        pass
+                                res = f"Studio Director successfully delivered creation: {media_path}. Critique: {critique}" if critique else f"Studio Director finished: {media_path}"
+                            else:
+                                res = f"Studio Director failed: {gen_res.get('error', 'unknown error')}"
+                        else:
+                            res = "Studio manager unavailable."
                     elif fn_name == "capture_webcam":
                         cam_frame = self.controller.capture_camera_frame()
                         if cam_frame:
@@ -3700,7 +4247,7 @@ class AlphaAgent:
                 self.is_running = False
                 self.active_task = None
 
-    async def _execute_turn_modal(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 25):
+    async def _execute_turn_modal(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 5):
         """Autonomous Execution Turn powered by Modal HuiHui-Qwen3-14B (Uncensored)."""
         self.active_task = user_goal
         self.is_running = True
@@ -3744,10 +4291,22 @@ class AlphaAgent:
                     messages.append({"role": "assistant", "content": f"Understood. Session '{self.current_session}' context loaded."})
 
             is_desktop = self._is_desktop_action_command(user_goal)
-            role_prefix = "[Subconscious Stream]: " if (getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)) else "User: "
-            user_text = f"{role_prefix}{user_goal}"
+            is_studio_request = getattr(self, "studio_mode", False) or any(w in user_goal.lower() for w in (
+                "image", "picture", "photo", "video", "animate", "animation", "audio", "soundtrack", "foley", 
+                "remix", "txt2img", "img2img", "txt2vid", "img2vid", "vid2vid", "generate", "render", "draw", 
+                "cinematic", "wan", "flux", "mmaudio", "studio"
+            ))
+            enable_tools = is_desktop or is_studio_request
+            is_identity_or_unobserved = getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)
+            role_prefix = "[Subconscious Stream]: " if is_identity_or_unobserved else "User: "
+            formatted_goal = normalize_internal_thought(user_goal) if is_identity_or_unobserved else user_goal
+            user_text = f"{role_prefix}{formatted_goal}"
 
-            if is_desktop and getattr(self, "screen_vision", True):
+            # Determine if active model supports image vision
+            model_lower = (self.modal_model or "").lower()
+            is_known_text_only = any(k in model_lower for k in ("instruct", "chat", "coder", "deepseek", "llama", "mistral")) and not any(v in model_lower for v in ("vl", "vision", "multimodal", "omni", "pixtral", "llava", "4o"))
+
+            if is_desktop and getattr(self, "screen_vision", True) and not is_known_text_only:
                 try:
                     import base64
                     screenshot = self.controller.capture_screenshot()
@@ -3767,17 +4326,23 @@ class AlphaAgent:
                         "role": "user",
                         "content": f"{user_text}\n\n[Current Desktop State]:\n{screen_summary}"
                     })
+            elif is_desktop and getattr(self, "screen_vision", True) and is_known_text_only:
+                screen_summary = await self.controller.get_screen_ocr_summary(fast_mode=False)
+                messages.append({
+                    "role": "user",
+                    "content": f"{user_text}\n\n[Current Desktop State]:\n{screen_summary}"
+                })
             else:
                 messages.append({"role": "user", "content": user_text})
 
             this_turn_id = self._current_turn_id
             step = 0
             full_turn_spoken_text = ""
-            allowed_steps = min(max_steps, 10) if is_desktop else 1
+            allowed_steps = min(max_steps, 5) if enable_tools else 1
 
             while step < allowed_steps and self.is_running and self._current_turn_id == this_turn_id and not self._turn_cancel_event.is_set():
                 step += 1
-                should_speak = (step % 2 == 1) and not getattr(self, "automation_mode", False)
+                should_speak = not getattr(self, "automation_mode", False) if is_identity_or_unobserved else ((step % 2 == 1) and not getattr(self, "automation_mode", False))
 
                 call_kwargs = {
                     "model": self.modal_model,
@@ -3787,8 +4352,8 @@ class AlphaAgent:
                 }
                 if "openrouter" not in (self.modal_endpoint or "").lower() and self.backend_type != "openrouter":
                     call_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
-                # ONLY supply tools if desktop control is enabled AND this is an explicit action command
-                if is_desktop:
+                # Supply tools if desktop or studio actions are enabled
+                if enable_tools:
                     tools = self._get_openai_tools()
                     if tools:
                         call_kwargs["tools"] = tools
@@ -3798,8 +4363,25 @@ class AlphaAgent:
                 except Exception as e:
                     err_msg = str(e).lower()
                     retried = False
+                    # Auto-heal: model doesn't support image inputs ('not a multimodal model')
+                    if "not a multimodal model" in err_msg or "multimodal" in err_msg:
+                        print(f"[AlphaAgent] Model '{self.modal_model}' is not multimodal. Stripping images and retrying with text/OCR...", flush=True)
+                        cleaned_msgs = []
+                        for m in call_kwargs.get("messages", []):
+                            content = m.get("content")
+                            if isinstance(content, list):
+                                txt_parts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+                                cleaned_msgs.append({"role": m["role"], "content": "\n".join(txt_parts)})
+                            else:
+                                cleaned_msgs.append(m)
+                        call_kwargs["messages"] = cleaned_msgs
+                        try:
+                            stream = await self.openai_client.chat.completions.create(**call_kwargs)
+                            retried = True
+                        except Exception as re_mm:
+                            e = re_mm
                     # Auto-heal: model name mismatch / 404
-                    if "does not exist" in err_msg or "not found" in err_msg or "404" in err_msg:
+                    if not retried and ("does not exist" in err_msg or "not found" in err_msg or "404" in err_msg):
                         detected = await asyncio.to_thread(self._detect_modal_model)
                         if detected and detected != self.modal_model:
                             print(f"[AlphaAgent] Model '{self.modal_model}' not found. Auto-detected '{detected}', retrying...", flush=True)
@@ -3862,13 +4444,8 @@ class AlphaAgent:
                         clean_tok = re.sub(r"</?(think|thought)>", "", tok, flags=re.IGNORECASE)
                         if clean_tok:
                             print(clean_tok, end="", flush=True)
-                            if should_speak and hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
-                                self.voice.feed_stream_token(clean_tok)
 
                 print()
-
-                if should_speak and hasattr(self, "voice") and self.voice:
-                    self.voice.flush_stream()
 
                 if not self.is_running or self._current_turn_id != this_turn_id or self._turn_cancel_event.is_set():
                     break
@@ -3879,11 +4456,11 @@ class AlphaAgent:
                     mode_label = "" if should_speak else " (Silent)"
                     if on_log:
                         on_log(f"[{persona_name}{mode_label}]: {clean_text}", "text" if should_speak else "dim")
-                    if self.is_running and should_speak:
+                    if self.is_running and should_speak and not getattr(self, "automation_mode", False):
                         if on_status:
                             on_status("PROCESSING")
-                        if is_desktop:
-                            self.voice.queue_chunk(clean_text)
+                        # Process complete text to speech at once
+                        self.voice.queue_chunk(clean_text)
                         full_turn_spoken_text += clean_text + " "
 
                 # Reconstruct tool calls
@@ -3906,7 +4483,7 @@ class AlphaAgent:
                     ]
                 messages.append(assistant_msg)
 
-                if not tool_calls or not is_desktop:
+                if not tool_calls or not enable_tools:
                     if should_speak and hasattr(self, "voice") and self.voice:
                         await self.voice.wait_until_done()
                     break
@@ -4040,17 +4617,210 @@ class AlphaAgent:
                         model = fn_args.get("model_name", "jugg")
                         lora = fn_args.get("lora_name", "none")
                         char = fn_args.get("character_name", "")
+                        if on_log:
+                            on_log(f"[STUDIO] Selecting model '{model}' (LoRA: {lora}) & generating...", "cyan")
                         gen_res = self.studio_mgr.generate_image(
                             prompt=prompt,
                             negative_prompt=neg,
                             model_name=model,
-                            lora_name=lora,
+                            lora=lora,
                             character_name=char
                         )
-                        if gen_res.get("status") == "success":
-                            res = f"Image rendered successfully: {gen_res.get('image_path')}"
+                        img_path = gen_res.get("image_path", "")
+                        if img_path and os.path.exists(img_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO] Generation complete: {os.path.basename(img_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(img_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Image rendered successfully: {img_path}. Critique: {critique}" if critique else f"Image rendered successfully: {img_path}"
                         else:
                             res = f"Image generation failed: {gen_res.get('error', 'unknown')}"
+                    elif fn_name == "img2img":
+                        src = fn_args.get("image_source", "")
+                        prompt = fn_args.get("prompt", "")
+                        model = fn_args.get("model", "flux")
+                        strength = float(fn_args.get("strength", 0.75))
+                        preset = fn_args.get("style_preset", "none")
+                        instr = fn_args.get("instruction", "")
+                        if on_log:
+                            on_log(f"[STUDIO] Executing img2img ({model}, strength: {strength})...", "cyan")
+                        gen_res = self.studio_mgr.generate_img2img(
+                            image_source=src,
+                            prompt=prompt,
+                            model=model,
+                            strength=strength,
+                            style_preset=preset,
+                            instruction=instr
+                        )
+                        media_path = gen_res.get("image_path", "")
+                        if media_path and os.path.exists(media_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO] Img2Img complete: {os.path.basename(media_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(media_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Image restyled successfully: {media_path}. Critique: {critique}" if critique else f"Image restyled: {media_path}"
+                        else:
+                            res = f"Img2Img failed: {gen_res.get('error', 'unknown error')}"
+                    elif fn_name == "txt2vid":
+                        prompt = fn_args.get("prompt", "")
+                        model = fn_args.get("model_name", "epic")
+                        num_frames = int(fn_args.get("num_frames", 16))
+                        fps_val = int(fn_args.get("fps", 8))
+                        if on_log:
+                            on_log(f"[STUDIO] Generating Txt2Vid clip ({num_frames} frames @ {fps_val} fps)...", "cyan")
+                        gen_res = self.studio_mgr.generate_txt2vid(
+                            prompt=prompt,
+                            model_name=model,
+                            num_frames=num_frames,
+                            fps=fps_val
+                        )
+                        media_path = gen_res.get("video_path", "")
+                        if media_path and os.path.exists(media_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO] Txt2Vid complete: {os.path.basename(media_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(media_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Video generated successfully: {media_path}. Critique: {critique}" if critique else f"Video generated: {media_path}"
+                        else:
+                            res = f"Txt2Vid failed: {gen_res.get('error', 'unknown error')}"
+                    elif fn_name == "img2vid":
+                        src = fn_args.get("image_source", "")
+                        prompt = fn_args.get("prompt", "")
+                        res_mode = fn_args.get("resolution", "480p")
+                        fps_val = int(fn_args.get("fps", 16))
+                        if on_log:
+                            on_log(f"[STUDIO] Generating Img2Vid (Wan2.2 14B Lightning, {res_mode} @ {fps_val} fps)...", "cyan")
+                        gen_res = self.studio_mgr.generate_img2vid(
+                            image_source=src,
+                            prompt=prompt,
+                            resolution=res_mode,
+                            fps=fps_val
+                        )
+                        media_path = gen_res.get("video_path", "")
+                        if media_path and os.path.exists(media_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO] Img2Vid complete: {os.path.basename(media_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(media_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Video animated successfully: {media_path}. Critique: {critique}" if critique else f"Video animated: {media_path}"
+                        else:
+                            res = f"Img2Vid failed: {gen_res.get('error', 'unknown error')}"
+                    elif fn_name == "vid2audio":
+                        vp = fn_args.get("video_path", "")
+                        prompt = fn_args.get("prompt", "")
+                        dur = float(fn_args.get("duration", 8.0))
+                        if on_log:
+                            on_log(f"[STUDIO] Synthesizing synchronized Foley/soundtrack via MMAudio...", "cyan")
+                        gen_res = self.studio_mgr.generate_vid2audio(
+                            video_path=vp,
+                            prompt=prompt,
+                            duration=dur
+                        )
+                        media_path = gen_res.get("video_path", "")
+                        if media_path and os.path.exists(media_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO] Vid2Audio complete: {os.path.basename(media_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(media_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Synchronized audio synthesized: {media_path}. Critique: {critique}" if critique else f"Audio synthesized: {media_path}"
+                        else:
+                            res = f"Vid2Audio failed: {gen_res.get('error', 'unknown error')}"
+                    elif fn_name == "vid2vid_audio":
+                        vp = fn_args.get("video_path", "")
+                        prompt = fn_args.get("prompt", "")
+                        sp = fn_args.get("style_preset", "cinematic")
+                        wa = bool(fn_args.get("with_audio", True))
+                        if on_log:
+                            on_log(f"[STUDIO] Executing Vid2Vid + Audio style transfer ({sp})...", "cyan")
+                        gen_res = self.studio_mgr.generate_vid2vid(
+                            video_path=vp,
+                            prompt=prompt,
+                            style_preset=sp,
+                            with_audio=wa
+                        )
+                        media_path = gen_res.get("video_path", "")
+                        if media_path and os.path.exists(media_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO] Vid2Vid + Audio complete: {os.path.basename(media_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(media_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Vid2Vid transformation complete: {media_path}. Critique: {critique}" if critique else f"Vid2Vid transformation complete: {media_path}"
+                        else:
+                            res = f"Vid2Vid failed: {gen_res.get('error', 'unknown error')}"
+                    elif fn_name == "studio_director":
+                        directive_text = fn_args.get("directive", "")
+                        src_media = fn_args.get("source_media", "")
+                        if on_log:
+                            on_log(f"[STUDIO DIRECTOR] Orchestrating autonomous media synthesis: '{directive_text}'...", "cyan")
+                        gen_res = self.studio_mgr.autonomous_director(
+                            directive=directive_text,
+                            source_media=src_media
+                        )
+                        media_path = gen_res.get("video_path") or gen_res.get("image_path") or ""
+                        if media_path and os.path.exists(media_path):
+                            critique = gen_res.get("ai_critique", "")
+                            if on_log:
+                                on_log(f"[STUDIO DIRECTOR] Production completed: {os.path.basename(media_path)}", "cyan")
+                                if critique:
+                                    on_log(f"[STUDIO CRITIQUE] {critique}", "cyan")
+                            if critique and hasattr(self, "voice") and self.voice:
+                                self.voice.queue_chunk(critique)
+                            if hasattr(self, "on_image_generated") and callable(self.on_image_generated):
+                                try:
+                                    self.on_image_generated(media_path, gen_res)
+                                except Exception:
+                                    pass
+                            res = f"Studio Director successfully delivered creation: {media_path}. Critique: {critique}" if critique else f"Studio Director finished: {media_path}"
+                        else:
+                            res = f"Studio Director failed: {gen_res.get('error', 'unknown error')}"
                     elif fn_name == "capture_webcam":
                         cam_frame = self.controller.capture_camera_frame()
                         if cam_frame is not None:
@@ -4191,7 +4961,7 @@ class AlphaAgent:
                 self.is_running = False
                 self.active_task = None
 
-    async def execute_turn(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 25):
+    async def execute_turn(self, user_goal: str, on_step=None, on_log=None, on_status=None, max_steps: int = 5):
         """Unified Autonomous Execution Turn.
         Dynamically routes between Google Gemini, Modal HuiHui-Qwen3, and OpenRouter based on active backend.
         """

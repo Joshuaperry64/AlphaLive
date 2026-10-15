@@ -64,6 +64,7 @@ WEBSITE_CHECKPOINTS = {
     "lustifyNSFWCheckpoint_zenithV9.safetensors": "3112728",
     "epicrealismXL_pureFix.safetensors": "2514955",
     "intorealism_sdxlV4.safetensors": "2650268",
+    "juicyDreams_sdxl.safetensors": "3381025",
 }
 
 WEBSITE_LORAS = {

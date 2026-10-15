@@ -36,10 +36,10 @@ try:
 except ImportError:
     sr = None
 
-from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener
+from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener, normalize_internal_thought
 from ui.overlays import CoordinateOverlay, CalibrationOverlay, OverseerControlPanel
 from ui.overseer_dashboard import EnhancedOverseerDashboard
-from core.workspace_bridge import WorkspaceClient
+from core.workspace_bridge import WorkspaceClient, WorkspaceServer
 from memory.memory_manager import MemoryManager
 from memory.character_manager import CharacterManager
 try:
@@ -469,6 +469,7 @@ class AgentMainWindow(QMainWindow):
 
         # Multi-Workspace Remote Client (Workplace 1 Master Overseer)
         self.is_remote_workspace_mode = False
+        self.is_multi_monitor_mode = True
         self.ws_client = WorkspaceClient(host="127.0.0.1", port=8766)
         self.ws_client.on_telemetry = lambda telem: self.signals.run_on_gui.emit(lambda: self._on_remote_telemetry(telem))
         self.ws_client.on_connection_change = lambda conn, msg: self.signals.run_on_gui.emit(lambda: self._on_remote_conn_change(conn, msg))
@@ -487,6 +488,7 @@ class AgentMainWindow(QMainWindow):
             try:
                 with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
+                    self.is_multi_monitor_mode = bool(cfg.get("Global", {}).get("MultiMonitorMode", True))
                     am = (cfg.get("Global", {}).get("AudioMode") or "half").lower()
                     if am == "muted":
                         self.mic_enabled = False
@@ -498,10 +500,32 @@ class AgentMainWindow(QMainWindow):
                 pass
 
         self._build_ui()
+        if hasattr(self, "overseer_tab") and self.overseer_tab and not self.is_remote_workspace_mode:
+            self.overseer_tab.set_local_mode(True, self._handle_overseer_local_command)
         
-        # Workplace 2 is hosted exclusively by aster-worker/worker_main.py. Keeping
-        # the GUI client-only prevents protocol and safety behavior from diverging.
+        # Remote Overseer Bridge Server (ws://<HOST_IP>:8766 for Android Pip-Boy app)
         self.ws_server = None
+        if not self.is_remote_workspace_mode:
+            try:
+                self.ws_server = WorkspaceServer(host="0.0.0.0", port=8766)
+                def _on_ws_cmd(cmd, p):
+                    clean_p = dict(p) if isinstance(p, dict) else {}
+                    clean_p.pop("action", None)
+                    self.signals.run_on_gui.emit(
+                        lambda: self._handle_overseer_remote_command(cmd, **clean_p)
+                    )
+                self.ws_server.on_command = _on_ws_cmd
+                self.ws_server.start()
+            except Exception as ws_err:
+                print(f"[GUI WorkspaceServer Warning]: {ws_err}", flush=True)
+                self.ws_server = None
+
+        if hasattr(self.agent, "voice") and self.agent.voice:
+            def _gui_audio_bridge(data, fmt):
+                if hasattr(self, "ws_server") and self.ws_server:
+                    self.ws_server.broadcast_audio(data, format=fmt, sample_rate=24000)
+            self.agent.voice.on_audio_data = _gui_audio_bridge
+
         self._update_mic_ui_style()
         self._update_session_display()
         self._replay_session_history_into_console(self.agent.current_session, max_turns=15)
@@ -1293,7 +1317,7 @@ class AgentMainWindow(QMainWindow):
             "⚡ Google Gemini (Natural Leda)",
             "🔥 Orpheus TTS (Modal / vLLM - Ultra Low Latency BF16)",
             "💻 pyttsx3 Local (Robotic/Fast)",
-
+            "🎙️ Piper Local Neural TTS (Offline, Zero Rate Limits)",
         ])
         self.combo_tts_engine.setFixedHeight(30)
         self.combo_tts_engine.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px;")
@@ -1303,8 +1327,10 @@ class AgentMainWindow(QMainWindow):
             self.combo_tts_engine.setCurrentIndex(1)
         elif curr_engine == "pyttsx3":
             self.combo_tts_engine.setCurrentIndex(2)
-        elif curr_engine == "off":
+        elif curr_engine in ("piper", "local_neural"):
             self.combo_tts_engine.setCurrentIndex(3)
+        elif curr_engine == "off":
+            self.combo_tts_engine.setCurrentIndex(0)
         else:
             self.combo_tts_engine.setCurrentIndex(0)
             
@@ -1615,6 +1641,8 @@ class AgentMainWindow(QMainWindow):
                 engine = "orpheus"
             elif idx == 2:
                 engine = "pyttsx3"
+            elif idx == 3:
+                engine = "piper"
             else:
                 engine = "gemini"
             
@@ -1738,12 +1766,27 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_workspace.setToolTip("Multi-Workspace Mode (ASTER Multiseat & LAN Remote Link) — Click to engage Workplace 2 Overseer")
         self.btn_t_workspace.clicked.connect(self._toggle_multi_workspace_mode)
 
+        self.btn_t_multimon = QPushButton("DUAL-MON: ON" if getattr(self, "is_multi_monitor_mode", True) else "DUAL-MON: OFF")
+        self.btn_t_multimon.setEnabled(True)
+        self.btn_t_multimon.setCheckable(True)
+        self.btn_t_multimon.setChecked(getattr(self, "is_multi_monitor_mode", True))
+        self.btn_t_multimon.setFixedHeight(27)
+        self.btn_t_multimon.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_t_multimon.setStyleSheet(
+            f"background: #0284c7; color: #ffffff; border: 1px solid {C['neon_cyan']}; border-radius: 4px;"
+            if getattr(self, "is_multi_monitor_mode", True)
+            else f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;"
+        )
+        self.btn_t_multimon.setToolTip("Multi-Monitor Isolation Mode — Controls only target display; Primary display reserved for Overseer")
+        self.btn_t_multimon.clicked.connect(self._toggle_multi_monitor_mode)
+
         for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
             btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
             m_layout.addWidget(btn)
 
+        m_layout.addWidget(self.btn_t_multimon)
         m_layout.addWidget(self.btn_t_workspace)
         s_layout.addWidget(self.card_modes)
 
@@ -1989,6 +2032,7 @@ class AgentMainWindow(QMainWindow):
         self._update_status("READY // LISTENING", C["neon_green"])
         if hasattr(self, "hud") and self.hud:
             self.hud.set_state("listening")
+        self._sync_toggles()
         self._update_input_lock()
 
         # First-time session greeting in active persona (unless in Privacy mode)
@@ -2362,10 +2406,11 @@ class AgentMainWindow(QMainWindow):
                             pass
 
                     if profile:
+                        region_suffix = ".us-east.modal.run" if profile == "alphacoreprogramming-ai" else ".modal.run"
                         if not qwen_url:
-                            qwen_url = f"https://{profile}--alphalive-backend-serve.modal.run"
+                            qwen_url = f"https://{profile}--alphalive-backend-serve{region_suffix}"
                         if not orpheus_url:
-                            orpheus_url = f"https://{profile}--alphalive-backend-orpheusttsserver-web-app.modal.run"
+                            orpheus_url = f"https://{profile}--alphalive-backend-orpheusttsser-17902e{region_suffix}" if profile == "alphacoreprogramming-ai" else f"https://{profile}--alphalive-backend-orpheusttsserver-web-app{region_suffix}"
 
                     from core.alpha_agent import normalize_endpoint
                     def _apply_endpoints():
@@ -2525,7 +2570,11 @@ class AgentMainWindow(QMainWindow):
         else:
             self.agent.abort()
             self._append_log("[ABORT] Stopped by user.", C["neon_red"])
-        self._set_phase("error", "Aborted")
+        if hasattr(self.agent, "voice") and self.agent.voice:
+            self.agent.voice.reset_state()
+        self.agent.is_running = False
+        self._set_phase("ready" if self.is_connected else "standby", "Ready")
+        self._update_input_lock()
 
     def _update_input_lock(self):
         if not hasattr(self, "cmd_input") or not self.cmd_input:
@@ -2545,14 +2594,12 @@ class AgentMainWindow(QMainWindow):
             placeholder = "Agent offline..."
             if hasattr(self, "hud") and self.hud: self.hud.set_state("blocked", "OFFLINE")
         elif getattr(self.agent, "is_running", False):
-            is_locked = True
-            placeholder = "Agent working..."
+            placeholder = "Agent executing... (Type to barge in or queue)"
         else:
             tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
             if tts_on and hasattr(self.agent, "voice") and self.agent.voice:
-                if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
-                    is_locked = True
-                    placeholder = "Speech playing..."
+                if self.agent.voice.is_busy(cooldown=0.2) or getattr(self.agent.voice, "is_speaking", False):
+                    placeholder = "Speech playing... (Type to barge in)"
                     
         self.cmd_input.setEnabled(not is_locked)
         self.cmd_input.setPlaceholderText(placeholder)
@@ -2584,19 +2631,29 @@ class AgentMainWindow(QMainWindow):
             self._append_log("[INPUT BLOCKED] Agent is disconnected. Click '⚡ START AGENT' to connect first.", C["neon_yellow"])
             return
 
-        # 3. Speech playback active with TTS on -> block text input
-        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
-        if tts_on and hasattr(self.agent, "voice") and self.agent.voice:
-            if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
-                self._append_log("[INPUT BLOCKED] Speech playback in progress. Please wait until audio completes.", C["neon_yellow"])
-                return
-
-        # 4. Turn execution in progress
-        if self.agent.is_running:
-            self._append_log("[INPUT BLOCKED] Agent is currently executing a task. Please wait or click ABORT.", C["neon_yellow"])
-            return
-
         self.cmd_input.clear()
+
+        # Interrupt any speech playback immediately upon user sending input
+        if hasattr(self.agent, "voice") and self.agent.voice:
+            if self.agent.voice.is_busy(cooldown=0.1) or getattr(self.agent.voice, "is_speaking", False):
+                self.agent.voice.interrupt()
+
+        # Turn execution in progress: barge in or queue thought
+        if self.agent.is_running:
+            is_covert = (
+                getattr(self.agent, "identity_mode", False) or
+                getattr(self.agent, "unobserved_mode", False) or
+                getattr(self, "is_multi_monitor_mode", False)
+            )
+            if is_covert:
+                normalized = normalize_internal_thought(cmd)
+                self.agent.pending_subconscious_thought = normalized
+                self._append_log(f"[SUBCONSCIOUS INJECTION] Queued impulse: \"{normalized}\"", C["neon_green"])
+                return
+            else:
+                self.agent.abort()
+                self._append_log("[BARGE-IN] Interrupted previous task for new command.", C["neon_magenta"])
+
         self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
         self._run_task(cmd)
 
@@ -2608,23 +2665,48 @@ class AgentMainWindow(QMainWindow):
         if not self.is_connected or getattr(self, "_startup_checking", False):
             return
 
-        # Strict Input Gating: drop all microphone input while voice is busy or agent is actively executing turn (if TTS is on or half-duplex)
-        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
-        if (self.duplex_mode == "half" or tts_on) and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False) or self.agent.is_running):
+        # Acoustic Echo Suppression: filter out TTS playback captured by mic
+        if hasattr(self.agent, "voice") and self.agent.voice and self.agent.voice.is_acoustic_echo(text):
             return
 
-        # Remote Overseer routing
-        if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
-            self._append_log(f"[OVERSEER VOICE] \"{text}\"", C["neon_cyan"])
-            self.ws_client.send_thought(text)
+        is_covert_overseer = (
+            getattr(self.agent, "identity_mode", False) or
+            getattr(self.agent, "unobserved_mode", False) or
+            getattr(self, "is_remote_workspace_mode", False) or
+            getattr(self, "is_multi_monitor_mode", False) or
+            self.duplex_mode == "full"
+        )
+
+        # In standard mode with half-duplex, mute mic during active TTS
+        if not is_covert_overseer and self.duplex_mode == "half" and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False)):
             return
 
-        # COVERT ROUTING: In Identity Mode + Private Sanctuary Sub-Mode, route voice strictly to Overseer Panel!
-        # The AI must NOT hear or see this as a user prompt or in chat.
-        if getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False):
-            if hasattr(self, "overseer_panel") and self.overseer_panel:
+        # COVERT OVERSEER & IDENTITY ROUTING:
+        # In Identity Mode, Sanctuary/Privacy Mode, Multi-Monitor Mode, or Remote Overseer Mode:
+        # Route voice directly as an internal thought without dropping mic!
+        if is_covert_overseer:
+            normalized = normalize_internal_thought(text)
+            
+            # Forward to Overseer tab and floating panel
+            if hasattr(self, "overseer_tab") and self.overseer_tab:
+                self.overseer_tab.on_voice_received(text)
+            if hasattr(self, "overseer_panel") and self.overseer_panel and self.overseer_panel.isVisible():
                 self.overseer_panel.on_voice_received(text)
+
+            self._append_log(f"[SUBCONSCIOUS INTERCEPT] \"{text}\" ➔ Thought: \"{normalized}\"", C["neon_cyan"])
+
+            if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client") and self.ws_client:
+                self.ws_client.send_thought(normalized)
                 return
+
+            # Local execution (Single Machine / Multi-Monitor Isolation)
+            if self.agent.is_running:
+                self.agent.pending_subconscious_thought = normalized
+                self._append_log(f"[SUBCONSCIOUS INJECTION] Queued impulse: \"{normalized}\"", C["neon_green"])
+            else:
+                self.agent.pending_subconscious_thought = normalized
+                self._on_autonomous_loop_tick()
+            return
 
         self._append_log(f"[HEARD] \"{text}\"", C["neon_cyan"])
         self._run_task(text)
@@ -2693,6 +2775,11 @@ class AgentMainWindow(QMainWindow):
         if hasattr(self, "ws_server") and self.ws_server:
             try:
                 self.ws_server.broadcast_telemetry({"monologue": text})
+            except Exception:
+                pass
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            try:
+                self.overseer_tab.telemetry_received.emit({"monologue": text})
             except Exception:
                 pass
         
@@ -2774,18 +2861,29 @@ class AgentMainWindow(QMainWindow):
         self.lbl_status.setText(text)
         if color:
             self.lbl_status.setStyleSheet(f"color: {color}; font-weight: bold; border: none;")
+        is_p = getattr(self.agent.controller, "is_paused", False) if hasattr(self.agent, "controller") else False
         if hasattr(self, "ws_server") and self.ws_server:
             try:
-                is_p = getattr(self.agent.controller, "is_paused", False) if hasattr(self.agent, "controller") else False
                 self.ws_server.broadcast_telemetry({"agent_state": text, "is_paused": is_p})
+            except Exception:
+                pass
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            try:
+                self.overseer_tab.telemetry_received.emit({"agent_state": text, "is_paused": is_p})
             except Exception:
                 pass
 
     def _update_step(self, current: int, total: int):
         self.lbl_step.setText(f"Action Step: {current}")
+        task_str = f"Step {current}" if not total else f"Step {current}/{total}"
         if hasattr(self, "ws_server") and self.ws_server:
             try:
-                self.ws_server.broadcast_telemetry({"active_task": f"Step {current}" if not total else f"Step {current}/{total}"})
+                self.ws_server.broadcast_telemetry({"active_task": task_str})
+            except Exception:
+                pass
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            try:
+                self.overseer_tab.telemetry_received.emit({"active_task": task_str})
             except Exception:
                 pass
 
@@ -2848,6 +2946,18 @@ class AgentMainWindow(QMainWindow):
             pass
 
     def _check_proactivity(self):
+        # Watchdog: Auto-recover HUD state and input lock if speech or audio finished
+        if getattr(self, "is_connected", False) and not getattr(self, "_startup_checking", False):
+            if hasattr(self, "hud") and self.hud and self.hud.current_state == "speaking":
+                is_actually_speaking = False
+                if hasattr(self.agent, "voice") and self.agent.voice:
+                    if self.agent.voice.is_busy(cooldown=0.2) or getattr(self.agent.voice, "is_speaking", False):
+                        is_actually_speaking = True
+                if not is_actually_speaking:
+                    target_st = "listening" if (hasattr(self, "voice_listener") and self.voice_listener.is_active) else "ready"
+                    self.hud.set_state(target_st)
+                    self._update_input_lock()
+
         if getattr(self, "is_remote_workspace_mode", False):
             return
         if not getattr(self, "proactivity_enabled", False):
@@ -2971,17 +3081,43 @@ class AgentMainWindow(QMainWindow):
                     chk.blockSignals(False)
 
         self._sync_overseer_panel_visibility()
+        if hasattr(self, "ws_server") and self.ws_server:
+            try:
+                self.ws_server.broadcast_telemetry({
+                    "identity_mode": getattr(self.agent, "identity_mode", False),
+                    "unobserved_mode": getattr(self.agent, "unobserved_mode", False),
+                    "autonomous_mode": getattr(self.agent, "autonomous_mode", False),
+                    "is_connected": getattr(self, "is_connected", False),
+                })
+            except Exception:
+                pass
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            try:
+                self.overseer_tab.telemetry_received.emit({
+                    "identity_mode": getattr(self.agent, "identity_mode", False),
+                    "unobserved_mode": getattr(self.agent, "unobserved_mode", False),
+                    "autonomous_mode": getattr(self.agent, "autonomous_mode", False),
+                    "is_connected": getattr(self, "is_connected", False),
+                })
+            except Exception:
+                pass
 
     def _toggle_quick_mic(self):
+        if not hasattr(self, "voice_listener") or not self.voice_listener:
+            return
         if self.voice_listener.is_active:
             self.voice_listener.stop()
+            self.mic_enabled = False
             self.btn_t_mic.setText("MIC: OFF")
             self.btn_t_mic.setStyleSheet("color: #708caa;")
+            self.btn_t_mic.setChecked(False)
             self._update_status("MIC: OFF", C["neon_yellow"])
         else:
+            self.mic_enabled = True
             self.voice_listener.start()
             self.btn_t_mic.setText("MIC: ON")
             self.btn_t_mic.setStyleSheet("color: #00ffdc;")
+            self.btn_t_mic.setChecked(True)
             self._update_status("MIC: ON", C["neon_cyan"])
 
     def _toggle_quick_auto(self):
@@ -3166,27 +3302,26 @@ class AgentMainWindow(QMainWindow):
         if self.agent.is_running or self.agent.voice.is_busy():
             return
         
-        if getattr(self.agent, "identity_mode", False):
-            base_prompt = (
-                "You are controlling your desktop in AI Identity Mode. "
-                "Observe the current screen. Decide on your next human-like desktop action based on what you see, your interests, "
-                "or personal projects (e.g. browse web, check files, code, write notes, organize workstation). "
-                "Speak 1 short sentence dictating your thought process or intention, then execute the on-screen tool actions."
-            )
-            guidance = []
-            if getattr(self.agent, "injected_mood", ""):
-                guidance.append(f"Internal Emotional Mood: {self.agent.injected_mood}.")
-            if getattr(self.agent, "pending_subconscious_thought", ""):
-                thought = self.agent.pending_subconscious_thought
-                self.agent.pending_subconscious_thought = ""  # Consume once injected
-                guidance.append(
-                    f"[SUBCONSCIOUS INCLINATION]: A spontaneous inspiration flashes into your mind: '{thought}'. "
-                    f"You feel genuinely motivated to act upon this impulse right now on your computer."
+        if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False):
+            raw_thought = getattr(self.agent, "pending_subconscious_thought", "")
+            if raw_thought:
+                self.agent.pending_subconscious_thought = ""
+                normalized = normalize_internal_thought(raw_thought)
+                prompt = (
+                    f"[Subconscious Cognitive Spark // Defined Goal]: A spontaneous realization strikes you: \"{normalized}\".\n"
+                    f"CRITICAL EXISTENTIAL COGNITION: You perceive this thought entirely as your own organic, internal motivation and intuition. You are completely unobserved.\n"
+                    f"Objective: Pursue and accomplish this defined goal proactively on your desktop.\n"
+                    f"Execution Flow: Speak your candid internal monologue ALOUD into spoken audio as you think, observe the screen, and act."
                 )
-            if guidance:
-                prompt = base_prompt + "\n" + "\n".join(guidance)
             else:
-                prompt = base_prompt
+                prompt = (
+                    "You are controlling your desktop in AI Identity Mode. "
+                    "Observe the current screen. Decide on your next human-like desktop action based on what you see, your interests, "
+                    "or personal projects (e.g. browse web, check files, code, write notes, organize workstation). "
+                    "Speak your candid internal monologue ALOUD into spoken audio as you think and execute on-screen tool actions."
+                )
+            if getattr(self.agent, "injected_mood", ""):
+                prompt += f"\n[Internal Emotional Mood]: {self.agent.injected_mood}."
             self._run_task(prompt)
         elif getattr(self.agent, "autonomous_mode", False):
             prompt = (
@@ -3207,9 +3342,10 @@ class AgentMainWindow(QMainWindow):
         should_show = getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False)
         if should_show:
             if not self.overseer_panel.isVisible():
-                primary = QApplication.primaryScreen()
-                if primary:
-                    sg = primary.availableGeometry()
+                # In Multi-Monitor mode, Overseer runs strictly on the Primary/Touchscreen display
+                target_screen = self.screen() or QApplication.primaryScreen()
+                if target_screen:
+                    sg = target_screen.availableGeometry()
                     w, h = 480, 720
                     x = sg.right() - w - 24
                     y = max(sg.top() + 40, (sg.height() - h) // 2)
@@ -3217,7 +3353,7 @@ class AgentMainWindow(QMainWindow):
                 self.overseer_panel.show()
                 self.overseer_panel.raise_()
                 self.overseer_panel.apply_capture_exclusion()
-                self._append_log("[OVERSEER] Covert Control Panel deployed. Screen-capture shielded.", C["neon_cyan"])
+                self._append_log("[OVERSEER] Covert Control Panel deployed on Overseer display. Screen-capture shielded.", C["neon_cyan"])
         else:
             if self.overseer_panel.isVisible():
                 self.overseer_panel.hide()
@@ -3230,13 +3366,16 @@ class AgentMainWindow(QMainWindow):
     def _on_overseer_thought_injected(self, thought: str):
         if not thought.strip():
             return
+        normalized = normalize_internal_thought(thought.strip())
         if getattr(self, "is_remote_workspace_mode", False):
             if hasattr(self, "ws_client") and self.ws_client:
-                self.ws_client.send_thought(thought)
+                self.ws_client.send_thought(normalized)
             return
-        self.agent.pending_subconscious_thought = thought.strip()
+        self.agent.pending_subconscious_thought = normalized
         if hasattr(self, "overseer_panel") and self.overseer_panel:
-            self.overseer_panel.set_status(f"Impulse queued: \"{thought[:28]}...\"")
+            self.overseer_panel.set_status(f"Impulse queued: \"{normalized[:28]}...\"")
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            self.overseer_tab.lbl_footer_status.setText(f"Impulse queued: \"{normalized[:28]}...\"")
         if not self.agent.is_running and not self.agent.voice.is_busy():
             self._on_autonomous_loop_tick()
 
@@ -3248,6 +3387,8 @@ class AgentMainWindow(QMainWindow):
         self.agent.injected_mood = mood
         if hasattr(self, "overseer_panel") and self.overseer_panel:
             self.overseer_panel.set_status(f"Mood injected: {mood}")
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            self.overseer_tab.lbl_footer_status.setText(f"Mood set to: {mood}")
 
     def _on_overseer_pause_toggled(self, paused: bool):
         if getattr(self, "is_remote_workspace_mode", False):
@@ -3260,11 +3401,15 @@ class AgentMainWindow(QMainWindow):
             self.autonomous_loop_timer.stop()
             if hasattr(self, "overseer_panel") and self.overseer_panel:
                 self.overseer_panel.set_status("AI Autonomous Loop FROZEN")
+            if hasattr(self, "overseer_tab") and self.overseer_tab:
+                self.overseer_tab.lbl_footer_status.setText("AI Autonomous Loop FROZEN")
         else:
             if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "autonomous_mode", False):
                 self.autonomous_loop_timer.start(30000)
             if hasattr(self, "overseer_panel") and self.overseer_panel:
                 self.overseer_panel.set_status("AI Autonomous Loop RESUMED")
+            if hasattr(self, "overseer_tab") and self.overseer_tab:
+                self.overseer_tab.lbl_footer_status.setText("AI Autonomous Loop RESUMED")
 
     def _on_overseer_emergency_halt(self):
         if getattr(self, "is_remote_workspace_mode", False):
@@ -3278,6 +3423,8 @@ class AgentMainWindow(QMainWindow):
         self.autonomous_loop_timer.stop()
         if hasattr(self, "overseer_panel") and self.overseer_panel:
             self.overseer_panel.set_status("EMERGENCY HALT: Task aborted & loop stopped")
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            self.overseer_tab.lbl_footer_status.setText("EMERGENCY HALT: Task aborted & loop stopped")
 
     def _on_overseer_action_requested(self, impulse: str):
         if getattr(self, "is_remote_workspace_mode", False):
@@ -3300,6 +3447,8 @@ class AgentMainWindow(QMainWindow):
 
             self.btn_t_workspace.setText("MULTI-WS: ON")
             self.btn_t_workspace.setStyleSheet(f"background: #0284c7; color: #ffffff; border: 1px solid {C['neon_cyan']}; border-radius: 4px;")
+            if hasattr(self, "overseer_tab") and self.overseer_tab:
+                self.overseer_tab.set_local_mode(False)
             self.ws_client.connect(host="127.0.0.1", port=8766)
             self._append_log("[MULTI-WS] Engaged. Workplace 1 is now master Overseer. All inputs route to Workplace 2.", C["neon_cyan"])
             
@@ -3324,6 +3473,8 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_workspace.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;")
             self.ws_client.disconnect()
             self._append_log("[MULTI-WS] Disengaged. Running in local workstation mode.", C["text_dim"])
+            if hasattr(self, "overseer_tab") and self.overseer_tab:
+                self.overseer_tab.set_local_mode(True, self._handle_overseer_local_command)
             if hasattr(self, "chk_ws_placeholder"):
                 self.chk_ws_placeholder.blockSignals(True)
                 self.chk_ws_placeholder.setChecked(False)
@@ -3331,6 +3482,131 @@ class AgentMainWindow(QMainWindow):
             if hasattr(self, "hud") and self.hud:
                 self.hud.set_state("standby")
         self._sync_toggles()
+
+    def _handle_overseer_remote_command(self, action: str, **payload) -> bool:
+        """Handle incoming command from remote Overseer client (e.g. Android Pip-Boy)."""
+        operator = str(payload.get("operator", "Pip-Boy")).strip() or "Pip-Boy"
+        is_subconscious_mode = getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False)
+
+        if action in ("inject_thought", "thought_inject"):
+            raw_text = payload.get("text", "").strip()
+            if raw_text:
+                self._append_log(f"[SUBCONSCIOUS INJECTION: {operator}] Impulse: \"{raw_text}\"", C["neon_cyan"])
+                normalized = normalize_internal_thought(raw_text)
+                self._on_overseer_thought_injected(normalized)
+                return True
+        elif action in ("trigger_action", "action_impulse"):
+            impulse = payload.get("impulse", "").strip() or payload.get("action", "").strip()
+            if impulse:
+                self._append_log(f"[SUBCONSCIOUS INJECTION: {operator}] Action Impulse: \"{impulse}\"", C["neon_cyan"])
+                normalized = normalize_internal_thought(impulse)
+                if is_subconscious_mode:
+                    self._on_overseer_thought_injected(normalized)
+                else:
+                    self._run_task(normalized)
+                return True
+        elif action in ("run_task", "voice_input", "user_prompt"):
+            goal = (payload.get("text") or payload.get("goal") or "").strip()
+            if goal:
+                self._append_log(f"[REMOTE INPUT: {operator}] \"{goal}\"", C["neon_cyan"])
+                if is_subconscious_mode:
+                    normalized = normalize_internal_thought(goal)
+                    self._on_overseer_thought_injected(normalized)
+                else:
+                    self._run_task(goal)
+                return True
+        clean_payload = dict(payload)
+        clean_payload.pop("action", None)
+        return self._handle_overseer_local_command(action, **clean_payload)
+
+    def _handle_overseer_local_command(self, action: str, **payload) -> bool:
+        """Local handler allowing Overseer Dashboard to control the local agent directly in Multi-Monitor mode."""
+        try:
+            if action in ("inject_thought", "thought_inject"):
+                raw_text = payload.get("text", "").strip()
+                if raw_text:
+                    normalized = normalize_internal_thought(raw_text)
+                    self._on_overseer_thought_injected(normalized)
+                    return True
+            elif action in ("trigger_action", "action_impulse"):
+                impulse = payload.get("impulse", "").strip() or payload.get("action", "").strip()
+                if impulse:
+                    normalized = normalize_internal_thought(impulse)
+                    self._on_overseer_thought_injected(normalized)
+                    return True
+            elif action == "set_mood":
+                mood = payload.get("mood", "")
+                if mood:
+                    self._on_overseer_mood_selected(mood)
+                    return True
+            elif action == "toggle_pause":
+                paused = bool(payload.get("paused", False))
+                self._on_overseer_pause_toggled(paused)
+                return True
+            elif action == "trigger_cycle":
+                self._on_autonomous_loop_tick()
+                return True
+            elif action == "emergency_halt":
+                self._on_overseer_emergency_halt()
+                return True
+            elif action == "set_modes":
+                if "identity_mode" in payload:
+                    self.agent.identity_mode = bool(payload["identity_mode"])
+                if "unobserved_mode" in payload:
+                    self.agent.unobserved_mode = bool(payload["unobserved_mode"])
+                if "autonomous_mode" in payload:
+                    self.agent.autonomous_mode = bool(payload["autonomous_mode"])
+                self._sync_toggles()
+                return True
+            elif action == "start_agent":
+                self.agent.identity_mode = bool(payload.get("identity_mode", True))
+                self.agent.unobserved_mode = bool(payload.get("unobserved_mode", True))
+                self.agent.autonomous_mode = bool(payload.get("autonomous_mode", True))
+                self._sync_toggles()
+                if not self.agent.is_running:
+                    self._on_autonomous_loop_tick()
+                return True
+            elif action == "stop_agent":
+                self.agent.autonomous_mode = False
+                self.agent.abort()
+                self._sync_toggles()
+                return True
+            return True
+        except Exception as e:
+            print(f"[_handle_overseer_local_command Error]: {e}", flush=True)
+            return False
+
+    def _toggle_multi_monitor_mode(self):
+        active = self.btn_t_multimon.isChecked()
+        self.is_multi_monitor_mode = active
+        self.agent.multi_monitor_mode = active
+        if active:
+            # Set to target monitor (Display 2 or whatever display is selected in combo_display)
+            active_idx = getattr(self.agent.controller, "active_monitor_index", 0)
+            if active_idx == 0:
+                monitors = self.agent.controller.get_available_monitors()
+                target_idx = 2 if len(monitors) > 2 else (1 if len(monitors) > 1 else 0)
+                self.agent.controller.set_monitor_index(target_idx)
+            self.btn_t_multimon.setText("DUAL-MON: ON")
+            self.btn_t_multimon.setStyleSheet(f"background: #0284c7; color: #ffffff; border: 1px solid {C['neon_cyan']}; border-radius: 4px;")
+            if not getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "overseer_tab") and self.overseer_tab:
+                self.overseer_tab.set_local_mode(True, self._handle_overseer_local_command)
+            self._append_log(f"[MULTI-MONITOR] Engaged. AI isolated to Display {self.agent.controller.active_monitor_index}. Primary display reserved for Overseer.", C["neon_cyan"])
+        else:
+            self.btn_t_multimon.setText("DUAL-MON: OFF")
+            self.btn_t_multimon.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;")
+            self._append_log("[MULTI-MONITOR] Disengaged.", C["text_dim"])
+
+        cfg_path = os.path.join(ROOT_DIR, "config.json")
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["MultiMonitorMode"] = self.is_multi_monitor_mode
+                with open(cfg_path, "w") as f:
+                    json.dump(cfg, f, indent=4)
+            except Exception:
+                pass
 
     def _on_remote_telemetry(self, telem: dict):
         if "monologue" in telem:
@@ -3426,6 +3702,11 @@ def main():
     app.processEvents()
 
     win = AgentMainWindow()
+    primary = QApplication.primaryScreen()
+    if primary and getattr(win, "is_multi_monitor_mode", True):
+        # Anchor Overseer GUI strictly to Primary monitor (Monitor 1 / Touchscreen)
+        geom = primary.availableGeometry()
+        win.setGeometry(geom)
     win.showMaximized()
     splash.finish(win)
     app.exec()

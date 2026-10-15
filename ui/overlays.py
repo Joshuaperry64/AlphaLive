@@ -570,6 +570,7 @@ class OverseerControlPanel(QWidget):
         self.inject_bar.setSpacing(6)
 
         self.chk_auto_inject = QCheckBox("Auto-Inject Speech")
+        self.chk_auto_inject.setChecked(True)
         self.chk_auto_inject.setStyleSheet("color: #38bdf8; font-size: 8pt; font-weight: bold;")
         self.inject_bar.addWidget(self.chk_auto_inject)
         self.inject_bar.addStretch()
@@ -741,11 +742,19 @@ class OverseerControlPanel(QWidget):
 
     def on_voice_received(self, text: str):
         """Called when user speaks during Identity+Unobserved mode."""
-        self.touch_activity_detected.emit()
         self.txt_thought.setPlainText(text)
         self.lbl_status.setText(f"Voice captured: \"{text[:32]}...\"")
         if self.chk_auto_inject.isChecked():
-            self._inject_thought()
+            # Auto-injection from voice does not trigger touch yield, keeping AI mouse navigation unhindered
+            cleaned = text.strip()
+            if cleaned:
+                self.thought_injected.emit(cleaned)
+                if self.remote_client and self.is_remote_mode:
+                    self.remote_client.send_thought(cleaned)
+                    self.lbl_status.setText(f"Impulse beamed to Workplace 2: \"{cleaned[:26]}...\"")
+                else:
+                    self.lbl_status.setText(f"Injected impulse: \"{cleaned[:30]}...\"")
+                self.txt_thought.clear()
 
     def _inject_thought(self):
         self.touch_activity_detected.emit()

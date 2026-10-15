@@ -24,6 +24,8 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+from core.alpha_agent import normalize_internal_thought
+
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QSize
 from PyQt6.QtGui import QFont, QColor, QIcon, QTextCursor
 from PyQt6.QtWidgets import (
@@ -77,6 +79,8 @@ class EnhancedOverseerDashboard(QWidget):
         self._mic_muted = False
         self._link_ready = False
         self._remote_state = {}
+        self._is_local_mode = False
+        self._local_handler = None
 
         self._init_ui()
         self._connect_signals()
@@ -390,7 +394,7 @@ class EnhancedOverseerDashboard(QWidget):
         hdr.addStretch()
 
         self.chk_auto_inject_speech = QCheckBox("Auto-Inject Voice")
-        self.chk_auto_inject_speech.setChecked(False)
+        self.chk_auto_inject_speech.setChecked(True)
         self.chk_auto_inject_speech.setStyleSheet(f"color: {C['neon_emerald']}; font-size: 8pt; font-weight: bold;")
         hdr.addWidget(self.chk_auto_inject_speech)
 
@@ -856,7 +860,40 @@ class EnhancedOverseerDashboard(QWidget):
         ):
             widget.setEnabled(enabled)
 
+    def set_local_mode(self, enabled: bool, local_handler=None):
+        self._is_local_mode = enabled
+        self._local_handler = local_handler
+        if enabled:
+            self._link_ready = True
+            self.lbl_net_status.setStyleSheet(f"""
+                background: #02231c; color: {C['neon_emerald']}; font-family: Consolas;
+                font-size: 9pt; font-weight: bold; border: 1px solid {C['neon_emerald']};
+                border-radius: 6px; padding: 6px 12px;
+            """)
+            self.lbl_net_status.setText("● LOCAL MULTI-MONITOR LINK")
+            self.lbl_footer_status.setText("Multi-Monitor Isolation active: Overseer monitoring local dedicated display.")
+            self._set_command_controls_enabled(True)
+        else:
+            if not self.remote_client or not getattr(self.remote_client, "_connected", False):
+                self._link_ready = False
+                self.lbl_net_status.setStyleSheet(f"""
+                    background: #2b0b14; color: {C['neon_pink']}; font-family: Consolas;
+                    font-size: 9pt; font-weight: bold; border: 1px solid {C['neon_pink']};
+                    border-radius: 6px; padding: 6px 12px;
+                """)
+                self.lbl_net_status.setText("○ OFFLINE // NO REMOTE LINK")
+                self._set_command_controls_enabled(False)
+
     def _send(self, action: str, **payload) -> bool:
+        if getattr(self, "_is_local_mode", False) and hasattr(self, "_local_handler") and self._local_handler:
+            success = self._local_handler(action, **payload)
+            if success is not False:
+                self.lbl_footer_status.setText(f"Local command executed: {action.replace('_', ' ')}")
+                return True
+            else:
+                self.lbl_footer_status.setText(f"Local command failed: {action}")
+                return False
+
         if not self.remote_client or not self._link_ready:
             self.lbl_footer_status.setText("Command blocked: Workplace 2 is not authenticated.")
             return False
@@ -1029,19 +1066,21 @@ class EnhancedOverseerDashboard(QWidget):
         cleaned = text.strip()
         if not cleaned:
             return
-
+        normalized = normalize_internal_thought(cleaned)
         if self.chk_auto_inject_speech.isChecked():
-            if self._send("inject_thought", text=cleaned):
-                self.lbl_footer_status.setText(f"Voice auto-injected: '{cleaned[:30]}...'")
+            if self._send("inject_thought", text=normalized):
+                self.lbl_footer_status.setText(f"Thought auto-injected: '{normalized[:30]}...'")
         else:
-            self.edit_thought.setText(cleaned)
-            self.lbl_footer_status.setText(f"Voice captured in input: '{cleaned[:30]}...'")
+            self.edit_thought.setText(normalized)
+            self.lbl_footer_status.setText(f"Thought captured in input: '{normalized[:30]}...'")
 
     def _inject_thought(self):
         txt = self.edit_thought.toPlainText().strip()
-        if txt and self._send("inject_thought", text=txt):
-            self.lbl_footer_status.setText(f"Impulse injected: '{txt[:35]}...'")
-            self.edit_thought.clear()
+        if txt:
+            normalized = normalize_internal_thought(txt)
+            if self._send("inject_thought", text=normalized):
+                self.lbl_footer_status.setText(f"Impulse injected: '{normalized[:35]}...'")
+                self.edit_thought.clear()
 
     def _select_mood(self, mood: str):
         self._current_mood = mood
@@ -1052,8 +1091,9 @@ class EnhancedOverseerDashboard(QWidget):
             self.lbl_footer_status.setText(f"Mood set to: {mood}")
 
     def _trigger_inclination(self, impulse: str):
-        if self._send("trigger_action", impulse=impulse):
-            self.lbl_footer_status.setText(f"Inclination triggered: '{impulse[:35]}...'")
+        normalized = normalize_internal_thought(impulse)
+        if self._send("trigger_action", impulse=normalized):
+            self.lbl_footer_status.setText(f"Inclination triggered: '{normalized[:35]}...'")
 
     def _toggle_pause(self, checked: bool):
         self._is_paused = checked

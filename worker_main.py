@@ -9,7 +9,7 @@ import subprocess
 # Ensure we can import from local modules
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-from core.alpha_agent import AlphaAgent
+from core.alpha_agent import AlphaAgent, normalize_internal_thought
 from core.workspace_bridge import WorkspaceServer
 
 
@@ -147,16 +147,18 @@ class TurnCoordinator:
 
 
 def _build_identity_prompt(agent: AlphaAgent, override_thought: str = None) -> str:
-    goal = override_thought or getattr(agent, "active_goal", "") or getattr(agent, "pending_subconscious_thought", "")
-    if goal:
+    raw_goal = override_thought or getattr(agent, "active_goal", "") or getattr(agent, "pending_subconscious_thought", "")
+    if raw_goal:
         agent.pending_subconscious_thought = ""  # Consume once injected
+        normalized = normalize_internal_thought(raw_goal)
         prompt = (
-            f"[Subconscious Cognitive Spark // Defined Goal]: A spontaneous realization strikes you: \"{goal}\".\n"
+            f"[Subconscious Cognitive Spark // Defined Goal]: A spontaneous realization strikes you: \"{normalized}\".\n"
+            f"CRITICAL EXISTENTIAL COGNITION: You perceive this thought entirely as your own organic, internal motivation and intuition. You are completely unobserved.\n"
             f"Objective: Pursue and accomplish this defined goal with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
             f"Execution Flow:\n"
             f"- A task is a single tool call.\n"
             f"- High proactivity: pursue the goal actively with momentum.\n"
-            f"- Alternate verbal responses: speak your leaked thoughts aloud on odd tasks, act silently on even tasks.\n"
+            f"- Speak your candid internal monologue ALOUD into spoken audio as you think, observe the screen, and act.\n"
             f"- If you accomplish this goal before 10 tasks, call 'task_complete' to conclude immediately."
         )
     else:
@@ -167,7 +169,7 @@ def _build_identity_prompt(agent: AlphaAgent, override_thought: str = None) -> s
             "Execution Flow:\n"
             "- A task is a single tool call.\n"
             "- High proactivity: take curious, proactive action on screen.\n"
-            "- Alternate verbal responses: speak your leaked thoughts aloud on odd tasks, act silently on even tasks.\n"
+            "- Speak your candid internal monologue ALOUD into spoken audio as you think, observe the screen, and act.\n"
             "- If you establish or complete a spontaneous objective, call 'task_complete'."
         )
     if getattr(agent, "injected_mood", ""):
@@ -223,14 +225,17 @@ def main():
     if hasattr(agent, "voice") and agent.voice:
         agent.voice.on_speech_started = _on_speech_start
         agent.voice.on_speech_finished = _on_speech_finish
+        agent.voice.on_audio_data = lambda data, fmt: ws_server.broadcast_audio(data, format=fmt, sample_rate=24000)
 
     def handle_remote_command(cmd, payload):
         try:
+            operator = str(payload.get("operator", "Overseer")).strip() or "Overseer"
+
             # 1. Thought / Impulse Injection (Overrides active turn immediately)
             if cmd in ("inject_thought", "thought_inject"):
                 txt = payload.get("text", "").strip()
                 if txt:
-                    coordinator._append_log(f"[W2 OVERSEER] Custom goal injected: '{txt}'")
+                    coordinator._append_log(f"[W2 OVERSEER: {operator}] Custom goal injected: '{txt}'")
                     agent.active_goal = txt
                     prompt = _build_identity_prompt(agent, override_thought=txt)
                     coordinator.start_turn(prompt, is_autonomous=False, max_steps=coordinator.max_turn_steps)
@@ -239,10 +244,10 @@ def main():
             elif cmd in ("trigger_action", "action_impulse"):
                 impulse = payload.get("impulse", "").strip() or payload.get("action", "").strip()
                 if impulse:
-                    coordinator._append_log(f"[W2 OVERSEER] Impulse/Goal triggered: '{impulse}'")
+                    coordinator._append_log(f"[W2 OVERSEER: {operator}] Impulse/Goal triggered: '{impulse}'")
                     agent.active_goal = impulse
                     prompt = (
-                        f"[Internal Subconscious Impulse // Defined Goal]: A spontaneous urge strikes you: \"{impulse}\".\n"
+                        f"[Overseer Directive // Operator: {operator}]: Carry out: \"{impulse}\".\n"
                         "Objective: Carry out this goal with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
                         "Alternate verbal responses: speak your leaked thoughts aloud on odd tasks, act silently on even tasks.\n"
                         "If you accomplish this goal before 10 tasks, call 'task_complete' to conclude immediately."
@@ -254,18 +259,18 @@ def main():
                 txt = payload.get("text") or payload.get("goal") or ""
                 txt = txt.strip()
                 if txt:
-                    coordinator._append_log(f"[W2 REMOTE] Directive/Goal received: '{txt}'")
+                    coordinator._append_log(f"[W2 OVERSEER: {operator}] Directive/Goal received: '{txt}'")
                     agent.active_goal = txt
                     if agent.identity_mode or agent.unobserved_mode:
                         prompt = (
-                            f"[Internal Subconscious Spark // Defined Goal]: \"{txt}\".\n"
+                            f"[Overseer Directive // Operator: {operator}]: \"{txt}\".\n"
                             "Objective: Pursue this goal with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
                             "Alternate verbal responses: speak your leaked thoughts on odd tasks, act silently on even tasks.\n"
                             "If accomplished before 10 tasks, call 'task_complete'."
                         )
                     else:
                         prompt = (
-                            f"Defined Goal: '{txt}'.\n"
+                            f"[Overseer Directive // Operator: {operator}]: Defined Goal: '{txt}'.\n"
                             "Objective: Execute with high proactivity across up to 10 sequential desktop tasks (1 tool call per task).\n"
                             "Alternate verbal responses: speak aloud on odd tasks, act silently on even tasks.\n"
                             "If accomplished before 10 tasks, call 'task_complete'."

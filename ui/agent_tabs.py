@@ -19,10 +19,18 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QLineEdit, QTextEdit, QComboBox, QSlider,
     QSpinBox, QDoubleSpinBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QListWidget, QListWidgetItem, QFrame, QSplitter, QScrollArea,
-    QFileDialog, QProgressBar, QMessageBox, QGroupBox, QTabWidget, QTabBar, QDialog, QApplication
+    QFileDialog, QProgressBar, QMessageBox, QGroupBox, QTabWidget, QTabBar, QDialog, QApplication,
+    QCheckBox, QStackedLayout
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize, QUrl
 from PyQt6.QtGui import QFont, QColor, QPixmap, QIcon, QCursor
+try:
+    from PyQt6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PyQt6.QtMultimediaWidgets import QVideoWidget
+except ImportError:
+    QMediaPlayer = None
+    QAudioOutput = None
+    QVideoWidget = None
 
 try:
     import psutil
@@ -30,9 +38,9 @@ except ImportError:
     psutil = None
 
 try:
-    from core.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT
+    from core.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT, STYLE_PRESETS
 except ImportError:
-    from studio.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT
+    from studio.image_studio_manager import MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG, DEFAULT_NEGATIVE_PROMPT, STYLE_PRESETS
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
@@ -663,6 +671,29 @@ class AgentMemoryTab(QWidget):
 # =============================================================================
 # 2. IMAGE STUDIO TAB
 # =============================================================================
+class StudioPipelineWorker(QThread):
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)
+
+    def __init__(self, studio_mgr, pipeline_func_name: str, kwargs: dict):
+        super().__init__()
+        self.studio_mgr = studio_mgr
+        self.pipeline_func_name = pipeline_func_name
+        self.kwargs = kwargs
+
+    def run(self):
+        try:
+            def _cb(step, total, msg):
+                self.progress.emit(step, total, msg)
+
+            self.kwargs["progress_callback"] = _cb
+            fn = getattr(self.studio_mgr, self.pipeline_func_name)
+            res = fn(**self.kwargs)
+            self.finished.emit(res)
+        except Exception as e:
+            self.error.emit(str(e))
+
 class ImageGenWorker(QThread):
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -745,14 +776,14 @@ class FullScreenImageViewer(QDialog):
         hud.addWidget(self.lbl_hud_title)
         hud.addStretch()
 
-        self.btn_toggle_quad = QPushButton("? QUAD VIEW (2x2)")
+        self.btn_toggle_quad = QPushButton("⛶ QUAD VIEW (2x2)")
         self.btn_toggle_quad.setFixedSize(140, 26)
         self.btn_toggle_quad.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_toggle_quad.setStyleSheet(f"background: #09172e; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
         self.btn_toggle_quad.clicked.connect(self.toggle_quad_view)
         hud.addWidget(self.btn_toggle_quad)
 
-        btn_close = QPushButton("? CLOSE (ESC)")
+        btn_close = QPushButton("✕ CLOSE (ESC)")
         btn_close.setFixedSize(100, 26)
         btn_close.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         btn_close.setStyleSheet(f"background: #1f0a14; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px;")
@@ -797,14 +828,14 @@ class FullScreenImageViewer(QDialog):
         if self.is_quad_view:
             self.single_label.hide()
             self.quad_widget.show()
-            self.btn_toggle_quad.setText("? SINGLE VIEW")
+            self.btn_toggle_quad.setText("▣ SINGLE VIEW")
             self.btn_toggle_quad.setStyleSheet(f"background: {C['neon_magenta']}33; color: {C['neon_magenta']}; border: 1px solid {C['neon_magenta']}; font-weight: bold; border-radius: 4px;")
-            self.lbl_hud_title.setText("FULLSCREEN ? 4-SLOT QUAD SCROLL (Newest Top-Left)")
+            self.lbl_hud_title.setText("FULLSCREEN ◈ 4-SLOT QUAD SCROLL (Newest Top-Left)")
             self._render_quad()
         else:
             self.quad_widget.hide()
             self.single_label.show()
-            self.btn_toggle_quad.setText("? QUAD VIEW (2x2)")
+            self.btn_toggle_quad.setText("⛶ QUAD VIEW (2x2)")
             self.btn_toggle_quad.setStyleSheet(f"background: #09172e; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
             self.lbl_hud_title.setText("FULLSCREEN VIEWPORT")
             if self.current_path:
@@ -875,12 +906,16 @@ class FullScreenImageViewer(QDialog):
             super().keyPressEvent(event)
 
 class AgentStudioTab(QWidget):
-    """Overhauled Neural Image Studio with primary viewport focus, batch slideshow, filmstrip, and vision critique."""
+    """AI-Driven Multimodal Studio Suite: Txt2Img, Img2Img, Txt2Vid, Img2Vid, Vid2Vid+Audio, and Autonomous Director."""
     def __init__(self, main_win, parent=None):
         super().__init__(parent)
         self.main_win = main_win
         self.sm = main_win.agent.studio_mgr if hasattr(main_win, 'agent') and main_win.agent else None
+        self.active_pipeline = "txt2img"
+        self.current_media_path = None
         self.current_img_path = None
+        self.current_video_path = None
+        self.current_media_type = "image"
         self.current_gen_id = None
         self.image_history = []
         self.current_idx = 0
@@ -899,25 +934,25 @@ class AgentStudioTab(QWidget):
 
         # 1. Header Bar with telemetry & actions
         hdr = QHBoxLayout()
-        title = QLabel("? NEURAL IMAGE STUDIO")
+        title = QLabel("🎨 NEURAL MULTIMODAL STUDIO")
         title.setFont(QFont(FONT_FAMILY, 11, QFont.Weight.Bold))
         title.setStyleSheet(f"color: {C['neon_cyan']};")
         hdr.addWidget(title)
 
-        self.lbl_pipeline_status = QLabel("Modal H100 Cluster ? Ready")
+        self.lbl_pipeline_status = QLabel("Modal H100 / GPU Cluster ◈ Ready")
         self.lbl_pipeline_status.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
         self.lbl_pipeline_status.setStyleSheet(f"color: {C['text_dim']}; background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 3px 8px;")
         hdr.addWidget(self.lbl_pipeline_status)
         hdr.addStretch()
 
-        self.btn_toggle_controls = QPushButton("? MANUAL CONTROLS")
+        self.btn_toggle_controls = QPushButton("⚙ MANUAL CONTROLS")
         self.btn_toggle_controls.setFixedHeight(28)
         self.btn_toggle_controls.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_toggle_controls.setStyleSheet(f"background: {C['border']}; color: {C['text_bright']}; border-radius: 4px; padding: 0 10px;")
         self.btn_toggle_controls.clicked.connect(self._toggle_controls_drawer)
         hdr.addWidget(self.btn_toggle_controls)
 
-        self.btn_open_folder = QPushButton("?? OPEN OUTPUTS")
+        self.btn_open_folder = QPushButton("📁 OPEN OUTPUTS")
         self.btn_open_folder.setFixedHeight(28)
         self.btn_open_folder.setFont(QFont(FONT_FAMILY, 8))
         self.btn_open_folder.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;")
@@ -925,63 +960,282 @@ class AgentStudioTab(QWidget):
         hdr.addWidget(self.btn_open_folder)
         root.addLayout(hdr)
 
-        # 2. Progress Bar
+        # 2. Pipeline Switcher Segmented Pills
+        pipeline_bar = QHBoxLayout()
+        pipeline_bar.setSpacing(6)
+        self.pipeline_buttons = {}
+        pipeline_defs = [
+            ("txt2img", "🖼 TXT2IMG"),
+            ("img2img", "🎭 IMG2IMG"),
+            ("txt2vid", "🎬 TXT2VID"),
+            ("img2vid", "🎥 IMG2VID"),
+            ("vid2audio", "🔊 VID2AUDIO"),
+            ("vid2vid", "⚡ VID2VID+AUDIO"),
+            ("director", "🤖 DIRECTOR"),
+        ]
+        for p_key, p_label in pipeline_defs:
+            p_btn = QPushButton(p_label)
+            p_btn.setFixedHeight(28)
+            p_btn.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+            p_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+            p_btn.clicked.connect(lambda _, k=p_key: self._set_pipeline(k))
+            pipeline_bar.addWidget(p_btn)
+            self.pipeline_buttons[p_key] = p_btn
+        pipeline_bar.addStretch()
+        root.addLayout(pipeline_bar)
+
+        # 3. Progress Bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(4)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setStyleSheet(f"QProgressBar {{ background-color: {C['bg_deep']}; border: none; }} QProgressBar::chunk {{ background-color: {C['neon_cyan']}; }}")
         root.addWidget(self.progress_bar)
 
-        # 3. Collapsible Manual Controls Drawer (Hidden by default, AI manages it)
+        # 4. Collapsible Manual Controls Drawer
         self.controls_drawer = QFrame()
         self.controls_drawer.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 8px;")
         cd_layout = QVBoxLayout(self.controls_drawer)
-        
-        row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Model:"))
-        self.combo_model = QComboBox()
-        for k, v in MODEL_CATALOG.items():
-            self.combo_model.addItem(f"{v['name']} ({k})", k)
-        row1.addWidget(self.combo_model, 2)
+        cd_layout.setSpacing(6)
 
-        row1.addWidget(QLabel("LoRA:"))
-        self.combo_lora = QComboBox()
-        for k, v in LORA_CATALOG.items():
-            self.combo_lora.addItem(v, k)
-        row1.addWidget(self.combo_lora, 2)
+        # Row 1: Source Media Input (for img2img, img2vid, vid2audio, vid2vid, director)
+        self.frame_source_media = QWidget()
+        row_src = QHBoxLayout(self.frame_source_media)
+        row_src.setContentsMargins(0, 0, 0, 0)
+        row_src.setSpacing(6)
+        lbl_src = QLabel("Source Media:")
+        lbl_src.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        lbl_src.setStyleSheet(f"color: {C['neon_cyan']};")
+        row_src.addWidget(lbl_src)
 
-        self.spin_lora_scale = QDoubleSpinBox()
-        self.spin_lora_scale.setRange(0.0, 2.0)
-        self.spin_lora_scale.setValue(0.8)
-        row1.addWidget(self.spin_lora_scale, 1)
-        cd_layout.addLayout(row1)
+        self.txt_source_media = QLineEdit()
+        self.txt_source_media.setPlaceholderText("Select or paste input image/video path...")
+        self.txt_source_media.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; padding: 5px; border: 1px solid {C['border']}; border-radius: 4px;")
+        row_src.addWidget(self.txt_source_media, 4)
 
+        self.btn_browse_media = QPushButton("📂 BROWSE")
+        self.btn_browse_media.setFixedHeight(26)
+        self.btn_browse_media.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_browse_media.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_browse_media.clicked.connect(self._browse_source_media)
+        row_src.addWidget(self.btn_browse_media)
+
+        self.btn_use_viewport = QPushButton("🎯 USE VIEWPORT")
+        self.btn_use_viewport.setFixedHeight(26)
+        self.btn_use_viewport.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_use_viewport.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_yellow']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_use_viewport.clicked.connect(self._use_viewport_media)
+        row_src.addWidget(self.btn_use_viewport)
+        cd_layout.addWidget(self.frame_source_media)
+
+        # Row 2: Prompt LineEdit, Refine Button, Generate Button
         row2 = QHBoxLayout()
         self.txt_prompt = QLineEdit()
-        self.txt_prompt.setPlaceholderText("Enter prompt to manually trigger generation...")
+        self.txt_prompt.setPlaceholderText("Enter creative prompt concept...")
         self.txt_prompt.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; padding: 6px; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.txt_prompt.returnPressed.connect(self._on_manual_generate)
         row2.addWidget(self.txt_prompt, 4)
 
-        self.btn_generate = QPushButton("? GENERATE")
+        self.btn_refine = QPushButton("✨ AI REFINE")
+        self.btn_refine.setToolTip("Preview heuristic RLHF prompt enhancements")
+        self.btn_refine.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_yellow']}; font-weight: bold; border: 1px solid {C['border']}; border-radius: 4px; padding: 6px 10px;")
+        self.btn_refine.clicked.connect(self._on_refine_clicked)
+        row2.addWidget(self.btn_refine)
+
+        self.btn_generate = QPushButton("🚀 GENERATE (TXT2IMG)")
         self.btn_generate.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px; padding: 6px 14px;")
         self.btn_generate.clicked.connect(self._on_manual_generate)
         row2.addWidget(self.btn_generate, 1)
         cd_layout.addLayout(row2)
 
+        # Row 3: Pipeline-Specific Parameter Panels
+        self.panel_txt2img = QWidget()
+        p1 = QHBoxLayout(self.panel_txt2img)
+        p1.setContentsMargins(0, 0, 0, 0)
+        p1.setSpacing(6)
+        p1.addWidget(QLabel("Model:"))
+        self.combo_model = QComboBox()
+        for k, v in MODEL_CATALOG.items():
+            self.combo_model.addItem(f"{v['name']} ({k})", k)
+        p1.addWidget(self.combo_model, 2)
+        p1.addWidget(QLabel("LoRA:"))
+        self.combo_lora = QComboBox()
+        for k, v in LORA_CATALOG.items():
+            self.combo_lora.addItem(v, k)
+        p1.addWidget(self.combo_lora, 2)
+        p1.addWidget(QLabel("Scale:"))
+        self.spin_lora_scale = QDoubleSpinBox()
+        self.spin_lora_scale.setRange(0.0, 2.0)
+        self.spin_lora_scale.setValue(0.8)
+        self.spin_lora_scale.setSingleStep(0.05)
+        p1.addWidget(self.spin_lora_scale, 1)
+        p1.addWidget(QLabel("Preset:"))
+        self.combo_preset = QComboBox()
+        for pk, pv in STYLE_PRESETS.items():
+            self.combo_preset.addItem(pv["name"], pk)
+        self.combo_preset.currentIndexChanged.connect(self._on_preset_changed)
+        p1.addWidget(self.combo_preset, 2)
+        cd_layout.addWidget(self.panel_txt2img)
+
+        self.panel_img2img = QWidget()
+        p2 = QHBoxLayout(self.panel_img2img)
+        p2.setContentsMargins(0, 0, 0, 0)
+        p2.setSpacing(6)
+        p2.addWidget(QLabel("Engine:"))
+        self.combo_img2img_model = QComboBox()
+        self.combo_img2img_model.addItem("Flux.1 Schnell (Fast & Coherent)", "flux")
+        self.combo_img2img_model.addItem("Qwen-Image-Edit (Instruction Inpaint)", "qwen")
+        self.combo_img2img_model.addItem("SDXL Inpainting", "sdxl")
+        self.combo_img2img_model.addItem("SD 3.5 Large", "sd35")
+        p2.addWidget(self.combo_img2img_model, 2)
+        p2.addWidget(QLabel("Denoise Strength:"))
+        self.spin_denoise = QDoubleSpinBox()
+        self.spin_denoise.setRange(0.1, 0.95)
+        self.spin_denoise.setValue(0.75)
+        self.spin_denoise.setSingleStep(0.05)
+        p2.addWidget(self.spin_denoise, 1)
+        p2.addWidget(QLabel("Instruction (Qwen):"))
+        self.txt_qwen_instr = QLineEdit()
+        self.txt_qwen_instr.setPlaceholderText("e.g. replace coat with cybernetic armor...")
+        self.txt_qwen_instr.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; padding: 4px; border: 1px solid {C['border']}; border-radius: 4px;")
+        p2.addWidget(self.txt_qwen_instr, 2)
+        cd_layout.addWidget(self.panel_img2img)
+
+        self.panel_txt2vid = QWidget()
+        p3 = QHBoxLayout(self.panel_txt2vid)
+        p3.setContentsMargins(0, 0, 0, 0)
+        p3.setSpacing(6)
+        p3.addWidget(QLabel("Style Model:"))
+        self.combo_txt2vid_model = QComboBox()
+        self.combo_txt2vid_model.addItem("EpicRealism SDXL", "epic")
+        self.combo_txt2vid_model.addItem("Juggernaut SDXL", "jugg")
+        self.combo_txt2vid_model.addItem("CyberRealistic SDXL", "cyber")
+        self.combo_txt2vid_model.addItem("Unholy Desire SDXL", "unholy")
+        p3.addWidget(self.combo_txt2vid_model, 2)
+        p3.addWidget(QLabel("Frames:"))
+        self.combo_txt2vid_frames = QComboBox()
+        self.combo_txt2vid_frames.addItem("16 Frames (Smooth)", 16)
+        self.combo_txt2vid_frames.addItem("24 Frames (Extended)", 24)
+        self.combo_txt2vid_frames.addItem("32 Frames (Maximum)", 32)
+        p3.addWidget(self.combo_txt2vid_frames, 1)
+        p3.addWidget(QLabel("FPS:"))
+        self.combo_txt2vid_fps = QComboBox()
+        self.combo_txt2vid_fps.addItem("8 FPS (Cinematic)", 8)
+        self.combo_txt2vid_fps.addItem("16 FPS (Smooth)", 16)
+        p3.addWidget(self.combo_txt2vid_fps, 1)
+        cd_layout.addWidget(self.panel_txt2vid)
+
+        self.panel_img2vid = QWidget()
+        p4 = QHBoxLayout(self.panel_img2vid)
+        p4.setContentsMargins(0, 0, 0, 0)
+        p4.setSpacing(6)
+        p4.addWidget(QLabel("Engine: Wan2.2 14B Lightning"))
+        p4.addWidget(QLabel("Resolution:"))
+        self.combo_img2vid_res = QComboBox()
+        self.combo_img2vid_res.addItem("480p (Fast Cinematics)", "480p")
+        self.combo_img2vid_res.addItem("720p (Crisp HD)", "720p")
+        p4.addWidget(self.combo_img2vid_res, 1)
+        p4.addWidget(QLabel("FPS:"))
+        self.combo_img2vid_fps = QComboBox()
+        self.combo_img2vid_fps.addItem("16 FPS (Standard)", 16)
+        self.combo_img2vid_fps.addItem("24 FPS (Cinema)", 24)
+        p4.addWidget(self.combo_img2vid_fps, 1)
+        cd_layout.addWidget(self.panel_img2vid)
+
+        self.panel_vid2audio = QWidget()
+        p5 = QHBoxLayout(self.panel_vid2audio)
+        p5.setContentsMargins(0, 0, 0, 0)
+        p5.setSpacing(6)
+        p5.addWidget(QLabel("Engine: MMAudio (44.1kHz Synchronized Foley)"))
+        p5.addWidget(QLabel("Duration (s):"))
+        self.spin_audio_duration = QDoubleSpinBox()
+        self.spin_audio_duration.setRange(1.0, 30.0)
+        self.spin_audio_duration.setValue(8.0)
+        self.spin_audio_duration.setSingleStep(1.0)
+        p5.addWidget(self.spin_audio_duration, 1)
+        cd_layout.addWidget(self.panel_vid2audio)
+
+        self.panel_vid2vid = QWidget()
+        p6 = QHBoxLayout(self.panel_vid2vid)
+        p6.setContentsMargins(0, 0, 0, 0)
+        p6.setSpacing(6)
+        p6.addWidget(QLabel("Style Preset:"))
+        self.combo_vid2vid_preset = QComboBox()
+        self.combo_vid2vid_preset.addItem("Cinematic Movie", "cinematic")
+        self.combo_vid2vid_preset.addItem("Cyberpunk Neon", "cyberpunk")
+        self.combo_vid2vid_preset.addItem("Anime Art", "anime_art")
+        self.combo_vid2vid_preset.addItem("Dark Moody", "dark_moody")
+        p6.addWidget(self.combo_vid2vid_preset, 2)
+        self.chk_vid2vid_audio = QCheckBox("Generate Synchronized Foley Audio")
+        self.chk_vid2vid_audio.setChecked(True)
+        self.chk_vid2vid_audio.setStyleSheet(f"color: {C['neon_cyan']};")
+        p6.addWidget(self.chk_vid2vid_audio, 2)
+        cd_layout.addWidget(self.panel_vid2vid)
+
+        self.panel_director = QWidget()
+        p7 = QHBoxLayout(self.panel_director)
+        p7.setContentsMargins(0, 0, 0, 0)
+        lbl_dir_info = QLabel("🤖 Autonomous Creative Director automatically analyzes natural language, plans multi-stage synthesis (txt2img -> img2vid -> vid2audio), critiques, and delivers finished media.")
+        lbl_dir_info.setStyleSheet(f"color: {C['neon_yellow']}; font-size: 8pt;")
+        p7.addWidget(lbl_dir_info)
+        cd_layout.addWidget(self.panel_director)
+
+        # Advanced Row (Neg Prompt, Steps, CFG, Seed)
+        self.row_advanced = QHBoxLayout()
+        self.row_advanced.addWidget(QLabel("Neg:"))
+        self.txt_neg_prompt = QLineEdit()
+        self.txt_neg_prompt.setText(DEFAULT_NEGATIVE_PROMPT)
+        self.txt_neg_prompt.setToolTip("Negative prompt filters (undesired visual artifacts)")
+        self.txt_neg_prompt.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_dim']}; padding: 4px; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.row_advanced.addWidget(self.txt_neg_prompt, 3)
+
+        self.row_advanced.addWidget(QLabel("Steps:"))
+        self.spin_steps = QSpinBox()
+        self.spin_steps.setRange(10, 60)
+        self.spin_steps.setValue(25)
+        self.row_advanced.addWidget(self.spin_steps, 1)
+
+        self.row_advanced.addWidget(QLabel("CFG:"))
+        self.spin_guidance = QDoubleSpinBox()
+        self.spin_guidance.setRange(1.0, 20.0)
+        self.spin_guidance.setValue(7.0)
+        self.spin_guidance.setSingleStep(0.5)
+        self.row_advanced.addWidget(self.spin_guidance, 1)
+
+        self.row_advanced.addWidget(QLabel("Seed:"))
+        self.spin_seed = QSpinBox()
+        self.spin_seed.setRange(-1, 999999999)
+        self.spin_seed.setValue(-1)
+        self.spin_seed.setToolTip("-1 for random seed")
+        self.row_advanced.addWidget(self.spin_seed, 1)
+
+        btn_rand_seed = QPushButton("🎲")
+        btn_rand_seed.setFixedSize(28, 24)
+        btn_rand_seed.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        btn_rand_seed.clicked.connect(self._randomize_seed)
+        self.row_advanced.addWidget(btn_rand_seed)
+        cd_layout.addLayout(self.row_advanced)
+
+        # Refined Preview Label (Collapsible)
+        self.lbl_refine_preview = QLabel()
+        self.lbl_refine_preview.setWordWrap(True)
+        self.lbl_refine_preview.setStyleSheet(f"color: {C['neon_yellow']}; background: {C['bg_deep']}; border: 1px dashed {C['border_bright']}; border-radius: 4px; padding: 4px; font-size: 8pt;")
+        self.lbl_refine_preview.hide()
+        cd_layout.addWidget(self.lbl_refine_preview)
+
         self.controls_drawer.hide()
         root.addWidget(self.controls_drawer)
 
-        # 4. Viewport Navigation Toolbar
+        # 5. Viewport Navigation Toolbar
         nav_bar = QHBoxLayout()
         nav_bar.setSpacing(6)
 
-        self.lbl_image_title = QLabel("VIEWPORT ? NO IMAGE")
+        self.lbl_image_title = QLabel("VIEWPORT ◈ NO MEDIA LOADED")
         self.lbl_image_title.setFont(QFont(FONT_FAMILY, 9, QFont.Weight.Bold))
         self.lbl_image_title.setStyleSheet(f"color: {C['neon_cyan']};")
         nav_bar.addWidget(self.lbl_image_title)
         nav_bar.addStretch()
 
-        self.btn_prev = QPushButton("? PREV")
+        self.btn_prev = QPushButton("◀ PREV")
         self.btn_prev.setFixedSize(65, 26)
         self.btn_prev.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_prev.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px;")
@@ -993,26 +1247,59 @@ class AgentStudioTab(QWidget):
         self.lbl_counter.setStyleSheet(f"color: {C['neon_yellow']}; padding: 0 4px;")
         nav_bar.addWidget(self.lbl_counter)
 
-        self.btn_next = QPushButton("NEXT ?")
+        self.btn_next = QPushButton("NEXT ▶")
         self.btn_next.setFixedSize(65, 26)
         self.btn_next.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_next.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px;")
         self.btn_next.clicked.connect(self._next_image)
         nav_bar.addWidget(self.btn_next)
 
-        self.btn_slideshow = QPushButton("? PLAY")
+        self.btn_slideshow = QPushButton("▶ PLAY")
         self.btn_slideshow.setFixedSize(65, 26)
         self.btn_slideshow.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         self.btn_slideshow.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
         self.btn_slideshow.clicked.connect(self._toggle_slideshow)
         nav_bar.addWidget(self.btn_slideshow)
 
-        self.btn_save = QPushButton("💾 SAVE")
-        self.btn_save.setFixedSize(65, 26)
-        self.btn_save.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
-        self.btn_save.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_green']}; border: 1px solid {C['border']}; border-radius: 4px;")
-        self.btn_save.clicked.connect(self._save_current_image)
-        nav_bar.addWidget(self.btn_save)
+        # 1-Click Action Buttons for Active Media
+        self.btn_action_animate = QPushButton("🎬 ANIMATE (I2V)")
+        self.btn_action_animate.setFixedHeight(26)
+        self.btn_action_animate.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_action_animate.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_action_animate.setToolTip("Transform this still image into an 81-frame video via Wan2.2 14B")
+        self.btn_action_animate.clicked.connect(self._on_1click_animate)
+        nav_bar.addWidget(self.btn_action_animate)
+
+        self.btn_action_remix = QPushButton("🎭 REMIX (I2I)")
+        self.btn_action_remix.setFixedHeight(26)
+        self.btn_action_remix.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_action_remix.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_action_remix.setToolTip("Restyle or inpaint this image via Flux.1 / Qwen-Image-Edit")
+        self.btn_action_remix.clicked.connect(self._on_1click_remix)
+        nav_bar.addWidget(self.btn_action_remix)
+
+        self.btn_action_audio = QPushButton("🔊 ADD AUDIO (V2A)")
+        self.btn_action_audio.setFixedHeight(26)
+        self.btn_action_audio.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_action_audio.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_yellow']}; border: 1px solid {C['neon_yellow']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_action_audio.setToolTip("Synthesize synchronized 44.1kHz Foley soundtrack for this video via MMAudio")
+        self.btn_action_audio.clicked.connect(self._on_1click_audio)
+        nav_bar.addWidget(self.btn_action_audio)
+
+        self.btn_action_v2v = QPushButton("⚡ RESTYLE (V2V)")
+        self.btn_action_v2v.setFixedHeight(26)
+        self.btn_action_v2v.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_action_v2v.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_purple']}; border: 1px solid {C['neon_purple']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_action_v2v.setToolTip("Full Vid2Vid style transformation with Foley accompaniment")
+        self.btn_action_v2v.clicked.connect(self._on_1click_v2v)
+        nav_bar.addWidget(self.btn_action_v2v)
+
+        self.btn_play_pause = QPushButton("⏯ PLAY/PAUSE")
+        self.btn_play_pause.setFixedHeight(26)
+        self.btn_play_pause.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_play_pause.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_play_pause.clicked.connect(self._on_play_pause_video)
+        nav_bar.addWidget(self.btn_play_pause)
 
         self.btn_upscale = QPushButton("⚡ UPSCALE")
         self.btn_upscale.setFixedSize(85, 26)
@@ -1022,6 +1309,29 @@ class AgentStudioTab(QWidget):
         self.btn_upscale.clicked.connect(self._on_manual_upscale)
         nav_bar.addWidget(self.btn_upscale)
 
+        self.btn_copy_prompt = QPushButton("📋 COPY")
+        self.btn_copy_prompt.setFixedSize(65, 26)
+        self.btn_copy_prompt.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_copy_prompt.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_copy_prompt.setToolTip("Copy active prompt to clipboard and editor")
+        self.btn_copy_prompt.clicked.connect(self._copy_current_prompt)
+        nav_bar.addWidget(self.btn_copy_prompt)
+
+        self.btn_save = QPushButton("💾 SAVE")
+        self.btn_save.setFixedSize(65, 26)
+        self.btn_save.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_save.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_green']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_save.clicked.connect(self._save_current_media)
+        nav_bar.addWidget(self.btn_save)
+
+        self.btn_delete = QPushButton("🗑 DEL")
+        self.btn_delete.setFixedSize(55, 26)
+        self.btn_delete.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_delete.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_red']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_delete.setToolTip("Delete this generation from history and disk")
+        self.btn_delete.clicked.connect(self._delete_current_media)
+        nav_bar.addWidget(self.btn_delete)
+
         self.btn_fullscreen = QPushButton("⛶ FULLSCREEN")
         self.btn_fullscreen.setFixedSize(95, 26)
         self.btn_fullscreen.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
@@ -1030,26 +1340,56 @@ class AgentStudioTab(QWidget):
         nav_bar.addWidget(self.btn_fullscreen)
         root.addLayout(nav_bar)
 
-        # 5. Primary Viewport Frame
+        # 6. Primary Viewport Frame with Dual Image/Video Stack
         vp_frame = QFrame()
         vp_frame.setStyleSheet(f"background: {C['bg_dark']}; border: 1px solid {C['border']}; border-radius: 6px;")
         vpl = QVBoxLayout(vp_frame)
         vpl.setContentsMargins(4, 4, 4, 4)
 
+        self.vp_stack = QStackedLayout()
+
+        # Viewport 0: Image Viewer
         self.img_viewport = ClickableLabel()
         self.img_viewport.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.img_viewport.setText("Awaiting generation... Click to view full screen.")
+        self.img_viewport.setText("Awaiting multimodal generation... Click to view full screen.")
         self.img_viewport.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.img_viewport.setToolTip("Click image to view in Fullscreen mode (Use Left/Right arrows to navigate)")
         self.img_viewport.setStyleSheet(f"color: {C['text_dim']}; font-family: {FONT_FAMILY}; font-size: 11px;")
         self.img_viewport.clicked.connect(self._open_fullscreen)
-        vpl.addWidget(self.img_viewport)
+        self.vp_stack.addWidget(self.img_viewport)
+
+        # Viewport 1: Video Player
+        if QMediaPlayer and QVideoWidget:
+            self.media_player = QMediaPlayer(self)
+            self.audio_output = QAudioOutput(self)
+            self.media_player.setAudioOutput(self.audio_output)
+            self.audio_output.setVolume(0.85)
+            self.video_widget = QVideoWidget()
+            self.video_widget.setStyleSheet("background: #000; border-radius: 4px;")
+            self.media_player.setVideoOutput(self.video_widget)
+            try:
+                self.media_player.setLoops(QMediaPlayer.Loops.Infinite)
+            except Exception:
+                pass
+            self.vp_stack.addWidget(self.video_widget)
+        else:
+            self.media_player = None
+            self.audio_output = None
+            self.video_widget = None
+
+        vpl.addLayout(self.vp_stack)
         root.addWidget(vp_frame, 1)
 
-        # 6. Thumbnail Filmstrip (Recent Outputs / Batch Carousel)
+        # Prompt & Metadata Snippet Line
+        self.lbl_prompt_display = QLabel("No prompt details loaded.")
+        self.lbl_prompt_display.setStyleSheet(f"color: {C['text_dim']}; background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 3px; padding: 2px 6px; font-size: 8pt;")
+        self.lbl_prompt_display.setWordWrap(True)
+        root.addWidget(self.lbl_prompt_display)
+
+        # 7. Thumbnail Filmstrip (Recent Outputs / Batch Carousel)
         filmstrip_label = QLabel("RECENT GENERATIONS & BATCH CAROUSEL")
         filmstrip_label.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
-        filmstrip_label.setStyleSheet(f"color: {C['text_dim']}; margin-top: 4px;")
+        filmstrip_label.setStyleSheet(f"color: {C['text_dim']}; margin-top: 2px;")
         root.addWidget(filmstrip_label)
 
         self.filmstrip_scroll = QScrollArea()
@@ -1067,49 +1407,291 @@ class AgentStudioTab(QWidget):
         self.filmstrip_scroll.setWidget(self.filmstrip_widget)
         root.addWidget(self.filmstrip_scroll)
 
-        # 7. AI Visual Critique Banner
+        # 8. AI Visual Critique & Autonomous RLHF Learning Card
         crit_card = QFrame()
         crit_card.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 6px;")
         ccl = QVBoxLayout(crit_card)
         ccl.setContentsMargins(6, 6, 6, 6)
-        ccl.setSpacing(2)
+        ccl.setSpacing(4)
 
-        lbl_crit_title = QLabel("? AI VISUAL CRITIQUE & AUTONOMOUS LEARNING ?")
+        crit_header = QHBoxLayout()
+        lbl_crit_title = QLabel("🤖 AI VISUAL & ACOUSTIC CRITIQUE ◈ RLHF LEARNING")
         lbl_crit_title.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
         lbl_crit_title.setStyleSheet(f"color: {C['neon_cyan']};")
-        ccl.addWidget(lbl_crit_title)
+        crit_header.addWidget(lbl_crit_title)
+        crit_header.addStretch()
 
-        self.lbl_critique_text = QLabel("Visual critique is performed automatically via Gemini Vision upon generation completion.")
+        self.lbl_rating_display = QLabel("[UNRATED]")
+        self.lbl_rating_display.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.lbl_rating_display.setStyleSheet(f"color: {C['text_dim']};")
+        crit_header.addWidget(self.lbl_rating_display)
+        ccl.addLayout(crit_header)
+
+        self.lbl_critique_text = QLabel("Visual and acoustic critique is performed automatically upon generation completion.")
         self.lbl_critique_text.setWordWrap(True)
         self.lbl_critique_text.setStyleSheet(f"color: {C['text_bright']}; font-family: {FONT_FAMILY}; font-size: 9.5pt;")
         ccl.addWidget(self.lbl_critique_text)
+
+        # RLHF Feedback & Tag Controls
+        feedback_row = QHBoxLayout()
+        feedback_row.setSpacing(6)
+
+        self.btn_rate_pos = QPushButton("👍 FAVORITE (+1)")
+        self.btn_rate_pos.setFixedHeight(26)
+        self.btn_rate_pos.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_rate_pos.setStyleSheet(f"background: #092e1a; color: {C['neon_green']}; border: 1px solid {C['neon_green']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_rate_pos.clicked.connect(lambda: self._on_rate_clicked(1))
+        feedback_row.addWidget(self.btn_rate_pos)
+
+        self.btn_rate_neg = QPushButton("👎 CRITIQUE (-1)")
+        self.btn_rate_neg.setFixedHeight(26)
+        self.btn_rate_neg.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_rate_neg.setStyleSheet(f"background: #2e0915; color: {C['neon_red']}; border: 1px solid {C['neon_red']}; border-radius: 4px; padding: 0 8px;")
+        self.btn_rate_neg.clicked.connect(lambda: self._on_rate_clicked(-1))
+        feedback_row.addWidget(self.btn_rate_neg)
+
+        # Quick Feedback Tag Buttons (Checkable)
+        feedback_row.addWidget(QLabel("Tags:"))
+        self.tag_buttons = {}
+        for tag in ["Lighting", "Face", "Motion", "Audio", "Hands", "Skin"]:
+            tbtn = QPushButton(tag)
+            tbtn.setCheckable(True)
+            tbtn.setFixedHeight(24)
+            tbtn.setFont(QFont(FONT_FAMILY, 7, QFont.Weight.Bold))
+            tbtn.setStyleSheet(f"QPushButton {{ background: {C['bg_deep']}; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 3px; padding: 0 5px; }} QPushButton:checked {{ background: {C['neon_cyan']}33; color: {C['neon_cyan']}; border-color: {C['neon_cyan']}; }}")
+            feedback_row.addWidget(tbtn)
+            self.tag_buttons[tag.lower()] = tbtn
+
+        self.lbl_feedback_msg = QLabel("")
+        self.lbl_feedback_msg.setFont(QFont(FONT_FAMILY, 7))
+        self.lbl_feedback_msg.setStyleSheet(f"color: {C['neon_yellow']};")
+        feedback_row.addWidget(self.lbl_feedback_msg)
+        feedback_row.addStretch()
+
+        ccl.addLayout(feedback_row)
         root.addWidget(crit_card)
 
+        # Initialize pipeline view
+        self._set_pipeline("txt2img")
         self._refresh_history()
+
+    def _set_pipeline(self, pipeline: str):
+        """Switch active multimodal pipeline and adjust controls drawer."""
+        self.active_pipeline = pipeline
+
+        # Update pill styling
+        for p_key, btn in self.pipeline_buttons.items():
+            if p_key == pipeline:
+                btn.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px; padding: 0 10px;")
+            else:
+                btn.setStyleSheet(f"background: {C['bg_deep']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;")
+
+        # Toggle parameter panels
+        self.panel_txt2img.setVisible(pipeline == "txt2img")
+        self.panel_img2img.setVisible(pipeline == "img2img")
+        self.panel_txt2vid.setVisible(pipeline == "txt2vid")
+        self.panel_img2vid.setVisible(pipeline == "img2vid")
+        self.panel_vid2audio.setVisible(pipeline == "vid2audio")
+        self.panel_vid2vid.setVisible(pipeline == "vid2vid")
+        self.panel_director.setVisible(pipeline == "director")
+
+        # Source media row visibility
+        needs_src = pipeline in ("img2img", "img2vid", "vid2audio", "vid2vid", "director")
+        self.frame_source_media.setVisible(needs_src)
+
+        # Advanced row visibility
+        self.row_advanced.itemAt(0).widget().setVisible(pipeline in ("txt2img", "img2img", "txt2vid"))
+        self.txt_neg_prompt.setVisible(pipeline in ("txt2img", "img2img", "txt2vid"))
+
+        # Update generate button label and placeholder
+        labels = {
+            "txt2img": ("🚀 GENERATE IMAGE", "Enter prompt concept (e.g. cybernetic hacker in neon alley, volumetric light)..."),
+            "img2img": ("🎭 TRANSFORM IMAGE", "Restyle prompt (e.g. anime cyberpunk style, watercolor portrait)..."),
+            "txt2vid": ("🎬 GENERATE VIDEO", "Motion prompt (e.g. neon rain falling on asphalt, camera slowly panning)..."),
+            "img2vid": ("🎥 ANIMATE IMAGE", "Motion guidance (e.g. gentle camera push, dynamic hair flowing)..."),
+            "vid2audio": ("🔊 SYNTHESIZE AUDIO", "Foley description (e.g. heavy footsteps in puddle, neon hum, thunder)..."),
+            "vid2vid": ("⚡ RESTYLE VIDEO", "Style prompt (e.g. dark cyberpunk anime style)..."),
+            "director": ("🤖 DIRECT MASTER CREATION", "Creative directive (e.g. Create a cinematic anime video of Josh running in the rain with Foley audio)..."),
+        }
+        btn_text, placeholder = labels.get(pipeline, ("🚀 EXECUTE", "Enter prompt..."))
+        self.btn_generate.setText(btn_text)
+        self.txt_prompt.setPlaceholderText(placeholder)
+        self.lbl_pipeline_status.setText(f"Pipeline: {pipeline.upper()} ◈ Ready")
 
     def _toggle_controls_drawer(self):
         if self.controls_drawer.isVisible():
             self.controls_drawer.hide()
-            self.btn_toggle_controls.setText("? MANUAL CONTROLS")
+            self.btn_toggle_controls.setText("⚙ MANUAL CONTROLS")
             self.btn_toggle_controls.setStyleSheet(f"background: {C['border']}; color: {C['text_bright']}; border-radius: 4px; padding: 0 10px;")
         else:
             self.controls_drawer.show()
-            self.btn_toggle_controls.setText("? HIDE CONTROLS")
+            self.btn_toggle_controls.setText("✕ HIDE CONTROLS")
             self.btn_toggle_controls.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px; padding: 0 10px;")
 
     def _open_output_folder(self):
-        folder = ROOT_DIR / "history" / "images"
+        folder = ROOT_DIR / "history"
         if not folder.exists():
             folder.mkdir(parents=True, exist_ok=True)
         import subprocess
         subprocess.Popen(f'explorer "{folder}"', shell=True)
+
+    def _browse_source_media(self):
+        if self.active_pipeline in ("vid2audio", "vid2vid"):
+            filt = "Videos (*.mp4 *.mov *.avi *.mkv)"
+        elif self.active_pipeline in ("img2img", "img2vid"):
+            filt = "Images (*.png *.jpg *.jpeg *.webp)"
+        else:
+            filt = "Media Files (*.png *.jpg *.jpeg *.webp *.mp4 *.mov)"
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Source Media", str(ROOT_DIR / "history"), filt)
+        if file_path:
+            self.txt_source_media.setText(file_path)
+
+    def _use_viewport_media(self):
+        target = self.current_video_path if (self.active_pipeline in ("vid2audio", "vid2vid") and self.current_video_path) else self.current_media_path
+        if not target and self.current_img_path:
+            target = self.current_img_path
+        if target:
+            self.txt_source_media.setText(target)
+            self.lbl_pipeline_status.setText(f"Loaded from viewport: {os.path.basename(target)}")
+
+    def _on_1click_animate(self):
+        """1-Click: Animate active viewport image into video (I2V)."""
+        self._set_pipeline("img2vid")
+        if self.current_img_path:
+            self.txt_source_media.setText(self.current_img_path)
+        if not self.controls_drawer.isVisible():
+            self._toggle_controls_drawer()
+        self.txt_prompt.setFocus()
+        if not self.txt_prompt.text():
+            self.txt_prompt.setText("cinematic camera motion, smooth subtle movement")
+
+    def _on_1click_remix(self):
+        """1-Click: Remix/Restyle active viewport image (I2I)."""
+        self._set_pipeline("img2img")
+        if self.current_img_path:
+            self.txt_source_media.setText(self.current_img_path)
+        if not self.controls_drawer.isVisible():
+            self._toggle_controls_drawer()
+        self.txt_prompt.setFocus()
+
+    def _on_1click_audio(self):
+        """1-Click: Add synchronized Foley soundtrack to active video (V2A)."""
+        self._set_pipeline("vid2audio")
+        target = self.current_video_path or self.current_media_path
+        if target:
+            self.txt_source_media.setText(target)
+        if not self.controls_drawer.isVisible():
+            self._toggle_controls_drawer()
+        self.txt_prompt.setFocus()
+        if not self.txt_prompt.text():
+            self.txt_prompt.setText("cinematic synchronized ambient Foley, high fidelity sound effects")
+
+    def _on_1click_v2v(self):
+        """1-Click: Restyle active video (V2V)."""
+        self._set_pipeline("vid2vid")
+        target = self.current_video_path or self.current_media_path
+        if target:
+            self.txt_source_media.setText(target)
+        if not self.controls_drawer.isVisible():
+            self._toggle_controls_drawer()
+        self.txt_prompt.setFocus()
+
+    def _on_play_pause_video(self):
+        if not self.media_player: return
+        try:
+            from PyQt6.QtMultimedia import QMediaPlayer
+            if self.media_player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                self.media_player.pause()
+                self.btn_play_pause.setText("▶ PLAY")
+            else:
+                self.media_player.play()
+                self.btn_play_pause.setText("⏸ PAUSE")
+        except Exception:
+            pass
+
+    def _on_preset_changed(self, idx: int):
+        pk = self.combo_preset.currentData() or "none"
+        if pk in STYLE_PRESETS and pk != "none":
+            suffix = STYLE_PRESETS[pk]["suffix"]
+            cur = self.txt_prompt.text().strip()
+            if cur and suffix not in cur:
+                self.txt_prompt.setText(f"{cur}, {suffix}")
+            elif not cur:
+                self.txt_prompt.setText(suffix)
+
+    def _randomize_seed(self):
+        import random
+        new_seed = random.randint(100000, 999999999)
+        self.spin_seed.setValue(new_seed)
+
+    def _on_refine_clicked(self):
+        prompt = self.txt_prompt.text().strip()
+        if not prompt or not self.sm: return
+        m = self.combo_model.currentData() or "jugg"
+        refined_p, refined_neg = self.sm.refine_prompt(prompt, m)
+        self.lbl_refine_preview.setText(f"<b>Refined Prompt Preview:</b><br>{refined_p}<br><br><b>Learned Negatives:</b><br>{refined_neg[:160]}...")
+        self.lbl_refine_preview.show()
+
+    def _copy_current_prompt(self):
+        if not self.image_history or self.current_idx >= len(self.image_history):
+            return
+        data = self.image_history[self.current_idx]
+        p = data.get("prompt") or ""
+        if p:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(p)
+            self.txt_prompt.setText(p)
+            self.lbl_pipeline_status.setText("Prompt copied to clipboard & editor!")
+
+    def _delete_current_media(self):
+        if not self.current_gen_id or not self.sm:
+            return
+        ok = self.sm.delete_generation(self.current_gen_id)
+        if ok:
+            self.lbl_pipeline_status.setText("Generation deleted from history.")
+            self._refresh_history()
+            if self.image_history:
+                self._load_media_by_index(min(self.current_idx, len(self.image_history) - 1))
+            else:
+                if self.media_player: self.media_player.stop()
+                self.vp_stack.setCurrentWidget(self.img_viewport)
+                self.img_viewport.clear()
+                self.img_viewport.setText("Awaiting generation...")
+                self.lbl_image_title.setText("VIEWPORT ◈ NO MEDIA LOADED")
+                self.lbl_counter.setText("[ 0 / 0 ]")
+
+    def _delete_current_image(self):
+        self._delete_current_media()
+
+    def _on_rate_clicked(self, rating: int):
+        if not self.current_gen_id or not self.sm:
+            return
+        active_tags = [tag for tag, btn in self.tag_buttons.items() if btn.isChecked()]
+        tags_str = ", ".join(active_tags)
+        user_comment = "Favorite media" if rating > 0 else "Media defect reported"
+        ok = self.sm.record_feedback(
+            generation_id=self.current_gen_id,
+            rating=rating,
+            feedback_tags=tags_str,
+            user_feedback=user_comment
+        )
+        if ok:
+            if rating > 0:
+                self.lbl_rating_display.setText("[⭐ FAVORITE]")
+                self.lbl_rating_display.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold;")
+                self.lbl_feedback_msg.setText("Reinforced positive weights (+0.3)")
+            else:
+                self.lbl_rating_display.setText("[⚠️ FLAGGED DEFECT]")
+                self.lbl_rating_display.setStyleSheet(f"color: {C['neon_red']}; font-weight: bold;")
+                self.lbl_feedback_msg.setText("Strengthened negative filter (+0.5)")
+            self._refresh_history()
 
     def _refresh_history(self):
         if not self.sm: return
         self.image_history = self.sm.get_history(limit=50)
         self._refresh_filmstrip()
         if self.image_history:
-            self._load_image_by_index(0)
+            self._load_media_by_index(0)
 
     def _refresh_filmstrip(self):
         while self.filmstrip_layout.count() > 1:
@@ -1118,71 +1700,143 @@ class AgentStudioTab(QWidget):
                 item.widget().deleteLater()
 
         for idx, item in enumerate(self.image_history[:30]):
-            p = item.get("image_path")
-            if p and os.path.exists(p):
+            thumb_p = item.get("thumbnail_path") or item.get("image_path")
+            is_vid = bool(item.get("video_path") or item.get("media_type") == "video")
+            if thumb_p and os.path.exists(thumb_p):
                 btn = QPushButton()
                 btn.setFixedSize(56, 56)
-                pix = QPixmap(p).scaled(54, 54, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                pix = QPixmap(thumb_p).scaled(54, 54, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
                 btn.setIcon(QIcon(pix))
                 btn.setIconSize(QSize(54, 54))
-                btn.setStyleSheet(f"border: 1px solid {C['border']}; border-radius: 4px; background: {C['bg_deep']};")
-                btn.clicked.connect(lambda _, i=idx: self._load_image_by_index(i))
+                if is_vid:
+                    btn.setText("🎬")
+                    btn.setToolTip(f"[VIDEO - {item.get('pipeline_type', 'vid').upper()}] Click to play in viewport")
+                    btn.setStyleSheet(f"border: 1px solid {C['neon_cyan']}; border-radius: 4px; background: {C['bg_deep']}; color: {C['neon_yellow']}; font-weight: bold; text-align: bottom right;")
+                else:
+                    btn.setToolTip(f"[IMAGE - {item.get('pipeline_type', 'img').upper()}] Click to view in viewport")
+                    btn.setStyleSheet(f"border: 1px solid {C['border']}; border-radius: 4px; background: {C['bg_deep']};")
+                btn.clicked.connect(lambda _, i=idx: self._load_media_by_index(i))
                 self.filmstrip_layout.insertWidget(idx, btn)
 
-    def _load_image_by_index(self, idx: int):
+    def _load_media_by_index(self, idx: int):
         if not self.image_history or idx < 0 or idx >= len(self.image_history):
             return
         self.current_idx = idx
         data = self.image_history[idx]
-        img_p = data.get("image_path")
-        self.current_img_path = img_p
         self.current_gen_id = data.get("id")
 
-        if img_p and os.path.exists(img_p):
-            pix = QPixmap(img_p)
+        img_p = data.get("image_path")
+        vid_p = data.get("video_path")
+        is_video = bool(vid_p and os.path.exists(vid_p))
+
+        self.current_img_path = img_p
+        self.current_video_path = vid_p
+        self.current_media_path = vid_p if is_video else img_p
+        self.current_media_type = "video" if is_video else "image"
+
+        pipeline = (data.get("pipeline_type") or ("video" if is_video else "image")).upper()
+        rating = data.get("rating", 0)
+
+        # Toggle dynamic action buttons based on media type
+        self.btn_action_animate.setVisible(not is_video)
+        self.btn_action_remix.setVisible(not is_video)
+        self.btn_upscale.setVisible(not is_video)
+        self.btn_action_audio.setVisible(is_video)
+        self.btn_action_v2v.setVisible(is_video)
+        self.btn_play_pause.setVisible(is_video)
+
+        if is_video and self.video_widget and self.media_player:
+            # Play in Video Viewport
+            self.vp_stack.setCurrentWidget(self.video_widget)
+            self.media_player.setSource(QUrl.fromLocalFile(vid_p))
+            self.media_player.play()
+            self.btn_play_pause.setText("⏸ PAUSE")
+
+            basename = os.path.basename(vid_p)
+            dur = data.get("duration", "--")
+            fps = data.get("fps", 16)
+            self.lbl_image_title.setText(f"VIEWPORT ◈ {basename.upper()} ({pipeline} | {dur}s @ {fps}fps)")
+        else:
+            # Render in Image Viewport
+            if self.media_player:
+                self.media_player.stop()
+            self.vp_stack.setCurrentWidget(self.img_viewport)
+
+            if img_p and os.path.exists(img_p):
+                pix = QPixmap(img_p)
+                scaled = pix.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+                self.img_viewport.setPixmap(scaled)
+
+                basename = os.path.basename(img_p)
+                dim = data.get("dimensions", "--")
+                model = data.get("model_name", "SDXL")
+                seed = data.get("seed", -1)
+                self.lbl_image_title.setText(f"VIEWPORT ◈ {basename.upper()} ({pipeline} | {model.upper()} | {dim} | SEED: {seed})")
+
+        self.lbl_counter.setText(f"[ {self.current_idx + 1} / {len(self.image_history)} ]")
+        self.lbl_critique_text.setText(data.get("ai_critique") or "No critique recorded.")
+        self.lbl_prompt_display.setText(f"[{pipeline}] PROMPT: {data.get('prompt', 'N/A')}")
+
+        if rating > 0:
+            self.lbl_rating_display.setText("[⭐ FAVORITE]")
+            self.lbl_rating_display.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold;")
+        elif rating < 0:
+            self.lbl_rating_display.setText("[⚠️ FLAGGED DEFECT]")
+            self.lbl_rating_display.setStyleSheet(f"color: {C['neon_red']}; font-weight: bold;")
+        else:
+            self.lbl_rating_display.setText("[UNRATED]")
+            self.lbl_rating_display.setStyleSheet(f"color: {C['text_dim']};")
+
+        self.lbl_feedback_msg.setText("")
+
+        if self.fullscreen_viewer and self.fullscreen_viewer.isVisible() and img_p:
+            self.fullscreen_viewer.update_image(img_p)
+
+    def _load_image_by_index(self, idx: int):
+        self._load_media_by_index(idx)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.current_media_type == "image" and self.current_img_path and os.path.exists(self.current_img_path):
+            pix = QPixmap(self.current_img_path)
             scaled = pix.scaled(self.img_viewport.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
             self.img_viewport.setPixmap(scaled)
-
-            basename = os.path.basename(img_p)
-            dim = data.get("dimensions", "--")
-            model = data.get("model_name", "SDXL")
-            self.lbl_image_title.setText(f"VIEWPORT ? {basename.upper()} ({model.upper()} | {dim})")
-            self.lbl_counter.setText(f"[ {self.current_idx + 1} / {len(self.image_history)} ]")
-            self.lbl_critique_text.setText(data.get("ai_critique") or "No critique recorded.")
-
-            # Live update fullscreen viewer if open
-            if self.fullscreen_viewer and self.fullscreen_viewer.isVisible():
-                self.fullscreen_viewer.update_image(img_p)
 
     def _next_image(self):
         if not self.image_history: return
         nxt = (self.current_idx + 1) % len(self.image_history)
-        self._load_image_by_index(nxt)
+        self._load_media_by_index(nxt)
 
     def _prev_image(self):
         if not self.image_history: return
         prv = (self.current_idx - 1 + len(self.image_history)) % len(self.image_history)
-        self._load_image_by_index(prv)
+        self._load_media_by_index(prv)
 
     def _toggle_slideshow(self):
         if self._slideshow_timer.isActive():
             self._slideshow_timer.stop()
-            self.btn_slideshow.setText("? PLAY")
+            self.btn_slideshow.setText("▶ PLAY")
             self.btn_slideshow.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
         else:
-            self._slideshow_timer.start(2500)
-            self.btn_slideshow.setText("? PAUSE")
+            self._slideshow_timer.start(3500)
+            self.btn_slideshow.setText("⏸ PAUSE")
             self.btn_slideshow.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; font-weight: bold; border-radius: 4px;")
 
-    def _save_current_image(self):
-        if not self.current_img_path or not os.path.exists(self.current_img_path):
-            QMessageBox.warning(self, "No Image", "No image is currently displayed to save.")
+    def _save_current_media(self):
+        target = self.current_video_path if (self.current_media_type == "video" and self.current_video_path) else self.current_img_path
+        if not target or not os.path.exists(target):
+            QMessageBox.warning(self, "No Media", "No media is currently displayed to save.")
             return
-        dest, _ = QFileDialog.getSaveFileName(self, "Save Image Output", os.path.basename(self.current_img_path), "Images (*.png *.jpg *.jpeg)")
+        ext = os.path.splitext(target)[1].lower()
+        filt = f"Media File (*{ext})"
+        dest, _ = QFileDialog.getSaveFileName(self, "Save Output", os.path.basename(target), filt)
         if dest:
             import shutil
-            shutil.copy2(self.current_img_path, dest)
+            shutil.copy2(target, dest)
             self.lbl_pipeline_status.setText(f"Saved to: {os.path.basename(dest)}")
+
+    def _save_current_image(self):
+        self._save_current_media()
 
     def _open_fullscreen(self):
         if not self.current_img_path or not os.path.exists(self.current_img_path):
@@ -1192,32 +1846,93 @@ class AgentStudioTab(QWidget):
         self.fullscreen_viewer.update_image(self.current_img_path)
         self.fullscreen_viewer.showFullScreen()
 
-    def on_image_generated(self, img_path: str, gen_res: dict):
+    def on_image_generated(self, media_path: str, gen_res: dict):
         """Called automatically by AlphaAgent upon generation completion."""
-        self.lbl_pipeline_status.setText(f"New generation received: {os.path.basename(img_path)}")
+        self.lbl_pipeline_status.setText(f"New creation received: {os.path.basename(media_path)}")
         self._refresh_history()
-        self._load_image_by_index(0)
+        self._load_media_by_index(0)
 
     def _on_manual_generate(self):
         prompt = self.txt_prompt.text().strip()
         if not prompt or not self.sm: return
-        self.lbl_pipeline_status.setText("Connecting to Modal cluster...")
+        self.lbl_pipeline_status.setText(f"Executing {self.active_pipeline.upper()} on Modal cluster...")
         self.btn_generate.setEnabled(False)
         self.progress_bar.setValue(0)
-        self.progress_bar.setMaximum(25)
-        m = self.combo_model.currentData() or "jugg"
-        l = self.combo_lora.currentData() or "none"
+        self.progress_bar.setMaximum(100)
 
-        kwargs = {
-            "prompt": prompt,
-            "model_name": m,
-            "lora": l,
-            "steps": 25,
-            "guidance": 7.0
-        }
+        pipe = self.active_pipeline
+        kwargs = {}
+        target_method = "generate_image"
 
-        self.gen_worker = ImageGenWorker(self.sm, kwargs)
-        
+        if pipe == "txt2img":
+            target_method = "generate_image"
+            kwargs = {
+                "prompt": prompt,
+                "model_name": self.combo_model.currentData() or "jugg",
+                "negative_prompt": self.txt_neg_prompt.text().strip(),
+                "lora": self.combo_lora.currentData() or "none",
+                "steps": self.spin_steps.value(),
+                "guidance": self.spin_guidance.value(),
+                "seed": self.spin_seed.value(),
+                "style_preset": self.combo_preset.currentData() or "none"
+            }
+        elif pipe == "img2img":
+            target_method = "generate_img2img"
+            src = self.txt_source_media.text().strip() or self.current_img_path
+            kwargs = {
+                "image_source": src,
+                "prompt": prompt,
+                "model": self.combo_img2img_model.currentData() or "flux",
+                "strength": self.spin_denoise.value(),
+                "instruction": self.txt_qwen_instr.text().strip(),
+                "negative_prompt": self.txt_neg_prompt.text().strip()
+            }
+        elif pipe == "txt2vid":
+            target_method = "generate_txt2vid"
+            kwargs = {
+                "prompt": prompt,
+                "model_name": self.combo_txt2vid_model.currentData() or "epic",
+                "num_frames": int(self.combo_txt2vid_frames.currentData() or 16),
+                "fps": int(self.combo_txt2vid_fps.currentData() or 8),
+                "seed": self.spin_seed.value()
+            }
+        elif pipe == "img2vid":
+            target_method = "generate_img2vid"
+            src = self.txt_source_media.text().strip() or self.current_img_path
+            kwargs = {
+                "image_source": src,
+                "prompt": prompt,
+                "resolution": self.combo_img2vid_res.currentData() or "480p",
+                "fps": int(self.combo_img2vid_fps.currentData() or 16),
+                "seed": self.spin_seed.value()
+            }
+        elif pipe == "vid2audio":
+            target_method = "generate_vid2audio"
+            vp = self.txt_source_media.text().strip() or self.current_video_path or self.current_media_path
+            kwargs = {
+                "video_path": vp,
+                "prompt": prompt,
+                "duration": self.spin_audio_duration.value()
+            }
+        elif pipe == "vid2vid":
+            target_method = "generate_vid2vid"
+            vp = self.txt_source_media.text().strip() or self.current_video_path or self.current_media_path
+            kwargs = {
+                "video_path": vp,
+                "prompt": prompt,
+                "style_preset": self.combo_vid2vid_preset.currentData() or "cinematic",
+                "with_audio": self.chk_vid2vid_audio.isChecked()
+            }
+        elif pipe == "director":
+            target_method = "autonomous_director"
+            src = self.txt_source_media.text().strip() or self.current_media_path
+            kwargs = {
+                "directive": prompt,
+                "source_media": src
+            }
+
+        self.gen_worker = StudioPipelineWorker(self.sm, target_method, kwargs)
+
         def _on_prog(step, total, msg):
             self.progress_bar.setMaximum(max(total, 1))
             self.progress_bar.setValue(min(step, total))
@@ -1225,11 +1940,11 @@ class AgentStudioTab(QWidget):
 
         def _on_done(res):
             self.progress_bar.setValue(self.progress_bar.maximum())
-            p = res.get("image_path")
-            if p and os.path.exists(p):
-                self.on_image_generated(p, res)
+            media_p = res.get("video_path") or res.get("image_path")
+            if media_p and os.path.exists(media_p):
+                self.on_image_generated(media_p, res)
             self.btn_generate.setEnabled(True)
-            self.lbl_pipeline_status.setText("Ready")
+            self.lbl_pipeline_status.setText(f"{pipe.upper()} complete ◈ Ready")
 
         def _on_err(err_msg):
             self.lbl_pipeline_status.setText(f"Error: {err_msg[:60]}")
@@ -1269,7 +1984,7 @@ class AgentStudioTab(QWidget):
             if up_path and os.path.exists(up_path):
                 self.lbl_pipeline_status.setText("Upscale 4x complete!")
                 self._refresh_history()
-                self._load_image_by_index(0)
+                self._load_media_by_index(0)
             self.btn_upscale.setEnabled(True)
 
         def _on_err(err_msg):

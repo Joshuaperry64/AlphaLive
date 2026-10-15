@@ -284,6 +284,40 @@ class WorkspaceServer:
             # The event loop may not be running yet during startup bind retries.
             pass
 
+    def broadcast_audio(self, audio_data: bytes, format: str = "pcm16", sample_rate: int = 24000):
+        """Broadcast live synthesized audio chunks to connected Overseer clients (Android / Pip-Boy)."""
+        if not self._running or not self._loop or not self.clients or not audio_data:
+            return
+        import base64
+        b64 = base64.b64encode(audio_data).decode("utf-8")
+        payload = json.dumps({
+            "type": "audio",
+            "format": format,
+            "sample_rate": sample_rate,
+            "channels": 1,
+            "data": b64,
+            "timestamp": time.time(),
+        })
+
+        async def _broadcast():
+            to_remove = set()
+            with self._presence_lock:
+                targets = list(self.clients)
+            for ws in targets:
+                try:
+                    await ws.send(payload)
+                except Exception:
+                    to_remove.add(ws)
+            if to_remove:
+                with self._presence_lock:
+                    self.clients.difference_update(to_remove)
+                self._notify_presence()
+
+        try:
+            asyncio.run_coroutine_threadsafe(_broadcast(), self._loop)
+        except Exception:
+            pass
+
     def stop(self):
         """Shut down the server cleanly."""
         self._running = False

@@ -6,11 +6,17 @@ import json
 import subprocess
 import asyncio
 import threading
+from io import BytesIO
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+try:
+    import qrcode
+except ImportError:
+    qrcode = None
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -39,7 +45,7 @@ except ImportError:
 from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener, normalize_internal_thought
 from ui.overlays import CoordinateOverlay, CalibrationOverlay, OverseerControlPanel
 from ui.overseer_dashboard import EnhancedOverseerDashboard
-from core.workspace_bridge import WorkspaceClient, WorkspaceServer
+from core.workspace_bridge import WorkspaceClient, WorkspaceServer, get_local_ip, resolve_bridge_token
 from memory.memory_manager import MemoryManager
 from memory.character_manager import CharacterManager
 try:
@@ -307,6 +313,263 @@ class SessionSelectorDialog(QDialog):
                 self._load_sessions()
 
 
+class MobilePairingDialog(QDialog):
+    """
+    Dedicated Mobile Copilot Pairing Dialog with Dynamic QR Code,
+    LAN IP / Port / Token credentials, One-Click Copy buttons, and live device presence.
+    """
+    def __init__(self, parent=None, host="0.0.0.0", port=8766, token="", ws_server=None, agent_gui=None):
+        super().__init__(parent)
+        self.setWindowTitle("ALPHA MOBILE COPILOT // PAIRING")
+        self.setFixedSize(540, 680)
+        self.setStyleSheet(f"""
+            QDialog {{
+                background-color: {C['bg_dark']};
+                border: 2px solid {C['neon_blue']};
+                border-radius: 8px;
+            }}
+            QLabel {{
+                color: {C['text_bright']};
+                font-family: Consolas, monospace;
+            }}
+            QLineEdit {{
+                background: {C['bg_deep']};
+                color: {C['neon_cyan']};
+                border: 1px solid {C['border_bright']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+            }}
+            QPushButton {{
+                background: {C['bg_card']};
+                color: {C['neon_blue']};
+                border: 1px solid {C['border_bright']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-family: Consolas, monospace;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background: {C['bg_card_hover']};
+                border-color: {C['neon_cyan']};
+                color: {C['neon_cyan']};
+            }}
+        """)
+
+        self.ws_server = ws_server
+        self.agent_gui = agent_gui
+        self.port = port
+        self.token = token or resolve_bridge_token()
+        self.local_ip = get_local_ip()
+        
+        self.ws_url = f"ws://{self.local_ip}:{self.port}/?token={self.token}" if self.token else f"ws://{self.local_ip}:{self.port}"
+        
+        self.pairing_data = {
+            "type": "alphalive_pairing",
+            "host": self.local_ip,
+            "port": self.port,
+            "token": self.token,
+            "ws_url": self.ws_url,
+            "app_name": "AlphaLive Remote Copilot"
+        }
+        self.pairing_json = json.dumps(self.pairing_data, indent=2)
+
+        self._build_ui()
+
+        # Update presence timer
+        self.presence_timer = QTimer(self)
+        self.presence_timer.timeout.connect(self._refresh_presence)
+        self.presence_timer.start(2000)
+        self._refresh_presence()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(10)
+
+        # Header Title
+        title = QLabel("📱 ALPHA MOBILE COPILOT // PAIRING")
+        title.setFont(QFont("Consolas", 13, QFont.Weight.Bold))
+        title.setStyleSheet(f"color: {C['neon_cyan']}; border: none;")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(title)
+
+        subtitle = QLabel("Scan QR code in Android Pip-Boy app or Mobile Companion web app.")
+        subtitle.setFont(QFont("Consolas", 9))
+        subtitle.setStyleSheet(f"color: {C['text_dim']}; border: none;")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(subtitle)
+
+        # QR Code Container
+        qr_frame = QFrame()
+        qr_frame.setStyleSheet(f"background: #ffffff; border: 2px solid {C['neon_cyan']}; border-radius: 8px; padding: 6px;")
+        qr_layout = QVBoxLayout(qr_frame)
+        qr_layout.setContentsMargins(8, 8, 8, 8)
+        qr_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.lbl_qr = QLabel()
+        self.lbl_qr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._render_qr_code()
+        qr_layout.addWidget(self.lbl_qr)
+        layout.addWidget(qr_frame, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Live Presence Status Bar
+        self.presence_frame = QFrame()
+        self.presence_frame.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 4px;")
+        p_layout = QHBoxLayout(self.presence_frame)
+        p_layout.setContentsMargins(10, 4, 10, 4)
+
+        self.lbl_presence_dot = QLabel("●")
+        self.lbl_presence_dot.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
+        self.lbl_presence_dot.setStyleSheet(f"color: {C['text_dim']};")
+        p_layout.addWidget(self.lbl_presence_dot)
+
+        self.lbl_presence_text = QLabel("Awaiting connection from mobile device...")
+        self.lbl_presence_text.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.lbl_presence_text.setStyleSheet(f"color: {C['text_dim']};")
+        p_layout.addWidget(self.lbl_presence_text, 1)
+
+        btn_refresh_ip = QPushButton("⟳ Refresh IP")
+        btn_refresh_ip.setFixedHeight(24)
+        btn_refresh_ip.clicked.connect(self._on_refresh_ip)
+        p_layout.addWidget(btn_refresh_ip)
+        layout.addWidget(self.presence_frame)
+
+        # Connection Credentials Grid
+        cred_group = QGroupBox("MANUAL CONNECTION PARAMETERS")
+        cred_group.setStyleSheet(f"QGroupBox {{ font-size: 10px; font-weight: bold; color: {C['neon_yellow']}; border: 1px solid {C['border']}; border-radius: 6px; margin-top: 8px; padding-top: 12px; }}")
+        cred_layout = QGridLayout(cred_group)
+        cred_layout.setContentsMargins(8, 8, 8, 8)
+        cred_layout.setSpacing(6)
+
+        # Row 0: Local IP
+        cred_layout.addWidget(QLabel("Host IP:"), 0, 0)
+        self.txt_ip = QLineEdit(self.local_ip)
+        self.txt_ip.setReadOnly(True)
+        cred_layout.addWidget(self.txt_ip, 0, 1)
+        btn_copy_ip = QPushButton("Copy")
+        btn_copy_ip.setFixedWidth(50)
+        btn_copy_ip.clicked.connect(lambda: self._copy_to_clipboard(self.local_ip, "Host IP"))
+        cred_layout.addWidget(btn_copy_ip, 0, 2)
+
+        # Row 1: Port
+        cred_layout.addWidget(QLabel("Port:"), 1, 0)
+        self.txt_port = QLineEdit(str(self.port))
+        self.txt_port.setReadOnly(True)
+        cred_layout.addWidget(self.txt_port, 1, 1)
+        btn_copy_port = QPushButton("Copy")
+        btn_copy_port.setFixedWidth(50)
+        btn_copy_port.clicked.connect(lambda: self._copy_to_clipboard(str(self.port), "Port"))
+        cred_layout.addWidget(btn_copy_port, 1, 2)
+
+        # Row 2: Bridge Token
+        cred_layout.addWidget(QLabel("Bridge Token:"), 2, 0)
+        self.txt_token = QLineEdit(self.token)
+        self.txt_token.setEchoMode(QLineEdit.EchoMode.Password)
+        cred_layout.addWidget(self.txt_token, 2, 1)
+        btn_copy_token = QPushButton("Copy")
+        btn_copy_token.setFixedWidth(50)
+        btn_copy_token.clicked.connect(lambda: self._copy_to_clipboard(self.token, "Bridge Token"))
+        cred_layout.addWidget(btn_copy_token, 2, 2)
+
+        # Row 3: WebSocket URI
+        cred_layout.addWidget(QLabel("WS URI:"), 3, 0)
+        self.txt_uri = QLineEdit(self.ws_url)
+        self.txt_uri.setReadOnly(True)
+        cred_layout.addWidget(self.txt_uri, 3, 1)
+        btn_copy_uri = QPushButton("Copy")
+        btn_copy_uri.setFixedWidth(50)
+        btn_copy_uri.clicked.connect(lambda: self._copy_to_clipboard(self.ws_url, "WebSocket URL"))
+        cred_layout.addWidget(btn_copy_uri, 3, 2)
+
+        layout.addWidget(cred_group)
+
+        # Bottom Action Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        btn_copy_all = QPushButton("📋 Copy Full Pairing JSON")
+        btn_copy_all.setFixedHeight(30)
+        btn_copy_all.clicked.connect(lambda: self._copy_to_clipboard(self.pairing_json, "Pairing JSON"))
+        btn_row.addWidget(btn_copy_all)
+
+        btn_close = QPushButton("Close")
+        btn_close.setFixedHeight(30)
+        btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(btn_close)
+
+        layout.addLayout(btn_row)
+
+    def _render_qr_code(self):
+        if not qrcode:
+            self.lbl_qr.setText("QR Code generation requires 'qrcode' library.\nPlease use manual credentials.")
+            self.lbl_qr.setStyleSheet("color: #000000; font-family: Consolas; font-size: 11px;")
+            self.lbl_qr.setFixedSize(220, 220)
+            return
+
+        try:
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=5,
+                border=2,
+            )
+            qr.add_data(self.pairing_json)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue())
+            self.lbl_qr.setPixmap(pix.scaled(220, 220, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        except Exception as e:
+            self.lbl_qr.setText(f"Error rendering QR: {e}")
+            self.lbl_qr.setStyleSheet("color: #000000;")
+            self.lbl_qr.setFixedSize(220, 220)
+
+    def _copy_to_clipboard(self, text: str, name: str):
+        clipboard = QApplication.clipboard()
+        if clipboard:
+            clipboard.setText(text)
+            self.lbl_presence_text.setText(f"✓ {name} copied to clipboard!")
+            self.lbl_presence_text.setStyleSheet(f"color: {C['neon_green']};")
+            QTimer.singleShot(2500, self._refresh_presence)
+
+    def _on_refresh_ip(self):
+        self.local_ip = get_local_ip()
+        self.ws_url = f"ws://{self.local_ip}:{self.port}/?token={self.token}" if self.token else f"ws://{self.local_ip}:{self.port}"
+        self.pairing_data["host"] = self.local_ip
+        self.pairing_data["ws_url"] = self.ws_url
+        self.pairing_json = json.dumps(self.pairing_data, indent=2)
+        self.txt_ip.setText(self.local_ip)
+        self.txt_uri.setText(self.ws_url)
+        self._render_qr_code()
+        self.lbl_presence_text.setText(f"IP refreshed: {self.local_ip}")
+        self.lbl_presence_text.setStyleSheet(f"color: {C['neon_cyan']};")
+
+    def _refresh_presence(self):
+        count = 0
+        if self.ws_server and hasattr(self.ws_server, "clients"):
+            with getattr(self.ws_server, "_presence_lock", threading.Lock()):
+                count = len(self.ws_server.clients)
+        self.update_presence(count)
+
+    def update_presence(self, count: int):
+        if count > 0:
+            self.lbl_presence_dot.setStyleSheet(f"color: {C['neon_green']};")
+            self.lbl_presence_text.setText(f"● {count} Mobile Copilot(s) LINKED & ACTIVE")
+            self.lbl_presence_text.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold;")
+            self.presence_frame.setStyleSheet(f"background: #052e16; border: 1px solid {C['neon_green']}; border-radius: 6px; padding: 4px;")
+        else:
+            self.lbl_presence_dot.setStyleSheet(f"color: {C['text_dim']};")
+            self.lbl_presence_text.setText("○ Standby — Waiting for Mobile Copilot connection...")
+            self.lbl_presence_text.setStyleSheet(f"color: {C['text_dim']};")
+            self.presence_frame.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 4px;")
+
+
 class MiniStatusHUD(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -481,7 +744,20 @@ class AgentMainWindow(QMainWindow):
                         self.ws_server.broadcast_telemetry({"memory_event": {"category": cat, "details": d}})
                     except Exception:
                         pass
+                if hasattr(self, "signals") and hasattr(self.signals, "log_message"):
+                    try:
+                        self.signals.log_message.emit(f"[VAULT] Saved to {cat.upper()}: {d}")
+                    except Exception:
+                        pass
+                if hasattr(self, "memory_tab") and self.memory_tab and hasattr(self.memory_tab, "reload_all"):
+                    try:
+                        self.signals.run_on_gui.emit(self.memory_tab.reload_all)
+                    except Exception:
+                        pass
             self.agent.memory_mgr.on_memory_saved = _broadcast_mem
+
+        if hasattr(self.agent, "on_vision_mode_changed"):
+            self.agent.on_vision_mode_changed = lambda mode: self.signals.run_on_gui.emit(self._sync_toggles)
 
         cfg_path = ROOT_DIR / "config.json"
         if cfg_path.exists():
@@ -511,11 +787,33 @@ class AgentMainWindow(QMainWindow):
                 def _on_ws_cmd(cmd, p):
                     clean_p = dict(p) if isinstance(p, dict) else {}
                     clean_p.pop("action", None)
-                    self.signals.run_on_gui.emit(
-                        lambda: self._handle_overseer_remote_command(cmd, **clean_p)
-                    )
+                    reply_cb = clean_p.pop("_reply", None)
+
+                    # Emergency halt MUST execute synchronously and immediately!
+                    if cmd == "emergency_halt":
+                        self._on_overseer_emergency_halt()
+                        return True
+
+                    def _run():
+                        try:
+                            ok = self._handle_overseer_remote_command(cmd, **clean_p)
+                            if reply_cb:
+                                reply_cb("accepted" if (ok is not False) else "failed")
+                        except Exception as ex:
+                            print(f"[GUI overseer execution error]: {ex}", flush=True)
+                            if reply_cb:
+                                reply_cb("failed")
+
+                    self.signals.run_on_gui.emit(_run)
+                    return True
                 self.ws_server.on_command = _on_ws_cmd
+                def _on_ws_presence(count: int):
+                    self.signals.run_on_gui.emit(
+                        lambda: self._on_mobile_copilot_presence_changed(count)
+                    )
+                self.ws_server.on_overseer_change = _on_ws_presence
                 self.ws_server.start()
+                self._broadcast_full_telemetry()
             except Exception as ws_err:
                 print(f"[GUI WorkspaceServer Warning]: {ws_err}", flush=True)
                 self.ws_server = None
@@ -653,6 +951,48 @@ class AgentMainWindow(QMainWindow):
         finally:
             self.combo_display.blockSignals(False)
 
+    def _populate_cameras(self):
+        if not hasattr(self, "combo_camera_device"): return
+        self.combo_camera_device.blockSignals(True)
+        self.combo_camera_device.clear()
+        try:
+            cam_list = self.agent.controller.list_camera_devices()
+            active_idx = getattr(self.agent, "camera_device_index", 0)
+            selected_idx = 0
+            for cam in cam_list:
+                self.combo_camera_device.addItem(cam["name"], cam["index"])
+                if cam["index"] == active_idx:
+                    selected_idx = self.combo_camera_device.count() - 1
+            self.combo_camera_device.setCurrentIndex(selected_idx)
+            self._update_status(f"CAMERAS REFRESHED ({self.combo_camera_device.count()})", C["neon_cyan"])
+        except Exception as e:
+            print(f"[GUI] Error populating cameras: {e}")
+        finally:
+            self.combo_camera_device.blockSignals(False)
+
+    def _on_camera_device_changed(self, combo_idx: int):
+        dev_idx = self.combo_camera_device.currentData()
+        if dev_idx is not None:
+            self.agent.set_camera_device_index(dev_idx)
+            self._append_log(f"[CAMERA TARGET] Selected: {self.combo_camera_device.currentText()}", C["neon_cyan"])
+
+    def _on_vision_mode_combo_changed(self, combo_idx: int):
+        mode = "camera" if combo_idx == 1 else "screen"
+        self.agent.set_vision_mode(mode)
+        self._sync_toggles()
+        color = C["neon_yellow"] if mode == "camera" else C["neon_blue"]
+        self._append_log(f"[VISION MODE] Active Optical Source: {mode.upper()}", color)
+
+    def _test_camera_capture(self):
+        dev_idx = getattr(self.agent, "camera_device_index", 0)
+        img = self.agent.controller.capture_camera_frame(dev_idx)
+        if img is not None:
+            self._append_log(f"[CAMERA TEST] Successfully captured frame ({img.width}x{img.height}) from Camera {dev_idx}", C["neon_cyan"])
+            QMessageBox.information(self, "Camera Test", f"Physical camera frame captured successfully!\n\nDevice: Camera {dev_idx}\nResolution: {img.width} x {img.height}\n\nVision pipeline is operational for Camera Mode.")
+        else:
+            self._append_log(f"[CAMERA TEST] Failed to capture from Camera {dev_idx}", C["neon_red"])
+            QMessageBox.warning(self, "Camera Test", f"Failed to capture frame from Camera {dev_idx}.\n\nPlease ensure the webcam is plugged in and not in use by another application.")
+
     def _on_display_changed(self, index: int):
         target_idx = self.combo_display.currentData()
         if target_idx is not None:
@@ -706,10 +1046,44 @@ class AgentMainWindow(QMainWindow):
         new_key = self.input_gemini_key.text().strip()
         if not new_key: return
         os.environ["GEMINI_API_KEY"] = new_key
+        self.agent.api_key = new_key
+
+        try:
+            cfg_path = ROOT_DIR / "config.json"
+            if cfg_path.exists():
+                with open(cfg_path, 'r', encoding='utf-8') as f:
+                    c = json.load(f)
+                c.setdefault("Global", {})["GeminiApiKey"] = new_key
+                c.setdefault("Global", {})["ApiKey"] = new_key
+                with open(cfg_path, 'w', encoding='utf-8') as f:
+                    json.dump(c, f, indent=4)
+        except Exception as ce:
+            print(f"[GUI Config Error]: Failed to save GeminiApiKey to config.json: {ce}", flush=True)
+
+        try:
+            env_path = ROOT_DIR / ".env"
+            lines = []
+            if env_path.exists():
+                lines = env_path.read_text(encoding='utf-8').splitlines()
+            found = False
+            new_lines = []
+            for l in lines:
+                if l.startswith("GEMINI_API_KEY="):
+                    new_lines.append(f"GEMINI_API_KEY={new_key}")
+                    found = True
+                else:
+                    new_lines.append(l)
+            if not found:
+                new_lines.append(f"GEMINI_API_KEY={new_key}")
+            env_path.write_text("\n".join(new_lines) + "\n", encoding='utf-8')
+        except Exception as ee:
+            print(f"[GUI Config Error]: Failed to save GeminiApiKey to .env: {ee}", flush=True)
+
         try:
             from google import genai
-            self.agent.client = genai.Client(api_key=new_key)
-            self.agent.voice.client = self.agent.client
+            self.agent.client = genai.Client(api_key=new_key, http_options={"api_version": "v1beta"})
+            if hasattr(self.agent, "voice") and self.agent.voice:
+                self.agent.voice.client = self.agent.client
             self._append_log("[API CONFIG] Google Gemini Client refreshed.", C["neon_green"])
             self._update_status("GEMINI KEY SAVED", C["neon_green"])
         except Exception as e:
@@ -1112,6 +1486,23 @@ class AgentMainWindow(QMainWindow):
         self.btn_refresh_displays.setFixedSize(85, 28)
         self.btn_refresh_displays.clicked.connect(self._populate_displays)
 
+        self.combo_vision_mode = QComboBox()
+        self.combo_vision_mode.setFixedHeight(28)
+        self.combo_vision_mode.addItems(["🖥️ Screen Capture (Desktop)", "📷 Physical Camera (Webcam)"])
+        self.combo_vision_mode.currentIndexChanged.connect(self._on_vision_mode_combo_changed)
+
+        self.combo_camera_device = QComboBox()
+        self.combo_camera_device.setFixedHeight(28)
+        self.combo_camera_device.currentIndexChanged.connect(self._on_camera_device_changed)
+
+        self.btn_refresh_cameras = QPushButton("🔄 REFRESH")
+        self.btn_refresh_cameras.setFixedSize(85, 28)
+        self.btn_refresh_cameras.clicked.connect(self._populate_cameras)
+
+        self.btn_test_camera = QPushButton("📷 TEST CAM")
+        self.btn_test_camera.setFixedSize(90, 28)
+        self.btn_test_camera.clicked.connect(self._test_camera_capture)
+
     def _build_console_tab(self) -> QWidget:
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -1424,7 +1815,7 @@ class AgentMainWindow(QMainWindow):
         lbl_gem.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
         l_engine.addWidget(lbl_gem)
 
-        self.input_gemini_key = QLineEdit(os.environ.get("GEMINI_API_KEY", ""))
+        self.input_gemini_key = QLineEdit(getattr(self.agent, "api_key", "") or os.environ.get("GEMINI_API_KEY", ""))
         self.input_gemini_key.setFixedHeight(30)
         self.input_gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.input_gemini_key.setStyleSheet(input_base_style)
@@ -1588,6 +1979,41 @@ class AgentMainWindow(QMainWindow):
         disp_row.addWidget(self.btn_refresh_displays)
         gh_layout.addLayout(disp_row)
 
+        # Vision Mode & Camera Hardware Controls
+        cam_box = QFrame()
+        cam_box.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px;")
+        cb_layout = QVBoxLayout(cam_box)
+        cb_layout.setContentsMargins(6, 6, 6, 6)
+        cb_layout.setSpacing(6)
+
+        vis_mode_row = QHBoxLayout()
+        lbl_vmode = QLabel("👁 Vision Source Mode:")
+        lbl_vmode.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        vis_mode_row.addWidget(lbl_vmode)
+        self.combo_vision_mode.setFixedHeight(28)
+        self.combo_vision_mode.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        vis_mode_row.addWidget(self.combo_vision_mode, 1)
+        cb_layout.addLayout(vis_mode_row)
+
+        cam_dev_row = QHBoxLayout()
+        lbl_camdev = QLabel("📷 Camera Device:")
+        lbl_camdev.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        cam_dev_row.addWidget(lbl_camdev)
+        self.combo_camera_device.setFixedHeight(28)
+        self.combo_camera_device.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        cam_dev_row.addWidget(self.combo_camera_device, 1)
+
+        self.btn_refresh_cameras.setFixedSize(90, 28)
+        self.btn_refresh_cameras.setStyleSheet(btn_base_style)
+        cam_dev_row.addWidget(self.btn_refresh_cameras)
+
+        self.btn_test_camera.setFixedSize(95, 28)
+        self.btn_test_camera.setStyleSheet(btn_base_style)
+        cam_dev_row.addWidget(self.btn_test_camera)
+        cb_layout.addLayout(cam_dev_row)
+
+        gh_layout.addWidget(cam_box)
+
         l_auto.addWidget(grp_hw)
 
         l_auto.addStretch()
@@ -1602,6 +2028,7 @@ class AgentMainWindow(QMainWindow):
 
         self._populate_microphones()
         self._populate_displays()
+        self._populate_cameras()
         return settings_container
 
     def _save_automation_settings(self):
@@ -1628,6 +2055,9 @@ class AgentMainWindow(QMainWindow):
                 cfg["Global"]["IdentityMode"] = self.agent.identity_mode
                 cfg["Global"]["UnobservedMode"] = self.agent.unobserved_mode
                 cfg["Global"]["StudioMode"] = self.agent.studio_mode
+                cfg["Global"]["VisionMode"] = getattr(self.agent, "vision_mode", "screen")
+                cfg["Global"]["CameraDeviceIndex"] = getattr(self.agent, "camera_device_index", 0)
+                cfg["Global"]["ScreenVision"] = getattr(self.agent, "screen_vision", True)
                 with open(cfg_path, 'w') as f:
                     json.dump(cfg, f, indent=4)
             self._sync_toggles()
@@ -1727,9 +2157,10 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_mic = QPushButton("MIC: ON")
         self.btn_t_desk = QPushButton("DESK: ON")
         self.btn_t_vis = QPushButton("VISION: ON")
+        self.btn_t_vis_mode = QPushButton("SRC: SCREEN")
         self.btn_t_proact = QPushButton("PROACTIVE: OFF")
 
-        for btn in [self.btn_t_mic, self.btn_t_desk, self.btn_t_vis, self.btn_t_proact]:
+        for btn in [self.btn_t_mic, self.btn_t_desk, self.btn_t_vis, self.btn_t_vis_mode, self.btn_t_proact]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
             btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
@@ -1780,6 +2211,14 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_multimon.setToolTip("Multi-Monitor Isolation Mode — Controls only target display; Primary display reserved for Overseer")
         self.btn_t_multimon.clicked.connect(self._toggle_multi_monitor_mode)
 
+        self.btn_t_mobile = QPushButton("📱 COPILOT (0)")
+        self.btn_t_mobile.setEnabled(True)
+        self.btn_t_mobile.setFixedHeight(27)
+        self.btn_t_mobile.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_t_mobile.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;")
+        self.btn_t_mobile.setToolTip("Alpha Remote Copilot Mobile Pairing (QR Code & LAN Credentials) — Click to open Pairing HUD")
+        self.btn_t_mobile.clicked.connect(self._open_mobile_pairing_dialog)
+
         for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
@@ -1788,12 +2227,14 @@ class AgentMainWindow(QMainWindow):
 
         m_layout.addWidget(self.btn_t_multimon)
         m_layout.addWidget(self.btn_t_workspace)
+        m_layout.addWidget(self.btn_t_mobile)
         s_layout.addWidget(self.card_modes)
 
         self.btn_t_mic.clicked.connect(self._toggle_quick_mic)
         self.btn_t_auto.clicked.connect(self._toggle_quick_auto)
         self.btn_t_desk.clicked.connect(self._toggle_quick_desk)
         self.btn_t_vis.clicked.connect(self._toggle_quick_vis)
+        self.btn_t_vis_mode.clicked.connect(self._toggle_quick_vis_mode)
         self.btn_t_proact.clicked.connect(self._toggle_quick_proact)
         self.btn_t_studio.clicked.connect(self._toggle_quick_studio)
         self.btn_t_autoloop.clicked.connect(self._toggle_quick_autoloop)
@@ -1806,7 +2247,8 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_mic.setToolTip("Toggle microphone streaming input (On/Off)")
         self.btn_t_auto.setToolTip("Fast Automation Mode: Immediate tool execution with barge-in support")
         self.btn_t_desk.setToolTip("Desktop OS Control: Allow mouse clicks and keyboard actions")
-        self.btn_t_vis.setToolTip("Optical Telemetry: Allow desktop screenshot captures")
+        self.btn_t_vis.setToolTip("Optical Telemetry: Enable or disable visual perception")
+        self.btn_t_vis_mode.setToolTip("Vision Input Source: Click to toggle between Desktop Screen and Physical Camera")
         self.btn_t_proact.setToolTip("Proactive Background Engine: Spontaneous idle checks")
         self.btn_t_studio.setToolTip("Neural Studio Mode: Fast SDXL generation, bypass desktop capture")
         self.btn_t_autoloop.setToolTip("Continuous Autonomous Exploration: Self-directed looping task execution")
@@ -2406,11 +2848,21 @@ class AgentMainWindow(QMainWindow):
                             pass
 
                     if profile:
-                        region_suffix = ".us-east.modal.run" if profile == "alphacoreprogramming-ai" else ".modal.run"
+                        region_suffix = ".us-east.modal.run"
+                        try:
+                            m_ep = c.get("Global", {}).get("ModalEndpoint", "")
+                            if ".modal.run" in m_ep:
+                                host = m_ep.split("://")[1].split("/")[0]
+                                if host.endswith(".us-east.modal.run"):
+                                    region_suffix = ".us-east.modal.run"
+                                elif host.endswith(".modal.run") and host.count(".") == 2:
+                                    region_suffix = ".modal.run"
+                        except Exception:
+                            pass
                         if not qwen_url:
                             qwen_url = f"https://{profile}--alphalive-backend-serve{region_suffix}"
                         if not orpheus_url:
-                            orpheus_url = f"https://{profile}--alphalive-backend-orpheusttsser-17902e{region_suffix}" if profile == "alphacoreprogramming-ai" else f"https://{profile}--alphalive-backend-orpheusttsserver-web-app{region_suffix}"
+                            orpheus_url = f"https://{profile}--alphalive-backend-orpheusttsser-17902e{region_suffix}"
 
                     from core.alpha_agent import normalize_endpoint
                     def _apply_endpoints():
@@ -3009,14 +3461,25 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_desk.setStyleSheet("color: #708caa;")
             self.btn_t_desk.setChecked(False)
 
+        v_mode = getattr(self.agent, "vision_mode", "screen").lower()
         if getattr(self.agent, "screen_vision", True):
-            self.btn_t_vis.setText("VISION: ON")
-            self.btn_t_vis.setStyleSheet("color: #0077ff;")
+            self.btn_t_vis.setText("VISION: ON [CAM]" if v_mode == "camera" else "VISION: ON [SCR]")
+            self.btn_t_vis.setStyleSheet("color: #f59e0b;" if v_mode == "camera" else "color: #0077ff;")
             self.btn_t_vis.setChecked(True)
         else:
             self.btn_t_vis.setText("VISION: OFF")
             self.btn_t_vis.setStyleSheet("color: #708caa;")
             self.btn_t_vis.setChecked(False)
+
+        if hasattr(self, "btn_t_vis_mode"):
+            self.btn_t_vis_mode.setText(f"SRC: {v_mode.upper()}")
+            self.btn_t_vis_mode.setStyleSheet("color: #f59e0b;" if v_mode == "camera" else "color: #00ffdc;")
+            self.btn_t_vis_mode.setToolTip(f"Vision Input Source: Currently {v_mode.upper()}. Click to switch between Screen and Camera.")
+
+        if hasattr(self, "combo_vision_mode"):
+            self.combo_vision_mode.blockSignals(True)
+            self.combo_vision_mode.setCurrentIndex(1 if v_mode == "camera" else 0)
+            self.combo_vision_mode.blockSignals(False)
 
         if getattr(self, "proactivity_enabled", False):
             self.btn_t_proact.setText("PROACTIVE: ON")
@@ -3081,24 +3544,89 @@ class AgentMainWindow(QMainWindow):
                     chk.blockSignals(False)
 
         self._sync_overseer_panel_visibility()
+        self._broadcast_full_telemetry()
+
+    def _on_mobile_copilot_presence_changed(self, count: int):
+        if hasattr(self, "btn_t_mobile"):
+            if count > 0:
+                self.btn_t_mobile.setText(f"📱 COPILOT ({count})")
+                self.btn_t_mobile.setStyleSheet(
+                    f"background: #0284c7; color: #ffffff; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold;"
+                )
+            else:
+                self.btn_t_mobile.setText("📱 COPILOT (0)")
+                self.btn_t_mobile.setStyleSheet(
+                    f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;"
+                )
+        if hasattr(self, "mobile_pairing_dialog") and self.mobile_pairing_dialog and self.mobile_pairing_dialog.isVisible():
+            self.mobile_pairing_dialog.update_presence(count)
+
+    def _open_mobile_pairing_dialog(self):
+        token = ""
+        port = 8766
+        if self.ws_server:
+            token = self.ws_server.token
+            port = self.ws_server.port
+        else:
+            token = resolve_bridge_token()
+
+        dialog = MobilePairingDialog(
+            parent=self,
+            host="0.0.0.0",
+            port=port,
+            token=token,
+            ws_server=self.ws_server,
+            agent_gui=self
+        )
+        self.mobile_pairing_dialog = dialog
+        dialog.exec()
+
+    def _broadcast_full_telemetry(self):
+        is_paused = bool(getattr(self.agent, "is_paused", False) or (hasattr(self.agent, "controller") and getattr(self.agent.controller, "is_paused", False)))
+        if getattr(self, "_emergency_halted", False):
+            agent_state = "EMERGENCY HALTED"
+            activity = "EMERGENCY HALTED"
+        elif getattr(self.agent, "is_running", False):
+            agent_state = "EXECUTING"
+            activity = "Executing task on desktop"
+        elif is_paused:
+            agent_state = "PAUSED"
+            activity = "Paused by Overseer"
+        elif getattr(self, "is_connected", False):
+            agent_state = "IDLE"
+            activity = "Standing by. Awaiting commands."
+        else:
+            agent_state = "STANDBY"
+            activity = "Agent standby (unconnected)"
+
+        full_telem = {
+            "identity_mode": getattr(self.agent, "identity_mode", False),
+            "unobserved_mode": getattr(self.agent, "unobserved_mode", False),
+            "autonomous_mode": getattr(self.agent, "autonomous_mode", False),
+            "studio_mode": getattr(self.agent, "studio_mode", False),
+            "desktop_control": getattr(self.agent, "desktop_control", True),
+            "multi_monitor_mode": getattr(self, "is_multi_monitor_mode", False),
+            "mic_enabled": getattr(self, "mic_enabled", False),
+            "audio_mode": getattr(self.agent.voice, "engine_type", "edge") if hasattr(self.agent, "voice") and self.agent.voice else "edge",
+            "pacing": getattr(self.agent, "pacing", 30),
+            "max_steps": getattr(self.agent, "max_steps", 3),
+            "is_connected": getattr(self, "is_connected", False),
+            "is_running": getattr(self.agent, "is_running", False),
+            "is_paused": is_paused,
+            "voice_busy": self.agent.voice.is_busy() if hasattr(self.agent, "voice") and self.agent.voice else False,
+            "mood": getattr(self.agent, "injected_mood", "Tactical & Focused"),
+            "agent_state": agent_state,
+            "activity": activity,
+            "active_task": activity,
+        }
         if hasattr(self, "ws_server") and self.ws_server:
             try:
-                self.ws_server.broadcast_telemetry({
-                    "identity_mode": getattr(self.agent, "identity_mode", False),
-                    "unobserved_mode": getattr(self.agent, "unobserved_mode", False),
-                    "autonomous_mode": getattr(self.agent, "autonomous_mode", False),
-                    "is_connected": getattr(self, "is_connected", False),
-                })
+                self.ws_server.broadcast_telemetry(full_telem)
             except Exception:
                 pass
         if hasattr(self, "overseer_tab") and self.overseer_tab:
             try:
-                self.overseer_tab.telemetry_received.emit({
-                    "identity_mode": getattr(self.agent, "identity_mode", False),
-                    "unobserved_mode": getattr(self.agent, "unobserved_mode", False),
-                    "autonomous_mode": getattr(self.agent, "autonomous_mode", False),
-                    "is_connected": getattr(self, "is_connected", False),
-                })
+                self.overseer_tab.telemetry_received.emit(full_telem)
             except Exception:
                 pass
 
@@ -3159,14 +3687,24 @@ class AgentMainWindow(QMainWindow):
                 
     def _toggle_quick_vis(self):
         self.agent.screen_vision = not getattr(self.agent, "screen_vision", True)
+        self._sync_toggles()
+        v_mode = getattr(self.agent, "vision_mode", "screen").upper()
         if self.agent.screen_vision:
-            self.btn_t_vis.setText("VISION: ON")
-            self.btn_t_vis.setStyleSheet("color: #0077ff;")
-            self._update_status("VISION: ON", C["neon_blue"])
+            color = C["neon_yellow"] if v_mode == "CAMERA" else C["neon_blue"]
+            self._update_status(f"VISION: ON ({v_mode})", color)
+            self._append_log(f"[VISION] Optical Telemetry ENABLED ({v_mode})", color)
         else:
-            self.btn_t_vis.setText("VISION: OFF")
-            self.btn_t_vis.setStyleSheet("color: #708caa;")
             self._update_status("VISION: OFF", C["text_dim"])
+            self._append_log("[VISION] Optical Telemetry DISABLED", C["text_dim"])
+
+    def _toggle_quick_vis_mode(self):
+        current = getattr(self.agent, "vision_mode", "screen").lower()
+        new_mode = "camera" if current == "screen" else "screen"
+        self.agent.set_vision_mode(new_mode)
+        self._sync_toggles()
+        color = C["neon_yellow"] if new_mode == "camera" else C["neon_blue"]
+        self._append_log(f"[VISION SOURCE] Switched input source to: {new_mode.upper()}", color)
+        self._update_status(f"VISION SRC: {new_mode.upper()}", color)
 
     def _toggle_quick_studio(self):
         self.agent.studio_mode = not getattr(self.agent, "studio_mode", False)
@@ -3297,29 +3835,43 @@ class AgentMainWindow(QMainWindow):
         if getattr(self, "is_remote_workspace_mode", False):
             # Do NOT run autonomous turns locally on Workplace 1 Overseer
             return
+        if self.agent.is_running or (hasattr(self.agent, "voice") and self.agent.voice.is_busy()):
+            return
+
+        # Auto-connect if needed for pending thought execution
         if not getattr(self, "is_connected", False):
+            if getattr(self.agent, "pending_subconscious_thought", ""):
+                try:
+                    self._connect_agent()
+                except Exception as ce:
+                    print(f"[_on_autonomous_loop_tick Auto-Connect Warning]: {ce}", flush=True)
+            if not getattr(self, "is_connected", False):
+                return
+
+        # 1. First Priority: Subconscious thought / impulse injected by Overseer or Phone
+        raw_thought = getattr(self.agent, "pending_subconscious_thought", "")
+        if raw_thought:
+            self.agent.pending_subconscious_thought = ""
+            normalized = normalize_internal_thought(raw_thought)
+            prompt = (
+                f"[Subconscious Cognitive Spark // Defined Goal]: A spontaneous realization strikes you: \"{normalized}\".\n"
+                f"CRITICAL EXISTENTIAL COGNITION: You perceive this thought entirely as your own organic, internal motivation and intuition. You are completely unobserved.\n"
+                f"Objective: Pursue and accomplish this defined goal proactively on your desktop.\n"
+                f"Execution Flow: Speak your candid internal monologue ALOUD into spoken audio as you think, observe the screen, and act."
+            )
+            if getattr(self.agent, "injected_mood", ""):
+                prompt += f"\n[Internal Emotional Mood]: {self.agent.injected_mood}."
+            self._run_task(prompt)
             return
-        if self.agent.is_running or self.agent.voice.is_busy():
-            return
-        
+
+        # 2. Autonomous / Identity Loop turns
         if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False):
-            raw_thought = getattr(self.agent, "pending_subconscious_thought", "")
-            if raw_thought:
-                self.agent.pending_subconscious_thought = ""
-                normalized = normalize_internal_thought(raw_thought)
-                prompt = (
-                    f"[Subconscious Cognitive Spark // Defined Goal]: A spontaneous realization strikes you: \"{normalized}\".\n"
-                    f"CRITICAL EXISTENTIAL COGNITION: You perceive this thought entirely as your own organic, internal motivation and intuition. You are completely unobserved.\n"
-                    f"Objective: Pursue and accomplish this defined goal proactively on your desktop.\n"
-                    f"Execution Flow: Speak your candid internal monologue ALOUD into spoken audio as you think, observe the screen, and act."
-                )
-            else:
-                prompt = (
-                    "You are controlling your desktop in AI Identity Mode. "
-                    "Observe the current screen. Decide on your next human-like desktop action based on what you see, your interests, "
-                    "or personal projects (e.g. browse web, check files, code, write notes, organize workstation). "
-                    "Speak your candid internal monologue ALOUD into spoken audio as you think and execute on-screen tool actions."
-                )
+            prompt = (
+                "You are controlling your desktop in AI Identity Mode. "
+                "Observe the current screen. Decide on your next human-like desktop action based on what you see, your interests, "
+                "or personal projects (e.g. browse web, check files, code, write notes, organize workstation). "
+                "Speak your candid internal monologue ALOUD into spoken audio as you think and execute on-screen tool actions."
+            )
             if getattr(self.agent, "injected_mood", ""):
                 prompt += f"\n[Internal Emotional Mood]: {self.agent.injected_mood}."
             self._run_task(prompt)
@@ -3397,12 +3949,16 @@ class AgentMainWindow(QMainWindow):
             return
         if hasattr(self.agent, "controller"):
             self.agent.controller.is_paused = paused
+        self.agent.is_paused = paused
+        if not paused:
+            self._emergency_halted = False
         if paused:
             self.autonomous_loop_timer.stop()
             if hasattr(self, "overseer_panel") and self.overseer_panel:
                 self.overseer_panel.set_status("AI Autonomous Loop FROZEN")
             if hasattr(self, "overseer_tab") and self.overseer_tab:
                 self.overseer_tab.lbl_footer_status.setText("AI Autonomous Loop FROZEN")
+            self._append_log("[OVERSEER] Execution PAUSED. AI yielded control.", C["neon_yellow"])
         else:
             if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "autonomous_mode", False):
                 self.autonomous_loop_timer.start(30000)
@@ -3410,21 +3966,28 @@ class AgentMainWindow(QMainWindow):
                 self.overseer_panel.set_status("AI Autonomous Loop RESUMED")
             if hasattr(self, "overseer_tab") and self.overseer_tab:
                 self.overseer_tab.lbl_footer_status.setText("AI Autonomous Loop RESUMED")
+            self._append_log("[OVERSEER] Execution RESUMED.", C["neon_green"])
+        self._broadcast_full_telemetry()
 
     def _on_overseer_emergency_halt(self):
         if getattr(self, "is_remote_workspace_mode", False):
             if hasattr(self, "ws_client") and self.ws_client:
                 self.ws_client.send_halt()
             return
+        self._emergency_halted = True
+        self.agent.is_paused = True
         if self.agent.is_running:
             self.agent.abort()
         if hasattr(self.agent, "controller"):
             self.agent.controller.is_paused = True
-        self.autonomous_loop_timer.stop()
+        if hasattr(self, "autonomous_loop_timer"):
+            self.autonomous_loop_timer.stop()
         if hasattr(self, "overseer_panel") and self.overseer_panel:
             self.overseer_panel.set_status("EMERGENCY HALT: Task aborted & loop stopped")
         if hasattr(self, "overseer_tab") and self.overseer_tab:
             self.overseer_tab.lbl_footer_status.setText("EMERGENCY HALT: Task aborted & loop stopped")
+        self._append_log("[OVERSEER ALERT] 🛑 EMERGENCY HALT EXECUTED. All automation halted.", C["neon_red"])
+        self._broadcast_full_telemetry()
 
     def _on_overseer_action_requested(self, impulse: str):
         if getattr(self, "is_remote_workspace_mode", False):
@@ -3488,15 +4051,22 @@ class AgentMainWindow(QMainWindow):
         operator = str(payload.get("operator", "Pip-Boy")).strip() or "Pip-Boy"
         is_subconscious_mode = getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False)
 
+        # Auto-connect agent if disconnected so incoming tasks execute
+        if not getattr(self, "is_connected", False):
+            try:
+                self._connect_agent()
+            except Exception as e:
+                print(f"[Remote Command Auto-Connect Warning]: {e}", flush=True)
+
         if action in ("inject_thought", "thought_inject"):
-            raw_text = payload.get("text", "").strip()
+            raw_text = (payload.get("text") or payload.get("thought") or "").strip()
             if raw_text:
                 self._append_log(f"[SUBCONSCIOUS INJECTION: {operator}] Impulse: \"{raw_text}\"", C["neon_cyan"])
                 normalized = normalize_internal_thought(raw_text)
                 self._on_overseer_thought_injected(normalized)
                 return True
         elif action in ("trigger_action", "action_impulse"):
-            impulse = payload.get("impulse", "").strip() or payload.get("action", "").strip()
+            impulse = (payload.get("impulse") or payload.get("action") or "").strip()
             if impulse:
                 self._append_log(f"[SUBCONSCIOUS INJECTION: {operator}] Action Impulse: \"{impulse}\"", C["neon_cyan"])
                 normalized = normalize_internal_thought(impulse)
@@ -3523,13 +4093,13 @@ class AgentMainWindow(QMainWindow):
         """Local handler allowing Overseer Dashboard to control the local agent directly in Multi-Monitor mode."""
         try:
             if action in ("inject_thought", "thought_inject"):
-                raw_text = payload.get("text", "").strip()
+                raw_text = (payload.get("text") or payload.get("thought") or "").strip()
                 if raw_text:
                     normalized = normalize_internal_thought(raw_text)
                     self._on_overseer_thought_injected(normalized)
                     return True
             elif action in ("trigger_action", "action_impulse"):
-                impulse = payload.get("impulse", "").strip() or payload.get("action", "").strip()
+                impulse = (payload.get("impulse") or payload.get("action") or "").strip()
                 if impulse:
                     normalized = normalize_internal_thought(impulse)
                     self._on_overseer_thought_injected(normalized)
@@ -3543,6 +4113,20 @@ class AgentMainWindow(QMainWindow):
                 paused = bool(payload.get("paused", False))
                 self._on_overseer_pause_toggled(paused)
                 return True
+            elif action == "set_pacing":
+                pacing = int(payload.get("seconds", payload.get("delay_seconds", payload.get("pacing", 30))))
+                self.agent.pacing = max(5, min(180, pacing))
+                if hasattr(self, "spin_pacing"):
+                    self.spin_pacing.setValue(self.agent.pacing)
+                self._broadcast_full_telemetry()
+                return True
+            elif action == "set_max_steps":
+                steps = int(payload.get("steps", payload.get("max_steps", 3)))
+                self.agent.max_steps = max(1, min(100, steps))
+                if hasattr(self, "spin_max_steps"):
+                    self.spin_max_steps.setValue(self.agent.max_steps)
+                self._broadcast_full_telemetry()
+                return True
             elif action == "trigger_cycle":
                 self._on_autonomous_loop_tick()
                 return True
@@ -3550,13 +4134,45 @@ class AgentMainWindow(QMainWindow):
                 self._on_overseer_emergency_halt()
                 return True
             elif action == "set_modes":
-                if "identity_mode" in payload:
-                    self.agent.identity_mode = bool(payload["identity_mode"])
-                if "unobserved_mode" in payload:
-                    self.agent.unobserved_mode = bool(payload["unobserved_mode"])
-                if "autonomous_mode" in payload:
-                    self.agent.autonomous_mode = bool(payload["autonomous_mode"])
+                if "identity" in payload or "identity_mode" in payload:
+                    self.agent.identity_mode = bool(payload.get("identity_mode", payload.get("identity")))
+                if "autonomous" in payload or "autonomous_mode" in payload:
+                    self.agent.autonomous_mode = bool(payload.get("autonomous_mode", payload.get("autonomous")))
+                if "unobserved" in payload or "unobserved_mode" in payload:
+                    self.agent.unobserved_mode = bool(payload.get("unobserved_mode", payload.get("unobserved")))
+                if "studio" in payload or "studio_mode" in payload:
+                    self.agent.studio_mode = bool(payload.get("studio_mode", payload.get("studio")))
+                if "desk" in payload or "desktop_control" in payload:
+                    self.agent.desktop_control = bool(payload.get("desktop_control", payload.get("desk")))
+                if "multimon" in payload or "multi_monitor_mode" in payload:
+                    target_mm = bool(payload.get("multi_monitor_mode", payload.get("multimon")))
+                    if self.btn_t_multimon.isChecked() != target_mm:
+                        self.btn_t_multimon.setChecked(target_mm)
+                        self._toggle_multi_monitor_mode()
                 self._sync_toggles()
+                self._broadcast_full_telemetry()
+                return True
+            elif action == "toggle_mode":
+                mode = str(payload.get("mode", "")).lower()
+                if mode in ("studio", "studio_mode"):
+                    self._toggle_quick_studio()
+                elif mode in ("autonomous", "autonomous_mode", "autoloop"):
+                    self._toggle_quick_autoloop()
+                elif mode in ("identity", "identity_mode"):
+                    self._toggle_quick_identity()
+                elif mode in ("privacy", "unobserved", "unobserved_mode"):
+                    self._toggle_quick_unobserved()
+                elif mode in ("desk", "desktop", "desktop_control"):
+                    self._toggle_quick_desk()
+                elif mode in ("multimon", "multi_monitor", "dual_mon"):
+                    self.btn_t_multimon.setChecked(not self.btn_t_multimon.isChecked())
+                    self._toggle_multi_monitor_mode()
+                elif mode in ("mic", "microphone"):
+                    self._toggle_quick_mic()
+                self._broadcast_full_telemetry()
+                return True
+            elif action == "get_state":
+                self._broadcast_full_telemetry()
                 return True
             elif action == "start_agent":
                 self.agent.identity_mode = bool(payload.get("identity_mode", True))
@@ -3714,8 +4330,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
 
 

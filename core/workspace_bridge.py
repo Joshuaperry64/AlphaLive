@@ -89,9 +89,14 @@ class WorkspaceServer:
             "is_paused": False,
             "active_task": "",
             "is_connected": False,
-            "identity_mode": False,
+            "identity_mode": True,
             "autonomous_mode": False,
-            "unobserved_mode": False,
+            "unobserved_mode": True,
+            "studio_mode": False,
+            "desktop_control": True,
+            "multi_monitor_mode": False,
+            "audio_mode": "half",
+            "mic_enabled": True,
             "pacing": 30,
             "max_steps": 3,
         }
@@ -170,18 +175,32 @@ class WorkspaceServer:
     async def _handle_client(self, websocket):
         peer = getattr(websocket, "remote_address", "client")
 
+        # Check query string token first (e.g. ws://host:8766/?token=xyz)
+        path = getattr(websocket, "path", None) or getattr(getattr(websocket, "request", None), "path", "") or ""
+        query_token = None
+        if "?" in path:
+            try:
+                import urllib.parse
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(path).query)
+                query_token = qs.get("token", [None])[0]
+            except Exception:
+                query_token = None
+
         # Shared-secret authentication gate (enforced only when a token is configured).
         if self.token:
             authenticated = False
-            try:
-                first = await asyncio.wait_for(websocket.recv(), timeout=10)
-                data = json.loads(first)
-                authenticated = (
-                    data.get("type") == "auth"
-                    and secrets.compare_digest(str(data.get("token", "")), self.token)
-                )
-            except Exception:
-                authenticated = False
+            if query_token and secrets.compare_digest(str(query_token), self.token):
+                authenticated = True
+            else:
+                try:
+                    first = await asyncio.wait_for(websocket.recv(), timeout=10)
+                    data = json.loads(first)
+                    authenticated = (
+                        data.get("type") == "auth"
+                        and secrets.compare_digest(str(data.get("token", "")), self.token)
+                    )
+                except Exception:
+                    authenticated = False
 
             if not authenticated:
                 print(f"[WorkspaceBridge] Rejected unauthenticated Overseer client from {peer}", flush=True)
@@ -209,6 +228,7 @@ class WorkspaceServer:
                 "type": "handshake",
                 "status": "connected",
                 "protocol_version": PROTOCOL_VERSION,
+                "data": self._latest_telemetry,
                 "telemetry": self._latest_telemetry,
                 "timestamp": time.time(),
             }
@@ -218,25 +238,69 @@ class WorkspaceServer:
 
         try:
             async for message in websocket:
+                print(f"[WorkspaceBridge INBOUND RAW] from {peer}: {str(message)[:250]}", flush=True)
                 try:
                     data = json.loads(message)
                     action = data.get("action")
                     # Any traffic from an authenticated client refreshes the presence clock.
                     with self._presence_lock:
                         self.last_presence = time.monotonic()
-                    if action in ("heartbeat", "ping", "keepalive"):
+
+                    if not action:
+                        if data.get("type") in ("ping", "heartbeat"):
+                            await websocket.send(json.dumps({"type": "pong", "timestamp": time.time()}))
                         continue
-                    if action and self.on_command:
-                        self.on_command(action, data)
+
+                    if action in ("heartbeat", "ping", "keepalive"):
+                        await websocket.send(json.dumps({"type": "pong", "timestamp": time.time()}))
+                        continue
+
+                    # Direct emergency halt handling
+                    if action == "emergency_halt":
+                        print(f"[WorkspaceBridge] Executing EMERGENCY HALT override synchronously", flush=True)
+                        if self.on_command:
+                            try:
+                                self.on_command(action, data)
+                            except Exception as eh_err:
+                                print(f"[WorkspaceBridge emergency_halt error]: {eh_err}", flush=True)
+                        await websocket.send(json.dumps({
+                            "type": "command_result",
+                            "action": "emergency_halt",
+                            "status": "accepted",
+                            "timestamp": time.time(),
+                        }))
+                        continue
+
+                    if self.on_command:
                         request_id = data.get("request_id")
-                        if request_id:
-                            await websocket.send(json.dumps({
-                                "type": "command_result",
-                                "request_id": request_id,
-                                "action": action,
-                                "status": "accepted",
-                                "timestamp": time.time(),
-                            }))
+
+                        def _make_reply(req_id, act):
+                            def _reply_fn(status="accepted"):
+                                try:
+                                    res_payload = json.dumps({
+                                        "type": "command_result",
+                                        "request_id": req_id,
+                                        "action": act,
+                                        "status": status,
+                                        "timestamp": time.time(),
+                                    })
+                                    asyncio.run_coroutine_threadsafe(
+                                        websocket.send(res_payload),
+                                        self._loop
+                                    )
+                                    print(f"[WorkspaceBridge ACK SENT] action={act} req_id={req_id} status={status}", flush=True)
+                                except Exception as ack_err:
+                                    print(f"[WorkspaceBridge ACK error]: {ack_err}", flush=True)
+                            return _reply_fn
+
+                        data["_reply"] = _make_reply(request_id, action)
+
+                        try:
+                            self.on_command(action, data)
+                        except Exception as cmd_err:
+                            print(f"[WorkspaceBridge on_command error]: {cmd_err}", flush=True)
+                            if request_id:
+                                data["_reply"]("failed")
                 except Exception as e:
                     print(f"[WorkspaceBridge] Error processing message from client: {e}", flush=True)
         except websockets.exceptions.ConnectionClosed:

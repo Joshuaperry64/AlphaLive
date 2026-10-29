@@ -1029,6 +1029,8 @@ class DesktopController:
     def __init__(self):
         self.last_pos = None
         self.active_monitor_index = 0
+        self.camera_device_index = 0
+        self._last_cam_thumb_arr = None
         self.is_paused = False
         self.user_touch_yield_until = 0.0
 
@@ -1143,11 +1145,65 @@ class DesktopController:
         except Exception:
             return True
 
-    def capture_camera_frame(self) -> PIL.Image.Image | None:
-        """Capture a single frame from the connected USB webcam."""
+    def list_camera_devices(self) -> list:
+        """Enumerate connected physical cameras with friendly device names."""
+        devices = []
+        friendly_names = []
+        if os.name == "nt":
+            try:
+                cmd = "Get-PnpDevice -Class Camera,Image | Where-Object { $_.Status -eq 'OK' } | Select-Object FriendlyName | ConvertTo-Json"
+                p = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=5)
+                if p.stdout.strip():
+                    data = json.loads(p.stdout)
+                    if isinstance(data, dict):
+                        data = [data]
+                    friendly_names = [d.get("FriendlyName", "").strip() for d in data if d.get("FriendlyName")]
+            except Exception:
+                pass
+
         try:
             import cv2
-            cap = cv2.VideoCapture(0)
+            if hasattr(cv2, "utils") and hasattr(cv2.utils, "logging"):
+                cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+            for idx in range(5):
+                try:
+                    backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+                    cap = cv2.VideoCapture(idx, backend)
+                    if not cap.isOpened() and backend != cv2.CAP_ANY:
+                        cap = cv2.VideoCapture(idx)
+                    if cap.isOpened():
+                        ret, _ = cap.read()
+                        cap.release()
+                        if ret:
+                            fname = friendly_names[idx] if idx < len(friendly_names) else f"Device {idx}"
+                            devices.append({"index": idx, "name": f"Camera {idx}: {fname}"})
+                    else:
+                        cap.release()
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[Camera Enumeration Error]: {e}", flush=True)
+
+        if not devices:
+            devices.append({"index": 0, "name": "Camera 0: Default Video Device"})
+        return devices
+
+    def set_camera_index(self, index: int):
+        """Set the active camera device index."""
+        self.camera_device_index = int(index)
+        self._last_cam_thumb_arr = None
+
+    def capture_camera_frame(self, device_index: int = None) -> PIL.Image.Image | None:
+        """Capture a single frame from the specified or active physical camera/webcam."""
+        target_idx = getattr(self, "camera_device_index", 0) if device_index is None else int(device_index)
+        try:
+            import cv2
+            if hasattr(cv2, "utils") and hasattr(cv2.utils, "logging"):
+                cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+            backend = cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY
+            cap = cv2.VideoCapture(target_idx, backend)
+            if not cap.isOpened() and backend != cv2.CAP_ANY:
+                cap = cv2.VideoCapture(target_idx)
             if not cap.isOpened():
                 return None
             ret, frame = cap.read()
@@ -1156,8 +1212,24 @@ class DesktopController:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 return PIL.Image.fromarray(rgb)
         except Exception as e:
-            print(f"[Camera Error]: {e}", flush=True)
+            print(f"[Camera Error (Device {target_idx})]: {e}", flush=True)
         return None
+
+    def has_camera_changed(self, img: PIL.Image.Image, threshold: float = 0.02) -> bool:
+        """Perceptual downsampled frame differencing to eliminate redundant camera vision token uploads."""
+        try:
+            thumb = img.convert("L").resize((64, 64))
+            arr = np.frombuffer(thumb.tobytes(), dtype=np.uint8).astype(np.float32)
+            if not hasattr(self, "_last_cam_thumb_arr") or self._last_cam_thumb_arr is None:
+                self._last_cam_thumb_arr = arr
+                return True
+            diff = np.mean(np.abs(arr - self._last_cam_thumb_arr)) / 255.0
+            if diff > threshold:
+                self._last_cam_thumb_arr = arr
+                return True
+            return False
+        except Exception:
+            return True
 
     def click(self, x: int = None, y: int = None, button: str = "left", clicks: int = 1):
         if self._check_touch_yield():
@@ -1841,10 +1913,11 @@ class AlphaAgent:
         
         # Smart candidate models with high quota & sub-second responsiveness
         self.model_candidates = [
-            "models/gemini-3.8-flash",
             "models/gemini-3.5-flash-lite",
+            "models/gemini-3.1-flash-lite",
+            "models/gemini-3.6-flash",
+            "models/gemini-3.8-flash",
             "models/gemini-flash-latest",
-            "models/gemini-flash-lite-latest",
             "models/gemini-3.5-flash",
         ]
         self.model_name = self.model_candidates[0]
@@ -1895,6 +1968,11 @@ class AlphaAgent:
                     self.desktop_control = (str(dc).lower() in ("enabled", "true"))
                     self.current_mood = cfg.get("Global", {}).get("Mood", "default")
                     self.monitor_index = int(cfg.get("Global", {}).get("DisplayMonitorIndex", 0))
+                    vm = cfg.get("Global", {}).get("VisionMode", "screen")
+                    self.vision_mode = str(vm).lower() if str(vm).lower() in ("screen", "camera") else "screen"
+                    self.camera_device_index = int(cfg.get("Global", {}).get("CameraDeviceIndex", 0))
+                    sv = cfg.get("Global", {}).get("ScreenVision", True)
+                    self.screen_vision = (str(sv).lower() in ("enabled", "true", "1"))
                     oe = cfg.get("Global", {}).get("OrpheusEndpoint", "")
                     if oe:
                         self.orpheus_endpoint = oe
@@ -1933,6 +2011,14 @@ class AlphaAgent:
 
         self.controller = DesktopController()
         self.controller.set_monitor_index(self.monitor_index)
+        if not hasattr(self, "vision_mode"):
+            self.vision_mode = "screen"
+        if not hasattr(self, "camera_device_index"):
+            self.camera_device_index = 0
+        if not hasattr(self, "screen_vision"):
+            self.screen_vision = True
+        self.controller.camera_device_index = self.camera_device_index
+        self.on_vision_mode_changed = None
         self.voice = VoiceEngine(client=self.client, voice="Leda", voice_mode="leda")
         self.voice.engine_type = self.tts_engine
         self.voice.orpheus_endpoint = self.orpheus_endpoint
@@ -1974,6 +2060,8 @@ class AlphaAgent:
         self.is_running = False
         self._current_turn_id = 0
         self._turn_cancel_event = threading.Event()
+        self._last_socratic_topic = ""
+        self._last_socratic_relations = []
 
     def get_active_persona_name(self) -> str:
         """Returns the name of the currently active character persona (default: 'Alpha')."""
@@ -1985,6 +2073,177 @@ class AlphaAgent:
             except Exception:
                 pass
         return "Alpha"
+
+    def is_socratic_mode_active(self) -> bool:
+        """Check if the currently active persona is AIena or a Socratic Naive Child learner."""
+        active_name = self.get_active_persona_name()
+        if getattr(self, "character_manager", None) and hasattr(self.character_manager, "is_socratic_persona"):
+            try:
+                active_char = self.character_manager.get_active_character()
+                if self.character_manager.is_socratic_persona(active_char or active_name):
+                    return True
+            except Exception:
+                pass
+        return active_name.lower() in ("aiena", "naive child", "socratic")
+
+    def _extract_socratic_topic_from_question(self, text: str) -> str:
+        """Extract candidate topic from AI Socratic interrogation for anaphoric resolution."""
+        if not text:
+            return ""
+        q = text.strip().rstrip("?!.").strip()
+        patterns = [
+            r'(?:what is|what are|what\'s)\s+(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)(?:\s+(?:for|used for|made of))?$',
+            r'(?:what does)\s+([a-zA-Z0-9_\-\s]{2,40}?)\s+mean$',
+            r'(?:why do|why does)\s+(?:people|humans|we|they|someone)?\s*([a-zA-Z0-9_\-\s]{2,40}?)$',
+            r'(?:why is|why are)\s+(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)(?:\s+.*)?$',
+            r'(?:how does|how do)\s+(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)(?:\s+.*)?$',
+            r'^why\s+(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)$',
+        ]
+        for pat in patterns:
+            m = re.search(pat, q, re.IGNORECASE)
+            if m:
+                topic = m.group(1).strip().lower()
+                topic = re.sub(r'^(?:a|an|the)\s+', '', topic)
+                if topic not in ('it', 'that', 'this', 'they', 'you', 'i', 'we', 'things', 'stuff'):
+                    return topic
+        return ""
+
+    def extract_socratic_relations(self, text: str, last_topic: str = "") -> list:
+        """
+        Lightweight entity-relation extractor parsing node-edge triples from user explanations.
+        Returns a list of (subject, predicate, object) tuples for committing to the Knowledge Graph.
+        """
+        if not text or len(text.strip()) < 3:
+            return []
+
+        clean_text = text.strip()
+        clean_text = re.sub(r'^(?:well|look|you see|so|listen|okay|ok|let\'s learn|i told you|remember)[,\s]+', '', clean_text, flags=re.IGNORECASE).strip()
+
+        results = []
+        clauses = [c.strip() for c in re.split(r'[\n;.]+', clean_text) if len(c.strip()) >= 3]
+        if not clauses:
+            clauses = [clean_text]
+
+        for clause in clauses:
+            clause = clause.strip()
+            if not clause:
+                continue
+
+            # 1. Anaphoric / Elliptical explanations referencing last_topic
+            if last_topic:
+                m = re.match(r'^(?:because|cause|so that|in order to)\s+(.+)', clause, re.IGNORECASE)
+                if m:
+                    results.append((last_topic.lower(), 'reason', m.group(1).strip().lower()))
+                    continue
+                m = re.match(r'^(?:it\'s|it is|that\'s|that is|they\'re|they are)\s+(?:used for|for|used to|to)\s+(.+)', clause, re.IGNORECASE)
+                if m:
+                    results.append((last_topic.lower(), 'purpose', m.group(1).strip().lower()))
+                    continue
+                m = re.match(r'^(?:it|that|this)\s+(?:means|mean|is defined as|are defined as|refers to|refer to)\s+(.+)', clause, re.IGNORECASE)
+                if m:
+                    results.append((last_topic.lower(), 'means', m.group(1).strip().lower()))
+                    continue
+                m = re.match(r'^(?:it\'s|it is|that\'s|that is|they\'re|they are)\s+(?:made of|made out of|composed of)\s+(.+)', clause, re.IGNORECASE)
+                if m:
+                    results.append((last_topic.lower(), 'made of', m.group(1).strip().lower()))
+                    continue
+                m = re.match(r'^(?:it\'s|it is|that\'s|that is|this is|they are|they\'re)\s+(?:a|an|the)?\s*(.+)', clause, re.IGNORECASE)
+                if m:
+                    results.append((last_topic.lower(), 'is', m.group(1).strip().lower()))
+                    continue
+                m = re.match(r'^(?:for|to)\s+([a-zA-Z0-9_\-\s]{3,50})$', clause, re.IGNORECASE)
+                if m:
+                    results.append((last_topic.lower(), 'purpose', m.group(1).strip().lower()))
+                    continue
+
+            # 2. Explicit Subject-Predicate-Object patterns
+            m = re.match(r'^(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)\s+(?:means|mean|is defined as|are defined as|refers to|refer to)\s+(.+)', clause, re.IGNORECASE)
+            if m:
+                s, o = m.group(1).strip().lower(), m.group(2).strip().lower()
+                if s not in ('it', 'that', 'this', 'they', 'what', 'why', 'how'):
+                    results.append((s, 'means', o))
+                    continue
+
+            m = re.match(r'^(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)\s+(?:is|are)\s+(?:used for|for|used to|meant for)\s+(.+)', clause, re.IGNORECASE)
+            if m:
+                s, o = m.group(1).strip().lower(), m.group(2).strip().lower()
+                if s not in ('it', 'that', 'this', 'they', 'what', 'why', 'how'):
+                    results.append((s, 'purpose', o))
+                    continue
+
+            m = re.match(r'^(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)\s+(?:is made of|are made of|is made out of|are made out of|is composed of|are composed of|consists of|consist of)\s+(.+)', clause, re.IGNORECASE)
+            if m:
+                s, o = m.group(1).strip().lower(), m.group(2).strip().lower()
+                if s not in ('it', 'that', 'this', 'they', 'what', 'why', 'how'):
+                    results.append((s, 'made of', o))
+                    continue
+
+            m = re.match(r'^(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)\s+(?:causes|cause|leads to|lead to|results in|result in|creates|create)\s+(.+)', clause, re.IGNORECASE)
+            if m:
+                s, o = m.group(1).strip().lower(), m.group(2).strip().lower()
+                if s not in ('it', 'that', 'this', 'they', 'what', 'why', 'how'):
+                    results.append((s, 'causes', o))
+                    continue
+
+            m = re.match(r'^(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)\s+(?:needs|need|requires|require)\s+(.+)', clause, re.IGNORECASE)
+            if m:
+                s, o = m.group(1).strip().lower(), m.group(2).strip().lower()
+                if s not in ('it', 'that', 'this', 'they', 'what', 'why', 'how'):
+                    results.append((s, 'requires', o))
+                    continue
+
+            m = re.match(r'^(?:a|an|the)?\s*([a-zA-Z0-9_\-\s]{2,40}?)\s+(?:is|are)\s+(?:a|an|the)?\s*(.+)', clause, re.IGNORECASE)
+            if m:
+                s, o = m.group(1).strip().lower(), m.group(2).strip().lower()
+                if s not in ('it', 'that', 'this', 'they', 'what', 'why', 'how', 'i', 'you', 'there'):
+                    results.append((s, 'is', o))
+                    continue
+
+        cleaned = []
+        for s, p, o in results:
+            o = re.sub(r'[.!?,;]+$', '', o).strip()
+            s = re.sub(r'^(?:a|an|the)\s+', '', s).strip()
+            if s and o and s != o and len(s) >= 2 and len(o) >= 2:
+                cleaned.append((s, p, o))
+        return cleaned
+
+    def set_vision_mode(self, mode: str):
+        """Set vision source mode: 'screen' (Desktop) or 'camera' (Webcam)."""
+        clean_mode = "camera" if "cam" in str(mode).lower() else "screen"
+        self.vision_mode = clean_mode
+        cfg_path = os.path.join(ROOT_DIR, "config.json")
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["VisionMode"] = self.vision_mode
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+            except Exception:
+                pass
+        if hasattr(self, "on_vision_mode_changed") and self.on_vision_mode_changed:
+            try:
+                self.on_vision_mode_changed(self.vision_mode)
+            except Exception:
+                pass
+        print(f"[AlphaAgent] Vision mode switched to: {self.vision_mode.upper()}", flush=True)
+
+    def set_camera_device_index(self, index: int):
+        """Set active camera device index."""
+        self.camera_device_index = int(index)
+        if hasattr(self, "controller") and self.controller:
+            self.controller.camera_device_index = self.camera_device_index
+        cfg_path = os.path.join(ROOT_DIR, "config.json")
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg.setdefault("Global", {})["CameraDeviceIndex"] = self.camera_device_index
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+            except Exception:
+                pass
+        print(f"[AlphaAgent] Camera device index switched to: {self.camera_device_index}", flush=True)
 
     def set_backend(self, backend_type: str):
         """Switch active cognitive backend between 'gemini', 'modal_qwen', and 'openrouter'."""
@@ -2565,6 +2824,20 @@ class AlphaAgent:
             {
                 "type": "function",
                 "function": {
+                    "name": "set_vision_mode",
+                    "description": "Switch the optical vision mode between desktop screen capture and physical camera/webcam view.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "mode": {"type": "string", "enum": ["screen", "camera"], "description": "Target vision mode ('screen' or 'camera')"}
+                        },
+                        "required": ["mode"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
                     "name": "capture_webcam",
                     "description": "Capture a live image frame from the user's physical camera/webcam to inspect the physical environment.",
                     "parameters": {
@@ -2892,6 +3165,36 @@ class AlphaAgent:
                 overlay += f"- Dynamics & Preferences: {active_char['kinks']}\n"
             overlay += f"You MUST embody {c_name} with complete fidelity. Emulate this exact persona voice, tone, and dynamic throughout all speech and actions.\n"
 
+        # Socratic First-Principles World Model & Knowledge Graph Loop Injection
+        if self.is_socratic_mode_active():
+            overlay += "\n\n[MANDATORY SOCRATIC WORLD MODEL & KNOWLEDGE GRAPH]\n"
+            socratic_facts = []
+            if self.memory_manager:
+                try:
+                    socratic_facts = self.memory_manager.get_all_facts(limit=40)
+                except Exception:
+                    socratic_facts = []
+
+            if socratic_facts:
+                overlay += "You have successfully learned and verified the following first-principles relations through dialogue with Josh:\n"
+                for f in socratic_facts:
+                    s = f.get("subject", "").strip()
+                    p = f.get("predicate", "").strip()
+                    o = f.get("object", "").strip()
+                    overlay += f"- {s} -> {p} -> {o}\n"
+                overlay += (
+                    "\nCRITICAL SOCRATIC INTERROGATION CONSTRAINTS:\n"
+                    "1. KNOWLEDGE RETENTION: You already understand the definitions listed above. NEVER ask what these terms mean or re-interrogate them as unknowns.\n"
+                    "2. CIRCULAR LOGIC DETECTION: If Josh defines a concept using another term that circles back to a concept you already know (e.g. A depends on B, and B depends on A), CALL OUT THE CIRCLE immediately with childlike confusion (e.g. 'Wait, you said A is B, but B is A! What do they actually do?') and demand to know the true functional mechanism.\n"
+                    "3. ADVANCE TO FUNCTIONAL INTENT: For any term already semantically defined above, shift your inquiry deeper to functional mechanism or purpose ('Why do humans do that?', 'How does that work physically?', 'What happens if that stops?').\n"
+                    "4. STRICT BREVITY & ZERO EXPLANATIONS: Do NOT give any answers, explanations, or summaries. Produce ONLY ONE short question (1 to 10 words maximum).\n"
+                )
+            else:
+                overlay += (
+                    "Your world model is currently an EMPTY BLANK SLATE. You know nothing about reality. "
+                    "Pick the key noun or action from Josh's message and interrogate it with a short, childlike question (1 to 10 words maximum) to begin constructing your first principles.\n"
+                )
+
         if getattr(self, "injected_mood", ""):
             overlay += f"\n[CURRENT EMOTIONAL DISPOSITION & MOOD]: {self.injected_mood}\n"
         # Structured memory facts context injection
@@ -2904,6 +3207,21 @@ class AlphaAgent:
                         overlay += f"- {k}: {v}\n"
             except Exception:
                 pass
+
+        # Vision Mode Behavioral System Directive
+        if getattr(self, "vision_mode", "screen").lower() == "camera":
+            cam_idx = getattr(self, "camera_device_index", 0)
+            overlay += (
+                f"\n[ACTIVE OPTICAL VISION MODE: PHYSICAL CAMERA // DEVICE {cam_idx}]\n"
+                "Your optical input is streaming from the user's physical camera/webcam. "
+                "Any visual frames attached represent the user's real-world physical surroundings, gestures, or items shown to the camera, NOT their desktop screen. "
+                "When asked about what you see or what the user is holding or doing, analyze the physical camera view directly.\n"
+            )
+        else:
+            overlay += (
+                "\n[ACTIVE OPTICAL VISION MODE: DESKTOP SCREEN]\n"
+                "Your visual telemetry is linked to the user's computer monitor display screen.\n"
+            )
 
         # Neural Studio multimodal pipeline catalog knowledge
         overlay += "\n[NEURAL STUDIO MULTIMODAL PIPELINES & CAPABILITIES]:\n"
@@ -3350,6 +3668,17 @@ class AlphaAgent:
                     )
                 ),
                 types.FunctionDeclaration(
+                    name="set_vision_mode",
+                    description="Switch the optical vision mode between desktop screen capture and physical camera/webcam view.",
+                    parameters=genai.types.Schema(
+                        type=genai.types.Type.OBJECT,
+                        properties={
+                            "mode": genai.types.Schema(type=genai.types.Type.STRING, description="Target vision mode ('screen' or 'camera')")
+                        },
+                        required=["mode"]
+                    )
+                ),
+                types.FunctionDeclaration(
                     name="capture_webcam",
                     description="Capture a live image frame from the user's physical camera/webcam to inspect real-world physical surroundings or visual items.",
                     parameters=genai.types.Schema(
@@ -3521,30 +3850,51 @@ class AlphaAgent:
                 step += 1
                 should_speak = not getattr(self, "automation_mode", False) if is_identity_or_unobserved else ((step % 2 == 1) and not getattr(self, "automation_mode", False))
 
-                # Grab screen only when executing desktop actions or explicitly asked to inspect screen/screenshot (Bypassed in studio_mode)
+                # Optical vision capture: Screen or Physical Camera depending on active vision_mode
                 is_studio = getattr(self, "studio_mode", False)
-                if not is_studio and getattr(self, "screen_vision", True) and (is_desktop or any(w in user_goal.lower() for w in ("screen", "screenshot", "look at", "what do you see"))):
-                    screenshot = self.controller.capture_screenshot()
-                    # Frame differencing: on multi-step turns, skip uploading duplicate frames if screen hasn't changed
-                    screen_changed = (step == 1) or self.controller.has_screen_changed(screenshot)
-                    if screen_changed:
-                        img_byte_arr = io.BytesIO()
-                        screenshot.save(img_byte_arr, format='JPEG', quality=60)
-                        img_bytes = img_byte_arr.getvalue()
-                        history[-1].parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
-                    else:
-                        # Screen is unchanged from previous step: reuse visual context without consuming extra tokens
-                        history[-1].parts.append(types.Part.from_text(text="[Vision note: Screen visually unchanged from previous action step.]"))
-                        if on_log:
-                            on_log("[VISION] Screen unchanged from prior step. Reusing frame cache to save tokens.", "cyan")
+                vision_enabled = getattr(self, "screen_vision", True)
+                is_camera_mode = (getattr(self, "vision_mode", "screen").lower() == "camera")
+                cam_device_idx = getattr(self, "camera_device_index", 0)
 
-                # Camera vision support: grab camera frame if explicitly requested
-                if any(w in user_goal.lower() for w in ("camera", "webcam", "look at me", "see me")):
-                    cam_img = self.controller.capture_camera_frame()
-                    if cam_img:
-                        cam_io = io.BytesIO()
-                        cam_img.save(cam_io, format='JPEG', quality=75)
-                        history[-1].parts.append(types.Part.from_bytes(data=cam_io.getvalue(), mime_type="image/jpeg"))
+                if not is_studio and vision_enabled:
+                    explicit_cam = any(w in user_goal.lower() for w in ("camera", "webcam", "look at me", "see me"))
+                    explicit_screen = any(w in user_goal.lower() for w in ("screen", "screenshot", "desktop"))
+                    use_camera = (is_camera_mode and not explicit_screen) or explicit_cam
+                    should_capture = is_desktop or is_camera_mode or any(w in user_goal.lower() for w in ("screen", "screenshot", "look at", "what do you see", "camera", "webcam", "see me", "look at me"))
+
+                    if should_capture:
+                        if use_camera:
+                            cam_img = self.controller.capture_camera_frame(cam_device_idx)
+                            if cam_img:
+                                cam_changed = (step == 1) or self.controller.has_camera_changed(cam_img)
+                                if cam_changed:
+                                    cam_io = io.BytesIO()
+                                    cam_img.save(cam_io, format='JPEG', quality=75)
+                                    history[-1].parts.append(types.Part.from_bytes(data=cam_io.getvalue(), mime_type="image/jpeg"))
+                                    history[-1].parts.append(types.Part.from_text(text=f"[Vision feed: Live frame from Camera Device {cam_device_idx}]"))
+                                    if on_log:
+                                        on_log(f"[VISION: CAMERA] Attached live frame from Camera {cam_device_idx}", "cyan")
+                                else:
+                                    history[-1].parts.append(types.Part.from_text(text="[Vision note: Camera view visually unchanged from prior step.]"))
+                                    if on_log:
+                                        on_log("[VISION: CAMERA] Camera view unchanged. Reusing frame cache to save tokens.", "cyan")
+                            else:
+                                if on_log:
+                                    on_log(f"[VISION: CAMERA] Warning: Failed to capture from Camera {cam_device_idx}", "warn")
+                        else:
+                            screenshot = self.controller.capture_screenshot()
+                            screen_changed = (step == 1) or self.controller.has_screen_changed(screenshot)
+                            if screen_changed:
+                                img_byte_arr = io.BytesIO()
+                                screenshot.save(img_byte_arr, format='JPEG', quality=60)
+                                img_bytes = img_byte_arr.getvalue()
+                                history[-1].parts.append(types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"))
+                                if on_log and is_desktop:
+                                    on_log("[VISION: SCREEN] Attached desktop screenshot.", "cyan")
+                            else:
+                                history[-1].parts.append(types.Part.from_text(text="[Vision note: Screen visually unchanged from previous action step.]"))
+                                if on_log:
+                                    on_log("[VISION: SCREEN] Screen unchanged from prior step. Reusing frame cache.", "cyan")
 
                 # Call Gemini with streaming and automatic model fallback cascade
                 stream = None
@@ -3598,6 +3948,11 @@ class AlphaAgent:
                                     on_log(f"[{cand_model} high latency] Reconnect failed. Switching candidate...", "warn")
                         except Exception as e:
                             err_str = str(e)
+                            if "401" in err_str or "UNAUTHENTICATED" in err_str or "API key not valid" in err_str:
+                                print(f"[AlphaAgent Auth Error]: Invalid or unauthenticated Gemini API key! {err_str[:100]}", flush=True)
+                                if on_log:
+                                    on_log("[GEMINI AUTH ERROR] 401 Unauthorized: Invalid API key. Please check your Gemini API key in Settings.", "error")
+                                break
                             if attempt == 0:
                                 print(f"[AlphaAgent] Model {cand_model} attempt 1 hitch ({err_str[:70]}). Reconnecting once before fallback...", flush=True)
                                 if on_log:
@@ -3708,6 +4063,11 @@ class AlphaAgent:
                 clean_text = self.voice.clean_text_for_speech(full_model_text)
                 persona_name = self.get_active_persona_name()
                 if clean_text:
+                    if self.is_socratic_mode_active():
+                        new_topic = self._extract_socratic_topic_from_question(clean_text)
+                        if new_topic:
+                            self._last_socratic_topic = new_topic
+
                     mode_label = "" if should_speak else " (Silent)"
                     if on_log:
                         on_log(f"[{persona_name}{mode_label}]: {clean_text}", "text" if should_speak else "dim")
@@ -4131,12 +4491,17 @@ class AlphaAgent:
                                 res = f"Studio Director failed: {gen_res.get('error', 'unknown error')}"
                         else:
                             res = "Studio manager unavailable."
+                    elif fn_name == "set_vision_mode":
+                        mode = fn_args.get("mode", "screen")
+                        self.set_vision_mode(mode)
+                        res = f"Vision mode successfully switched to {mode.upper()}."
                     elif fn_name == "capture_webcam":
-                        cam_frame = self.controller.capture_camera_frame()
-                        if cam_frame:
-                            res = "Camera frame captured successfully."
+                        c_idx = getattr(self, "camera_device_index", 0)
+                        cam_frame = self.controller.capture_camera_frame(c_idx)
+                        if cam_frame is not None:
+                            res = f"Camera frame captured successfully ({cam_frame.width}x{cam_frame.height}) from Camera {c_idx}."
                         else:
-                            res = "Webcam offline or unavailable."
+                            res = f"Webcam (Camera {c_idx}) offline or unavailable."
                     elif fn_name in ("browser_search", "list_directory", "read_file", "write_file", "run_shell_command"):
                         res = "Background execution is disabled. As a human operator, you must visually launch the application on screen (e.g. Chrome, File Explorer, Notepad) and interact with it directly."
                     elif fn_name == "system_notification":
@@ -4306,20 +4671,36 @@ class AlphaAgent:
             model_lower = (self.modal_model or "").lower()
             is_known_text_only = any(k in model_lower for k in ("instruct", "chat", "coder", "deepseek", "llama", "mistral")) and not any(v in model_lower for v in ("vl", "vision", "multimodal", "omni", "pixtral", "llava", "4o"))
 
-            if is_desktop and getattr(self, "screen_vision", True) and not is_known_text_only:
+            is_camera_mode = (getattr(self, "vision_mode", "screen").lower() == "camera")
+            cam_device_idx = getattr(self, "camera_device_index", 0)
+            explicit_cam = any(w in user_goal.lower() for w in ("camera", "webcam", "look at me", "see me"))
+            explicit_screen = any(w in user_goal.lower() for w in ("screen", "screenshot", "desktop"))
+            use_camera = (is_camera_mode and not explicit_screen) or explicit_cam
+            should_vision = (is_desktop or is_camera_mode or explicit_cam) and getattr(self, "screen_vision", True) and not is_known_text_only
+
+            if should_vision:
                 try:
                     import base64
-                    screenshot = self.controller.capture_screenshot()
-                    img_byte_arr = io.BytesIO()
-                    screenshot.save(img_byte_arr, format='JPEG', quality=60)
-                    b64_img = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
-                    messages.append({
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": user_text},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
-                        ]
-                    })
+                    if use_camera:
+                        vis_img = self.controller.capture_camera_frame(cam_device_idx)
+                        vis_label = f"[Physical Camera View - Device {cam_device_idx}]"
+                    else:
+                        vis_img = self.controller.capture_screenshot()
+                        vis_label = "[Current Desktop State]"
+
+                    if vis_img:
+                        img_byte_arr = io.BytesIO()
+                        vis_img.save(img_byte_arr, format='JPEG', quality=65)
+                        b64_img = base64.b64encode(img_byte_arr.getvalue()).decode('utf-8')
+                        messages.append({
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": f"{user_text}\n\n{vis_label}"},
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}}
+                            ]
+                        })
+                    else:
+                        messages.append({"role": "user", "content": user_text})
                 except Exception:
                     screen_summary = await self.controller.get_screen_ocr_summary(fast_mode=False)
                     messages.append({
@@ -4453,6 +4834,11 @@ class AlphaAgent:
                 clean_text = self.voice.clean_text_for_speech(current_assistant_text)
                 persona_name = self.get_active_persona_name()
                 if clean_text:
+                    if self.is_socratic_mode_active():
+                        new_topic = self._extract_socratic_topic_from_question(clean_text)
+                        if new_topic:
+                            self._last_socratic_topic = new_topic
+
                     mode_label = "" if should_speak else " (Silent)"
                     if on_log:
                         on_log(f"[{persona_name}{mode_label}]: {clean_text}", "text" if should_speak else "dim")
@@ -4821,12 +5207,17 @@ class AlphaAgent:
                             res = f"Studio Director successfully delivered creation: {media_path}. Critique: {critique}" if critique else f"Studio Director finished: {media_path}"
                         else:
                             res = f"Studio Director failed: {gen_res.get('error', 'unknown error')}"
+                    elif fn_name == "set_vision_mode":
+                        mode = fn_args.get("mode", "screen")
+                        self.set_vision_mode(mode)
+                        res = f"Vision mode successfully switched to {mode.upper()}."
                     elif fn_name == "capture_webcam":
-                        cam_frame = self.controller.capture_camera_frame()
+                        c_idx = getattr(self, "camera_device_index", 0)
+                        cam_frame = self.controller.capture_camera_frame(c_idx)
                         if cam_frame is not None:
-                            res = f"Captured physical camera frame ({cam_frame.width}x{cam_frame.height})."
+                            res = f"Captured physical camera frame ({cam_frame.width}x{cam_frame.height}) from Camera {c_idx}."
                         else:
-                            res = "Webcam offline or unavailable."
+                            res = f"Webcam (Camera {c_idx}) offline or unavailable."
                     elif fn_name == "browser_search":
                         res = self.controller.browser_search(query=fn_args.get("query", ""))
                     elif fn_name == "list_directory":
@@ -4965,6 +5356,21 @@ class AlphaAgent:
         """Unified Autonomous Execution Turn.
         Dynamically routes between Google Gemini, Modal HuiHui-Qwen3, and OpenRouter based on active backend.
         """
+        # Socratic Persona Entity-Relation Extraction & Knowledge Graph Auto-Commit
+        if self.is_socratic_mode_active() and self.memory_manager:
+            try:
+                relations = self.extract_socratic_relations(user_goal, last_topic=self._last_socratic_topic)
+                if relations:
+                    self._last_socratic_relations = relations
+                    for s, p, o in relations:
+                        self.memory_manager.memorize_fact(s, p, o, source="socratic_dialogue")
+                        if on_log:
+                            on_log(f"[SOCRATIC LEARNING] Discovered relation: {s} -> [{p}] -> {o}", "cyan")
+                    # Update active topic to the newly taught subject
+                    self._last_socratic_topic = relations[0][0]
+            except Exception as e:
+                print(f"[AlphaAgent] Socratic extraction error: {e}", flush=True)
+
         if self.backend_type in ("modal_qwen", "openrouter"):
             return await self._execute_turn_modal(user_goal, on_step=on_step, on_log=on_log, on_status=on_status, max_steps=max_steps)
         else:
@@ -4998,8 +5404,6 @@ class AlphaAgent:
 if __name__ == "__main__":
     agent = AlphaAgent()
     asyncio.run(agent.run_cli())
-
-
 
 
 

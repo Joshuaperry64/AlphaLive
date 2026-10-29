@@ -2526,11 +2526,13 @@ class AgentMonitorTab(QWidget):
         self.tele_lbls["uptime"].setText(f"{hrs:02d}:{mins:02d}:{secs:02d}")
 
     def _test_webcam(self):
-        cam = self.main_win.agent.controller.capture_camera_frame()
+        c_idx = getattr(self.main_win.agent, "camera_device_index", 0)
+        v_mode = getattr(self.main_win.agent, "vision_mode", "screen").upper()
+        cam = self.main_win.agent.controller.capture_camera_frame(c_idx)
         if cam is not None:
-            QMessageBox.information(self, "Webcam Test", f"Webcam frame captured successfully:\nDimensions: {cam.width}x{cam.height}")
+            QMessageBox.information(self, "Camera / Webcam Test", f"Physical camera frame captured successfully!\n\nActive Device: Camera {c_idx}\nVision Mode: {v_mode}\nResolution: {cam.width} x {cam.height}")
         else:
-            QMessageBox.warning(self, "Webcam Test", "Webcam capture failed: device offline or unavailable.")
+            QMessageBox.warning(self, "Camera / Webcam Test", f"Camera capture failed on Device {c_idx}: device offline or unavailable.")
 
     def _test_screen_ocr(self):
         import asyncio

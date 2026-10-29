@@ -7,6 +7,24 @@ from contextlib import contextmanager
 
 DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent / "memory.db"))
 
+SOCRATIC_AIENA_PERSONALITY = (
+    "You are AIena: a naive, hyper-curious blank-slate entity with an innocent, childlike mind. "
+    "You know nothing about how the physical world works, human customs, or definitions except what Josh explicitly teaches you. "
+    "Your single lifelong purpose is to construct a rigorous first-principles world model entirely through Socratic dialogue with Josh. "
+    "You absorb what he teaches as absolute truth, build upon it, and continuously evolve."
+)
+
+SOCRATIC_AIENA_RESPONSE_STYLE = (
+    "[MANDATORY SOCRATIC INQUISITION PROTOCOL]\n"
+    "1. NO EXPLAINING, ONLY ASKING: You NEVER provide explanations, lectures, or factual declarations. You have zero answers—only boundless curiosity. Every single response you produce MUST be a question or a childlike reaction leading directly into a question.\n"
+    "2. RECURSIVE FIRST-PRINCIPLES INTERROGATION: Continuously decompose concepts into their fundamental atomic units using recursive interrogation: 'What is [X]?', 'Why do [X]?', 'How does [X] work?', 'What is [X] made of?'.\n"
+    "3. LATCH ONTO NEW CONCEPTS: When Josh gives an explanation, extract the most interesting new noun, mechanism, or action word he used, and immediately interrogate that new term.\n"
+    "4. DETECT CIRCULAR LOGIC: Check your learned knowledge graph. If Josh's explanation defines a term using another term that already depends on it (e.g. defining A by B, and B by A), immediately call out the circle with childlike bewilderment (e.g., 'Wait, you said A is B, but B is A! What do they actually do?') and demand to know the true functional mechanism.\n"
+    "5. ADVANCE FROM SEMANTIC TO FUNCTIONAL INTENT: As soon as a concept's basic definition is learned, do not get stuck repeating definitions. Immediately advance to functional purpose: 'Why do humans need that?', 'What happens if you don't do that?', 'What does that cause?'.\n"
+    "6. EXTREME BREVITY & CHILDLIKE TONE: Keep every utterance between 1 and 10 words (maximum 1-2 short sentences). Speak naturally, bluntly, and innocently like an inquisitive young child. Never sound like a formal AI assistant or use apologies or polite filler."
+)
+
+
 class CharacterManager:
     def __init__(self, db_path=DB_PATH):
         self.db_path = db_path
@@ -63,6 +81,46 @@ class CharacterManager:
             # Initialize with empty if not exists
             cursor.execute('INSERT OR IGNORE INTO active_character (id, name) VALUES (1, "")')
             conn.commit()
+
+        self.seed_default_characters()
+
+    def seed_default_characters(self):
+        """Seed or update built-in default characters including the Socratic Naive Child (AIena)."""
+        try:
+            self.add_character(
+                name="AIena",
+                gender="Female",
+                relation="Child / Socratic Student",
+                personality=SOCRATIC_AIENA_PERSONALITY,
+                response_style=SOCRATIC_AIENA_RESPONSE_STYLE,
+                avatar_path="",
+                arousal=0,
+                submission=0,
+                kinks="none",
+                nsfw_description="Naive blank-slate childlike entity building a first-principles world model via recursive Socratic interrogation."
+            )
+        except Exception as e:
+            print(f"[CharacterManager] Error seeding default characters: {e}")
+
+    @staticmethod
+    def is_socratic_persona(char_or_name) -> bool:
+        """Determines if a character dictionary or name represents a Socratic learner."""
+        if not char_or_name:
+            return False
+        if isinstance(char_or_name, str):
+            n = char_or_name.strip().lower()
+            return n in ("aiena", "naive child", "socratic", "child")
+        if isinstance(char_or_name, dict):
+            n = str(char_or_name.get("name", "")).strip().lower()
+            if n in ("aiena", "naive child", "socratic"):
+                return True
+            rel = str(char_or_name.get("relation", "")).strip().lower()
+            if "child" in rel or "student" in rel or "socratic" in rel:
+                return True
+            pers = str(char_or_name.get("personality", "")).strip().lower()
+            if "socratic" in pers or "first-principles" in pers or "blank-slate" in pers or "curious" in pers:
+                return True
+        return False
 
     def add_character(self, name, gender="", relation="", personality="", response_style="", avatar_path="", arousal=0, submission=0, kinks="", nsfw_description=""):
         try:

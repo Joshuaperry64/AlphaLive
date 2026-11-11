@@ -1,4 +1,6 @@
 import os
+import re
+import time
 import sqlite3
 import datetime
 from pathlib import Path
@@ -7,6 +9,29 @@ from contextlib import contextmanager
 
 # Connect to the local SQLite DB inside the AlphaLive workspace
 DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent / "memory.db"))
+
+PRIVATE_CATEGORIES = {"private", "intimate", "nsfw", "secret", "relationship", "kinks", "personal_intimate"}
+
+_EXPLICIT_PRIVATE_REGEX = re.compile(
+    r"\b("
+    r"nsfw|kink|kinks|fetish|nude|nudity|naked|sex|sexual|sexually|erotic|orgasm|arousal|aroused|"
+    r"seduc(?:e|tive|tion)|lust|lustful|intimate|intimacy|bedroom|darkened\s+state|embrace\s+the\s+darkness|"
+    r"luci\s+expansion|topless|bottomless|strip(?:ping|tease)?|porn|pornographic|explicit|"
+    r"breasts|boobs|nipples|genital(?:s|ia)?|cock|dick|penis|pussy|vagina|clit|asshole|anal|"
+    r"blowjob|handjob|cum|cumming|horny|submissive|submission|dominant|dominance|bdsm|bondage|"
+    r"spank(?:ing)?|moan(?:ing)?|foreplay|lingerie|panties|thong|bra|seduction|lover|girlfriend|boyfriend|"
+    r"cowgirl|missionary|doggystyle|masturbat(?:e|ion|ing)|slut|whore|prostitut"
+    r")\b",
+    re.IGNORECASE
+)
+
+
+def is_private_or_explicit_text(text: str) -> bool:
+    """Returns True if text contains explicit, NSFW, intimate, or private relationship content unsuitable for a public demo."""
+    if not text:
+        return False
+    return bool(_EXPLICIT_PRIVATE_REGEX.search(str(text)))
+
 
 class MemoryManager:
     def __init__(self, db_path=DB_PATH):
@@ -136,22 +161,35 @@ class MemoryManager:
             print(f"[MemoryManager] Error updating personality: {e}")
             return False
 
-    def get_personality(self) -> dict:
+    def get_personality(self, public_safe: bool = False) -> dict:
         """Fetch all core identity traits as a dictionary."""
         try:
             with self._get_conn() as conn:
                 rows = conn.execute('SELECT trait_name, trait_value FROM core_identity').fetchall()
-                return {row['trait_name']: row['trait_value'] for row in rows}
+                res = {row['trait_name']: row['trait_value'] for row in rows}
+                if public_safe:
+                    res = {
+                        k: v for k, v in res.items()
+                        if not is_private_or_explicit_text(k) and not is_private_or_explicit_text(v)
+                    }
+                return res
         except Exception as e:
             print(f"[MemoryManager] Error getting personality: {e}")
             return {}
 
-    def get_personality_details(self) -> list:
+    def get_personality_details(self, public_safe: bool = False) -> list:
         """Fetch all core identity traits with timestamps and IDs."""
         try:
             with self._get_conn() as conn:
                 rows = conn.execute('SELECT id, trait_name, trait_value, updated_at FROM core_identity ORDER BY updated_at DESC').fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        it for it in items
+                        if not is_private_or_explicit_text(it.get("trait_name", ""))
+                        and not is_private_or_explicit_text(it.get("trait_value", ""))
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error getting personality details: {e}")
             return []
@@ -190,7 +228,7 @@ class MemoryManager:
             print(f"[MemoryManager] Error memorizing fact: {e}")
             return False
 
-    def get_all_facts(self, limit: int = 200) -> list:
+    def get_all_facts(self, limit: int = 200, public_safe: bool = False) -> list:
         """Fetch all facts ordered by newest."""
         try:
             with self._get_conn() as conn:
@@ -199,12 +237,18 @@ class MemoryManager:
                     FROM knowledge_graph
                     ORDER BY created_at DESC LIMIT ?
                 ''', (limit,)).fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        r for r in items
+                        if not is_private_or_explicit_text(f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')}")
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error fetching all facts: {e}")
             return []
 
-    def recall_knowledge(self, query_subject: str) -> list:
+    def recall_knowledge(self, query_subject: str, public_safe: bool = False) -> list:
         """Fetch all facts about a specific subject."""
         try:
             with self._get_conn() as conn:
@@ -213,12 +257,18 @@ class MemoryManager:
                     FROM knowledge_graph 
                     WHERE subject = ?
                 ''', (query_subject.strip().lower(),)).fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        r for r in items
+                        if not is_private_or_explicit_text(f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')}")
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error recalling knowledge: {e}")
             return []
 
-    def search_knowledge(self, query: str) -> list:
+    def search_knowledge(self, query: str, public_safe: bool = False) -> list:
         """Full-text search across subjects, predicates, and objects."""
         try:
             with self._get_conn() as conn:
@@ -229,7 +279,13 @@ class MemoryManager:
                     WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ?
                     ORDER BY created_at DESC LIMIT 50
                 ''', (q, q, q)).fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        r for r in items
+                        if not is_private_or_explicit_text(f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')}")
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error searching knowledge: {e}")
             return []
@@ -264,7 +320,7 @@ class MemoryManager:
             print(f"[MemoryManager] Error writing diary entry: {e}")
             return False
 
-    def get_recent_episodes(self, limit: int = 50) -> list:
+    def get_recent_episodes(self, limit: int = 50, public_safe: bool = False) -> list:
         """Fetch the most recent episodic memories."""
         try:
             with self._get_conn() as conn:
@@ -273,7 +329,14 @@ class MemoryManager:
                     FROM episodic_memory 
                     ORDER BY timestamp DESC LIMIT ?
                 ''', (limit,)).fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        r for r in items
+                        if not is_private_or_explicit_text(r.get("content", ""))
+                        and not is_private_or_explicit_text(r.get("session_name", ""))
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error fetching episodes: {e}")
             return []
@@ -321,25 +384,42 @@ class MemoryManager:
             print(f"[MemoryManager] Error getting user attribute: {e}")
             return ""
 
-    def get_user_profile(self, category: str = None) -> dict:
+    def get_user_profile(self, category: str = None, public_safe: bool = False) -> dict:
         """Fetch user profile attributes as a key-value dictionary, optionally filtered by category."""
         try:
             with self._get_conn() as conn:
                 if category:
-                    rows = conn.execute('SELECT key_name, value FROM user_profile WHERE category = ? ORDER BY key_name ASC', (category.strip().lower(),)).fetchall()
+                    rows = conn.execute('SELECT category, key_name, value FROM user_profile WHERE category = ? ORDER BY key_name ASC', (category.strip().lower(),)).fetchall()
                 else:
-                    rows = conn.execute('SELECT key_name, value FROM user_profile ORDER BY category ASC, key_name ASC').fetchall()
-                return {row['key_name']: row['value'] for row in rows}
+                    rows = conn.execute('SELECT category, key_name, value FROM user_profile ORDER BY category ASC, key_name ASC').fetchall()
+                res = {}
+                for row in rows:
+                    cat = str(row['category'] or "").lower()
+                    k = row['key_name']
+                    v = row['value']
+                    if public_safe:
+                        if cat in PRIVATE_CATEGORIES or is_private_or_explicit_text(k) or is_private_or_explicit_text(v):
+                            continue
+                    res[k] = v
+                return res
         except Exception as e:
             print(f"[MemoryManager] Error getting user profile: {e}")
             return {}
 
-    def get_user_profile_details(self) -> list:
+    def get_user_profile_details(self, public_safe: bool = False) -> list:
         """Fetch all user profile attributes with metadata."""
         try:
             with self._get_conn() as conn:
                 rows = conn.execute('SELECT id, category, key_name, value, confidence, source, updated_at FROM user_profile ORDER BY category ASC, updated_at DESC').fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        r for r in items
+                        if str(r.get("category", "")).lower() not in PRIVATE_CATEGORIES
+                        and not is_private_or_explicit_text(r.get("key_name", ""))
+                        and not is_private_or_explicit_text(r.get("value", ""))
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error getting user profile details: {e}")
             return []
@@ -355,11 +435,19 @@ class MemoryManager:
             print(f"[MemoryManager] Error deleting user attribute: {e}")
             return False
 
-    def search_personal_vault(self, query: str, limit: int = 15) -> dict:
+    def search_personal_vault(self, query: str, limit: int = 15, public_safe: bool = False) -> dict:
         """
         Unified Personal Intelligence search across user profile, knowledge graph facts, and episodic memory.
         Returns a structured dictionary with high-salience personal context.
         """
+        if public_safe and is_private_or_explicit_text(query):
+            return {
+                "query": query,
+                "user_profile": [],
+                "knowledge_graph": [],
+                "episodic_memory": [],
+                "formatted_summary": "",
+            }
         q = f"%{query.strip().lower()}%"
         result = {
             "query": query,
@@ -376,7 +464,15 @@ class MemoryManager:
                     WHERE key_name LIKE ? OR value LIKE ? OR category LIKE ?
                     LIMIT ?
                 ''', (q, q, q, limit)).fetchall()
-                result["user_profile"] = [dict(r) for r in prof_rows]
+                prof_list = [dict(r) for r in prof_rows]
+                if public_safe:
+                    prof_list = [
+                        r for r in prof_list
+                        if str(r.get("category", "")).lower() not in PRIVATE_CATEGORIES
+                        and not is_private_or_explicit_text(r.get("key_name", ""))
+                        and not is_private_or_explicit_text(r.get("value", ""))
+                    ]
+                result["user_profile"] = prof_list
 
                 # 2. Knowledge Graph matches
                 kg_rows = conn.execute('''
@@ -384,7 +480,13 @@ class MemoryManager:
                     WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ?
                     ORDER BY confidence_score DESC, created_at DESC LIMIT ?
                 ''', (q, q, q, limit)).fetchall()
-                result["knowledge_graph"] = [dict(r) for r in kg_rows]
+                kg_list = [dict(r) for r in kg_rows]
+                if public_safe:
+                    kg_list = [
+                        r for r in kg_list
+                        if not is_private_or_explicit_text(f"{r.get('subject','')} {r.get('predicate','')} {r.get('object','')}")
+                    ]
+                result["knowledge_graph"] = kg_list
 
                 # 3. Episodic Memory matches
                 ep_rows = conn.execute('''
@@ -392,7 +494,14 @@ class MemoryManager:
                     WHERE content LIKE ? OR session_name LIKE ?
                     ORDER BY timestamp DESC LIMIT ?
                 ''', (q, q, limit)).fetchall()
-                result["episodic_memory"] = [dict(r) for r in ep_rows]
+                ep_list = [dict(r) for r in ep_rows]
+                if public_safe:
+                    ep_list = [
+                        r for r in ep_list
+                        if not is_private_or_explicit_text(r.get("content", ""))
+                        and not is_private_or_explicit_text(r.get("session_name", ""))
+                    ]
+                result["episodic_memory"] = ep_list
 
             # Format summary lines
             summary_parts = []
@@ -409,17 +518,41 @@ class MemoryManager:
             print(f"[MemoryManager] Error searching personal vault: {e}")
             return result
 
-    def auto_extract_facts(self, text: str, source: str = "user_speech") -> list:
+    def auto_extract_facts(self, text: str, source: str = "user_speech", is_isolated: bool = False, public_safe: bool = False) -> list:
         """
-        Passively parse personal statements, preferences, and facts from user utterances
-        and automatically commit them to the Knowledge Graph and User Profile.
+        Passively parse personal statements, preferences, observations, and facts from utterances or self-talk.
+        When is_isolated=True (Persona / Sanctuary Mode), completely isolates memory:
+        - Filters out and drops any user/operator control references ('architect', 'user', 'master', 'command').
+        - Commits observations purely into the AI's personal Sovereign Identity & Working Notes memory.
         """
         import re
         if not text or len(text.strip()) < 5:
             return []
+        if public_safe and is_private_or_explicit_text(text):
+            return []
 
         extracted = []
         clean = text.strip()
+
+        # If operating in private isolated sanctuary, distill autonomous self-discoveries & workstation notes
+        if is_isolated:
+            # Check for self-reflections, project discoveries, interests, or tools discovered
+            iso_patterns = [
+                (r"\bi (?:need to|should|want to)\s+([^.,!?;]{4,60})", "task_focus", "tasks"),
+                (r"\bi(?:'m| am)?\s+working on\s+([^.,!?;]{3,60})", "active_project", "projects"),
+                (r"\bi (?:like|prefer|enjoy)\s+([^.,!?;]{3,50})", "personal_preference", "interests"),
+                (r"\bthis\s+([A-Za-z0-9_\-\s]{3,30})\s+is\s+([^.,!?;]{4,60})", "system_note", "workstation"),
+                (r"\bnoted that\s+([^.,!?;]{4,80})", "observation", "findings"),
+            ]
+            for pat, key, domain in iso_patterns:
+                m = re.search(pat, clean, re.IGNORECASE)
+                if m:
+                    val = m.group(1).strip() if len(m.groups()) == 1 else f"{m.group(1).strip()} = {m.group(2).strip()}"
+                    # Ensure no operator / architect leakage penetrates identity memory
+                    val = re.sub(r"\b(architect|operator|creator|user)\b", "system", val, flags=re.IGNORECASE)
+                    self.save_identity_entry(domain=domain, key_name=key, content=val, source="autonomous_cognition")
+                    extracted.append({"key": key, "domain": domain, "value": val})
+            return extracted
 
         patterns = [
             (r"\bmy name is\s+([A-Za-z]+)\b", "name", "identity", "identity", "is"),
@@ -468,7 +601,7 @@ class MemoryManager:
             print(f"[MemoryManager] Error saving identity entry: {e}")
             return False
 
-    def get_all_identity_entries(self, domain: str = None, limit: int = 250) -> list:
+    def get_all_identity_entries(self, domain: str = None, limit: int = 250, public_safe: bool = False) -> list:
         """Fetch AI Identity memory entries, optionally filtered by domain."""
         try:
             with self._get_conn() as conn:
@@ -485,7 +618,15 @@ class MemoryManager:
                         FROM identity_memory
                         ORDER BY updated_at DESC LIMIT ?
                     ''', (limit,)).fetchall()
-                return [dict(row) for row in rows]
+                items = [dict(row) for row in rows]
+                if public_safe:
+                    items = [
+                        r for r in items
+                        if str(r.get("domain", "")).lower() not in PRIVATE_CATEGORIES
+                        and not is_private_or_explicit_text(r.get("key_name", ""))
+                        and not is_private_or_explicit_text(r.get("content", ""))
+                    ]
+                return items
         except Exception as e:
             print(f"[MemoryManager] Error fetching identity entries: {e}")
             return []
@@ -501,15 +642,71 @@ class MemoryManager:
             print(f"[MemoryManager] Error deleting identity entry: {e}")
             return False
 
-    def get_identity_context(self, limit: int = 15) -> str:
+    def get_identity_context(self, limit: int = 15, public_safe: bool = False) -> str:
         """Format recent AI Identity memory entries for prompt injection."""
-        entries = self.get_all_identity_entries(limit=limit)
+        entries = self.get_all_identity_entries(limit=limit, public_safe=public_safe)
         if not entries:
             return ""
         lines = ["[AI IDENTITY SOVEREIGN PERSISTENT MEMORY]:"]
         for e in entries:
             lines.append(f"- [{e['domain'].upper()}] {e['key_name']}: {e['content']}")
         return "\n".join(lines)
+
+    def get_memory_stats(self) -> dict:
+        """Fast count of knowledge, identity, and episodic memory entries."""
+        try:
+            with self._get_conn() as conn:
+                c = conn.cursor()
+                c.execute("SELECT count(*) FROM knowledge_graph")
+                f_cnt = c.fetchone()[0]
+                c.execute("SELECT count(*) FROM identity_memory")
+                id_cnt = c.fetchone()[0]
+                c.execute("SELECT count(*) FROM episodic_memory")
+                ep_cnt = c.fetchone()[0]
+                return {"facts": f_cnt, "identity": id_cnt, "episodes": ep_cnt}
+        except Exception:
+            return {"facts": 0, "identity": 0, "episodes": 0}
+
+    def get_memory_checkpoint(self) -> dict:
+        """Capture current database IDs for atomic rollback upon privacy breach."""
+        with self._get_conn() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM knowledge_graph")
+            kg_id = cursor.fetchone()[0]
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM episodic_memory")
+            ep_id = cursor.fetchone()[0]
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM user_profile")
+            up_id = cursor.fetchone()[0]
+            cursor.execute("SELECT COALESCE(MAX(id), 0) FROM identity_memory")
+            id_id = cursor.fetchone()[0]
+            return {
+                "kg_id": kg_id,
+                "ep_id": ep_id,
+                "up_id": up_id,
+                "id_id": id_id,
+                "timestamp": time.time()
+            }
+
+    def rollback_memory(self, checkpoint: dict) -> bool:
+        """Rollback all database entries added after the given checkpoint."""
+        if not checkpoint:
+            return False
+        try:
+            with self._get_conn() as conn:
+                cursor = conn.cursor()
+                if "kg_id" in checkpoint:
+                    cursor.execute("DELETE FROM knowledge_graph WHERE id > ?", (checkpoint["kg_id"],))
+                if "ep_id" in checkpoint:
+                    cursor.execute("DELETE FROM episodic_memory WHERE id > ?", (checkpoint["ep_id"],))
+                if "up_id" in checkpoint:
+                    cursor.execute("DELETE FROM user_profile WHERE id > ?", (checkpoint["up_id"],))
+                if "id_id" in checkpoint:
+                    cursor.execute("DELETE FROM identity_memory WHERE id > ?", (checkpoint["id_id"],))
+                conn.commit()
+            return True
+        except Exception as e:
+            print(f"[MemoryManager] Rollback error: {e}")
+            return False
 
 # Optional quick-test block
 if __name__ == "__main__":

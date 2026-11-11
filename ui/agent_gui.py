@@ -12,6 +12,17 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+# Load environment variables from .env
+try:
+    from dotenv import load_dotenv
+    env_file = ROOT_DIR / ".env"
+    if env_file.exists():
+        load_dotenv(dotenv_path=str(env_file))
+    else:
+        load_dotenv()
+except ImportError:
+    pass
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QTextEdit, QLineEdit, QFrame, QSplitter,
@@ -36,7 +47,7 @@ try:
 except ImportError:
     sr = None
 
-from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener
+from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener, GEMINI_MODELS, OPENROUTER_MODELS, HUGGINGFACE_MODELS
 from ui.overlays import CoordinateOverlay, CalibrationOverlay, OverseerControlPanel
 from ui.overseer_dashboard import EnhancedOverseerDashboard
 from core.workspace_bridge import WorkspaceClient, WorkspaceServer
@@ -44,7 +55,7 @@ from memory.memory_manager import MemoryManager
 from memory.character_manager import CharacterManager
 from studio.image_studio_manager import ImageStudioManager, MODEL_CATALOG, LORA_CATALOG, UPSCALER_CATALOG
 from ui.agent_tabs import AgentMemoryTab, AgentStudioTab, AgentCharactersTab, AgentMonitorTab
-from ui.agent_comms_tab import AgentCommsTab
+from ui.agent_copilot_tab import AgentCopilotTab
 
 # Cyberpunk Palette
 C = {
@@ -384,6 +395,100 @@ class MiniStatusHUD(QWidget):
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
 
+
+class PrivacyBreachDialog(QDialog):
+    """Dedicated popup-status window with Rewind action when a privacy breach occurs."""
+    def __init__(self, breach, on_rewind_callback=None, parent=None):
+        super().__init__(parent)
+        self.breach = breach
+        self.on_rewind_callback = on_rewind_callback
+        self.setWindowTitle("Privacy Breach Detected!")
+        self.setFixedSize(540, 240)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #120409;
+                border: 2px solid #ff0055;
+                border-radius: 10px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
+
+        # Header
+        h_row = QHBoxLayout()
+        icon_lbl = QLabel("🚨")
+        icon_lbl.setFont(QFont("Segoe UI Emoji", 20))
+        h_row.addWidget(icon_lbl)
+
+        title_box = QVBoxLayout()
+        title_lbl = QLabel("PRIVACY BREACH DETECTED!")
+        title_lbl.setFont(QFont("Consolas", 13, QFont.Weight.Bold))
+        title_lbl.setStyleSheet("color: #ff0055; font-weight: bold; border: none; background: transparent;")
+        sub_lbl = QLabel("Observer Awareness / Immersion Rupture")
+        sub_lbl.setFont(QFont("Consolas", 8))
+        sub_lbl.setStyleSheet("color: #ff88a3; border: none; background: transparent;")
+        title_box.addWidget(title_lbl)
+        title_box.addWidget(sub_lbl)
+        h_row.addLayout(title_box)
+        h_row.addStretch()
+        layout.addLayout(h_row)
+
+        # Body
+        expl = getattr(breach, "explanation", "Observer awareness detected")
+        chan = getattr(breach, "channel", "verbal_output").replace("_", " ").title()
+        phrase = getattr(breach, "matched_phrase", "")
+        snip = getattr(breach, "snippet", "")
+
+        body_lbl = QLabel(
+            f"<b>Incident:</b> {expl}<br/>"
+            f"<b>Channel:</b> {chan}<br/>"
+            f"<b>Detected Offending Phrase:</b> <span style='color: #00ffff; font-family: Consolas;'>\"{phrase}\"</span><br/>"
+            f"<b>Excerpt:</b> <i style='color: #ffd1dc;'>{snip}</i>"
+        )
+        body_lbl.setFont(QFont("Segoe UI", 9))
+        body_lbl.setStyleSheet("color: #f1f5f9; background: #200710; padding: 10px; border-radius: 6px; border: 1px solid #4a0d20;")
+        body_lbl.setWordWrap(True)
+        layout.addWidget(body_lbl)
+
+        # Buttons
+        b_row = QHBoxLayout()
+        b_row.addStretch()
+
+        btn_dismiss = QPushButton("Dismiss")
+        btn_dismiss.setFixedHeight(32)
+        btn_dismiss.setStyleSheet("background: transparent; color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 4px 14px;")
+        btn_dismiss.clicked.connect(self.close)
+        b_row.addWidget(btn_dismiss)
+
+        btn_rewind = QPushButton("⏪ REWIND TO PRE-BREACH STATE")
+        btn_rewind.setFixedHeight(32)
+        btn_rewind.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        btn_rewind.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff0055, stop:1 #cc0044);
+                color: #ffffff;
+                border: 1px solid #ff3377;
+                border-radius: 5px;
+                padding: 4px 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #ff1a6b;
+            }
+        """)
+        btn_rewind.clicked.connect(self._do_rewind)
+        b_row.addWidget(btn_rewind)
+        layout.addLayout(b_row)
+
+    def _do_rewind(self):
+        if self.on_rewind_callback:
+            self.on_rewind_callback()
+        self.accept()
+
+
 class AgentSignals(QObject):
     log_message = pyqtSignal(str, str)
     status_updated = pyqtSignal(str, str)
@@ -398,6 +503,7 @@ class AgentSignals(QObject):
     speech_playback_started = pyqtSignal()
     speech_playback_finished = pyqtSignal()
     run_on_gui = pyqtSignal(object)  # marshals a callable from worker threads onto the GUI thread
+    privacy_breach_detected = pyqtSignal(object, bool)
 
 
 class AgentMainWindow(QMainWindow):
@@ -430,8 +536,11 @@ class AgentMainWindow(QMainWindow):
         self.signals.speech_playback_started.connect(self._on_speech_playback_started)
         self.signals.speech_playback_finished.connect(self._on_speech_playback_finished)
         self.signals.run_on_gui.connect(self._run_gui_callable)
+        self.signals.privacy_breach_detected.connect(self._show_privacy_breach_alert)
 
         self.agent = AlphaAgent()
+        self.agent.on_privacy_breach = lambda b, auto_healed=False: self.signals.privacy_breach_detected.emit(b, auto_healed)
+        self.is_thought_input_mode = False
         p_name = self.agent.get_active_persona_name() if hasattr(self.agent, "get_active_persona_name") else "Alpha"
         self.setWindowTitle(f"AlphaCore // {p_name.upper()} Autonomous Desktop Agent")
         
@@ -496,105 +605,103 @@ class AgentMainWindow(QMainWindow):
 
         self._build_ui()
         
-        # --- Multi-Workspace Bridge Server (Runs ONLY on Host AI Node / Workplace 2) ---
+        # --- Multi-Workspace & Detached Bridge Server (Hosts AI Node & Telemetry) ---
         self.ws_server = None
-        is_worker = ("--aster-worker" in sys.argv) or ("--worker" in sys.argv) or ("--host" in sys.argv)
-        if is_worker:
-            try:
-                from core.workspace_bridge import WorkspaceServer
-                self.ws_server = WorkspaceServer(host="0.0.0.0", port=8766)
-                
-                def handle_remote_command(cmd, payload):
-                    def _dispatch():
-                        try:
-                            if cmd in ("inject_thought", "thought_inject"):
-                                txt = payload.get("text", "").strip()
-                                if txt:
-                                    if getattr(self.agent, "identity_mode", False):
-                                        self._on_overseer_thought_injected(txt)
-                                    else:
-                                        self._run_task(txt)
-                            elif cmd in ("voice_input", "inject_voice", "voice_inject"):
-                                txt = payload.get("text", "").strip()
-                                if txt:
-                                    if getattr(self.agent, "identity_mode", False):
-                                        self._on_overseer_thought_injected(txt)
-                                    else:
-                                        self._run_task(txt)
-                            elif cmd in ("run_task", "user_prompt"):
-                                txt = payload.get("text") or payload.get("goal") or ""
-                                txt = txt.strip()
-                                if txt:
-                                    self._run_task(txt)
-                            elif cmd in ("start_agent", "power_on"):
-                                self.is_connected = True
-                                ident = bool(payload.get("identity_mode", False))
-                                unobs = bool(payload.get("unobserved_mode", False))
-                                auto = bool(payload.get("autonomous_mode", False))
-                                self.agent.identity_mode = ident
-                                self.agent.unobserved_mode = unobs
-                                self.agent.autonomous_mode = auto
-                                if ident or auto:
-                                    self.autonomous_loop_timer.start(30000)
-                                self._append_log("[REMOTE] Overseer started AI Node.", C["neon_green"])
-                                self._update_status("ACTIVE // SOVEREIGN", C["neon_green"])
-                                if hasattr(self, "ws_server") and self.ws_server:
-                                    self.ws_server.broadcast_telemetry({"agent_state": "ACTIVE // SOVEREIGN", "is_connected": True})
-                            elif cmd in ("stop_agent", "power_off"):
-                                self.is_connected = False
-                                if self.agent.is_running:
-                                    self.agent.abort()
-                                self.autonomous_loop_timer.stop()
-                                self._append_log("[REMOTE] Overseer stopped AI Node.", C["neon_yellow"])
-                                self._update_status("STANDBY // SLEEPING", C["text_dim"])
-                                if hasattr(self, "ws_server") and self.ws_server:
-                                    self.ws_server.broadcast_telemetry({"agent_state": "STANDBY // SLEEPING", "is_connected": False})
-                            elif cmd in ("set_mood", "mood_inject"):
-                                mood = payload.get("mood", "").strip()
-                                if mood:
-                                    self._on_overseer_mood_selected(mood)
-                            elif cmd in ("trigger_action", "action_inject"):
-                                impulse = payload.get("impulse", "").strip()
-                                if impulse:
-                                    self.is_connected = True
-                                    self._on_overseer_action_requested(impulse)
-                            elif cmd in ("toggle_pause", "pause"):
-                                paused = bool(payload.get("paused", False))
-                                self._on_overseer_pause_toggled(paused)
-                            elif cmd in ("emergency_halt", "halt"):
-                                self._on_overseer_emergency_halt()
-                            elif cmd in ("trigger_cycle", "tick"):
-                                self.is_connected = True
-                                if not getattr(self.agent, "identity_mode", False) and not getattr(self.agent, "autonomous_mode", False):
-                                    self.agent.identity_mode = True
-                                self._on_autonomous_loop_tick()
-                            elif cmd in ("set_modes", "modes_sync"):
-                                ident = payload.get("identity_mode", getattr(self.agent, "identity_mode", False))
-                                unobs = payload.get("unobserved_mode", getattr(self.agent, "unobserved_mode", False))
-                                auto = payload.get("autonomous_mode", getattr(self.agent, "autonomous_mode", False))
-                                self.agent.identity_mode = bool(ident)
-                                self.agent.unobserved_mode = bool(unobs)
-                                self.agent.autonomous_mode = bool(auto)
-                                if "is_connected" in payload:
-                                    self.is_connected = bool(payload["is_connected"])
-                                if self.is_connected and (self.agent.identity_mode or self.agent.autonomous_mode):
-                                    self.autonomous_loop_timer.start(5000)
-                                    print("[AlphaLive Remote] Identity/Autonomous Mode active on Workplace 2.", flush=True)
+        try:
+            from core.workspace_bridge import WorkspaceServer
+            self.ws_server = WorkspaceServer(host="0.0.0.0", port=8766)
+            
+            def handle_remote_command(cmd, payload):
+                def _dispatch():
+                    try:
+                        if cmd in ("inject_thought", "thought_inject"):
+                            txt = payload.get("text", "").strip()
+                            if txt:
+                                if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False):
+                                    self._on_overseer_thought_injected(txt)
                                 else:
-                                    self.autonomous_loop_timer.stop()
-                                    print("[AlphaLive Remote] Identity/Autonomous Mode stopped on Workplace 2.", flush=True)
-                            elif cmd in ("restart_worker", "shutdown_worker", "kill_worker"):
-                                print("[AlphaLive Remote] Received shutdown/restart request from Overseer.", flush=True)
-                                QApplication.quit()
-                        except Exception as err:
-                            print(f"[AlphaLive] Remote command dispatch error ({cmd}): {err}", flush=True)
-                    self.signals.run_on_gui.emit(_dispatch)
-                
-                self.ws_server.on_command = handle_remote_command
-                self.ws_server.start()
-                print("[AlphaLive] Workspace Bridge Server actively listening on port 8766.", flush=True)
-            except Exception as e:
-                print(f"[AlphaLive] Failed to start WorkspaceServer: {e}", flush=True)
+                                    self._run_task(txt)
+                        elif cmd in ("voice_input", "inject_voice", "voice_inject"):
+                            txt = payload.get("text", "").strip()
+                            if txt:
+                                if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False):
+                                    self._on_overseer_thought_injected(txt)
+                                else:
+                                    self._run_task(txt)
+                        elif cmd in ("run_task", "user_prompt"):
+                            txt = payload.get("text") or payload.get("goal") or ""
+                            txt = txt.strip()
+                            if txt:
+                                self._run_task(txt)
+                        elif cmd in ("start_agent", "power_on"):
+                            self.is_connected = True
+                            ident = bool(payload.get("identity_mode", False))
+                            unobs = bool(payload.get("unobserved_mode", False))
+                            auto = bool(payload.get("autonomous_mode", False))
+                            self.agent.identity_mode = ident
+                            self.agent.unobserved_mode = unobs
+                            self.agent.autonomous_mode = auto
+                            if ident or auto or unobs:
+                                self.autonomous_loop_timer.start(5000)
+                            self._append_log("[REMOTE] Remote Overseer / Copilot started AI Node.", C["neon_green"])
+                            self._update_status("ACTIVE // SOVEREIGN", C["neon_green"])
+                            if hasattr(self, "ws_server") and self.ws_server:
+                                self.ws_server.broadcast_telemetry({"agent_state": "ACTIVE // SOVEREIGN", "is_connected": True})
+                        elif cmd in ("stop_agent", "power_off"):
+                            self.is_connected = False
+                            if self.agent.is_running:
+                                self.agent.abort()
+                            self.autonomous_loop_timer.stop()
+                            self._append_log("[REMOTE] Remote Overseer / Copilot stopped AI Node.", C["neon_yellow"])
+                            self._update_status("STANDBY // SLEEPING", C["text_dim"])
+                            if hasattr(self, "ws_server") and self.ws_server:
+                                self.ws_server.broadcast_telemetry({"agent_state": "STANDBY // SLEEPING", "is_connected": False})
+                        elif cmd in ("set_mood", "mood_inject"):
+                            mood = payload.get("mood", "").strip()
+                            if mood:
+                                self._on_overseer_mood_selected(mood)
+                        elif cmd in ("trigger_action", "action_inject"):
+                            impulse = payload.get("impulse", "").strip()
+                            if impulse:
+                                self.is_connected = True
+                                self._on_overseer_action_requested(impulse)
+                        elif cmd in ("toggle_pause", "pause"):
+                            paused = bool(payload.get("paused", False))
+                            self._on_overseer_pause_toggled(paused)
+                        elif cmd in ("emergency_halt", "halt"):
+                            self._on_overseer_emergency_halt()
+                        elif cmd in ("trigger_cycle", "tick"):
+                            self.is_connected = True
+                            if not getattr(self.agent, "identity_mode", False) and not getattr(self.agent, "autonomous_mode", False):
+                                self.agent.identity_mode = True
+                            self._on_autonomous_loop_tick()
+                        elif cmd in ("set_modes", "modes_sync"):
+                            ident = payload.get("identity_mode", getattr(self.agent, "identity_mode", False))
+                            unobs = payload.get("unobserved_mode", getattr(self.agent, "unobserved_mode", False))
+                            auto = payload.get("autonomous_mode", getattr(self.agent, "autonomous_mode", False))
+                            self.agent.identity_mode = bool(ident)
+                            self.agent.unobserved_mode = bool(unobs)
+                            self.agent.autonomous_mode = bool(auto)
+                            if "is_connected" in payload:
+                                self.is_connected = bool(payload["is_connected"])
+                            if self.is_connected and (self.agent.identity_mode or self.agent.unobserved_mode or self.agent.autonomous_mode):
+                                self.autonomous_loop_timer.start(5000)
+                                print("[AlphaLive Remote] Persona/Sanctuary/Autonomous Mode active on Workplace.", flush=True)
+                            else:
+                                self.autonomous_loop_timer.stop()
+                                print("[AlphaLive Remote] Persona/Sanctuary/Autonomous Mode stopped on Workplace.", flush=True)
+                        elif cmd in ("restart_worker", "shutdown_worker", "kill_worker"):
+                            print("[AlphaLive Remote] Received shutdown/restart request from Overseer.", flush=True)
+                            QApplication.quit()
+                    except Exception as err:
+                        print(f"[AlphaLive] Remote command dispatch error ({cmd}): {err}", flush=True)
+                self.signals.run_on_gui.emit(_dispatch)
+            
+            self.ws_server.on_command = handle_remote_command
+            self.ws_server.start()
+            print("[AlphaLive] Workspace Bridge Server actively listening on port 8766 (LAN & Loopback).", flush=True)
+        except Exception as e:
+            print(f"[AlphaLive] Failed to start WorkspaceServer: {e}", flush=True)
             
         self._update_mic_ui_style()
         self._update_session_display()
@@ -773,6 +880,14 @@ class AgentMainWindow(QMainWindow):
         if not new_key: return
         os.environ["GEMINI_API_KEY"] = new_key
         try:
+            from dotenv import set_key
+            env_file = ROOT_DIR / ".env"
+            if not env_file.exists():
+                env_file.touch()
+            set_key(str(env_file), "GEMINI_API_KEY", new_key)
+        except Exception:
+            pass
+        try:
             from google import genai
             self.agent.client = genai.Client(api_key=new_key)
             self.agent.voice.client = self.agent.client
@@ -843,11 +958,93 @@ class AgentMainWindow(QMainWindow):
                 self._append_log(f"[ENDPOINT ERROR] Failed to save key: {e}", C["neon_red"])
                 self._update_status("KEY SAVE ERROR", C["neon_red"])
 
+    def _save_gemini_model_setting(self):
+        if not hasattr(self, "combo_gemini_model"):
+            return
+        chosen = self.combo_gemini_model.currentData() or self.combo_gemini_model.currentText().strip()
+        if chosen:
+            self.agent.set_gemini_model(chosen)
+            cfg_path = ROOT_DIR / "config.json"
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                    cfg.setdefault("Global", {})["GeminiModel"] = chosen
+                    with open(cfg_path, "w", encoding="utf-8") as f:
+                        json.dump(cfg, f, indent=4)
+                    self._append_log(f"[ENGINE CONFIG] Gemini Model set: {chosen}", C["neon_cyan"])
+                except Exception as e:
+                    self._append_log(f"[CONFIG ERROR] Failed to save Gemini model: {e}", C["neon_red"])
+
+    def _save_openrouter_settings(self):
+        if not hasattr(self, "input_openrouter_key"):
+            return
+        key = self.input_openrouter_key.text().strip()
+        model = self.combo_openrouter_model.currentText().strip()
+        self.agent.set_openrouter_config(api_key=key, model=model)
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                g = cfg.setdefault("Global", {})
+                g["OpenRouterApiKey"] = key
+                g["OpenRouterModel"] = model
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+                self._append_log(f"[ENGINE CONFIG] OpenRouter configured: {model}", C["neon_yellow"])
+            except Exception as e:
+                self._append_log(f"[CONFIG ERROR] Failed to save OpenRouter config: {e}", C["neon_red"])
+        if key:
+            try:
+                from dotenv import set_key
+                env_file = ROOT_DIR / ".env"
+                if not env_file.exists():
+                    env_file.touch()
+                set_key(str(env_file), "OPENROUTER_API_KEY", key)
+            except Exception:
+                pass
+
+    def _save_huggingface_settings(self):
+        if not hasattr(self, "input_hf_key"):
+            return
+        key = self.input_hf_key.text().strip()
+        model = self.combo_hf_model.currentText().strip()
+        ep = self.input_hf_endpoint.text().strip() or "https://router.huggingface.co/v1"
+        self.agent.set_huggingface_config(api_key=key, model=model, endpoint=ep)
+        cfg_path = ROOT_DIR / "config.json"
+        if cfg_path.exists():
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                g = cfg.setdefault("Global", {})
+                g["HuggingFaceApiKey"] = key
+                g["HuggingFaceModel"] = model
+                g["HuggingFaceEndpoint"] = ep
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4)
+                self._append_log(f"[ENGINE CONFIG] HuggingFace Inference configured: {model}", C["neon_magenta"])
+            except Exception as e:
+                self._append_log(f"[CONFIG ERROR] Failed to save HuggingFace config: {e}", C["neon_red"])
+        if key:
+            try:
+                from dotenv import set_key
+                env_file = ROOT_DIR / ".env"
+                if not env_file.exists():
+                    env_file.touch()
+                set_key(str(env_file), "HF_TOKEN", key)
+            except Exception:
+                pass
+
     def _save_all_engine_settings(self):
         self._save_modal_endpoint()
         self._save_modal_model()
         self._save_modal_api_key()
         self._save_gemini_key()
+        self._save_gemini_model_setting()
+        self._save_openrouter_settings()
+        self._save_huggingface_settings()
+        self._update_backend_style()
         self._update_status("ENGINE SETTINGS SAVED", C["neon_green"])
 
     def _detect_modal_model_async(self):
@@ -1024,9 +1221,66 @@ class AgentMainWindow(QMainWindow):
         self.btn_backend_gemini.setFixedHeight(32)
         self.btn_backend_gemini.clicked.connect(lambda: self._select_backend("gemini"))
 
-        self.btn_backend_modal = QPushButton("🔥 Custom Endpoint (vLLM / Modal)")
+        self.btn_backend_modal = QPushButton("🔥 Custom / Modal vLLM")
         self.btn_backend_modal.setFixedHeight(32)
         self.btn_backend_modal.clicked.connect(lambda: self._select_backend("modal_qwen"))
+
+        self.btn_backend_openrouter = QPushButton("🌐 OpenRouter API")
+        self.btn_backend_openrouter.setFixedHeight(32)
+        self.btn_backend_openrouter.clicked.connect(lambda: self._select_backend("openrouter"))
+
+        self.btn_backend_hf = QPushButton("🤗 HuggingFace Inference")
+        self.btn_backend_hf.setFixedHeight(32)
+        self.btn_backend_hf.clicked.connect(lambda: self._select_backend("huggingface"))
+
+        # Gemini Model Dropdown
+        self.combo_gemini_model = QComboBox()
+        self.combo_gemini_model.setFixedHeight(30)
+        self.combo_gemini_model.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        for mid, mlabel in GEMINI_MODELS:
+            self.combo_gemini_model.addItem(f"{mlabel} ({mid.replace('models/', '')})", mid)
+        cur_gem = getattr(self.agent, "model_name", "models/gemini-2.5-flash")
+        for i in range(self.combo_gemini_model.count()):
+            if self.combo_gemini_model.itemData(i) == cur_gem:
+                self.combo_gemini_model.setCurrentIndex(i)
+                break
+
+        # OpenRouter Model and Key
+        self.input_openrouter_key = QLineEdit(getattr(self.agent, "openrouter_api_key", "") or os.getenv("OPENROUTER_API_KEY", ""))
+        self.input_openrouter_key.setFixedHeight(30)
+        self.input_openrouter_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_openrouter_key.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        self.input_openrouter_key.setPlaceholderText("sk-or-v1-...")
+
+        self.combo_openrouter_model = QComboBox()
+        self.combo_openrouter_model.setFixedHeight(30)
+        self.combo_openrouter_model.setEditable(True)
+        self.combo_openrouter_model.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        for mid, mlabel in OPENROUTER_MODELS:
+            self.combo_openrouter_model.addItem(mid)
+        cur_or = getattr(self.agent, "openrouter_model", OPENROUTER_MODELS[0][0])
+        self.combo_openrouter_model.setCurrentText(cur_or)
+
+        # HuggingFace Model, Key, and Endpoint
+        self.input_hf_key = QLineEdit(getattr(self.agent, "hf_api_key", "") or os.getenv("HF_TOKEN", "") or os.getenv("HUGGINGFACE_API_KEY", ""))
+        self.input_hf_key.setFixedHeight(30)
+        self.input_hf_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_hf_key.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        self.input_hf_key.setPlaceholderText("hf_...")
+
+        self.combo_hf_model = QComboBox()
+        self.combo_hf_model.setFixedHeight(30)
+        self.combo_hf_model.setEditable(True)
+        self.combo_hf_model.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        for mid, mlabel in HUGGINGFACE_MODELS:
+            self.combo_hf_model.addItem(mid)
+        cur_hf = getattr(self.agent, "hf_model", HUGGINGFACE_MODELS[0][0])
+        self.combo_hf_model.setCurrentText(cur_hf)
+
+        self.input_hf_endpoint = QLineEdit(getattr(self.agent, "hf_endpoint", "https://router.huggingface.co/v1"))
+        self.input_hf_endpoint.setFixedHeight(30)
+        self.input_hf_endpoint.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 8px; font-family: Consolas;")
+        self.input_hf_endpoint.setPlaceholderText("https://router.huggingface.co/v1")
 
         self.btn_deploy_vllm = QPushButton("🚀 DEPLOY ALL-IN-ONE BACKEND TO MODAL")
         self.btn_deploy_vllm.setFixedHeight(32)
@@ -1061,7 +1315,7 @@ class AgentMainWindow(QMainWindow):
             }}
             QPushButton:hover {{ background: {C['neon_yellow']}; color: #000; }}
         """)
-        self.btn_cache_assets.setToolTip("Runs 'modal run deploy/deploy.py' to download, sync, and cache all model & LoRA safetensors to the shared volume (hf-hub-cache)")
+        self.btn_cache_assets.setToolTip("Runs 'modal run scripts/deploy.py' to download, sync, and cache all model & LoRA safetensors to the shared volume (hf-hub-cache)")
         self.btn_cache_assets.clicked.connect(self._cache_modal_assets)
 
         # Custom System Instructions editor
@@ -1214,6 +1468,94 @@ class AgentMainWindow(QMainWindow):
         top_bar.addWidget(self.btn_clear)
         layout.addLayout(top_bar)
 
+        # ---------------------------------------------------------------------
+        # PRIVACY BREACH ALERT CARD (High-Priority Alert Banner with Rewind)
+        # ---------------------------------------------------------------------
+        self.card_privacy_breach = QFrame()
+        self.card_privacy_breach.setStyleSheet("""
+            QFrame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2b0813, stop:1 #1a050d);
+                border: 2px solid #ff0055;
+                border-radius: 8px;
+            }
+        """)
+        breach_layout = QVBoxLayout(self.card_privacy_breach)
+        breach_layout.setContentsMargins(12, 10, 12, 10)
+        breach_layout.setSpacing(6)
+
+        hdr_row = QHBoxLayout()
+        lbl_breach_icon = QLabel("🚨")
+        lbl_breach_icon.setFont(QFont("Segoe UI Emoji", 14))
+        hdr_row.addWidget(lbl_breach_icon)
+
+        lbl_breach_title = QLabel("PRIVACY BREACH DETECTED!")
+        lbl_breach_title.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        lbl_breach_title.setStyleSheet("color: #ff0055; font-weight: bold; border: none; background: transparent;")
+        hdr_row.addWidget(lbl_breach_title)
+
+        self.lbl_breach_badge = QLabel("OBSERVER AWARENESS")
+        self.lbl_breach_badge.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.lbl_breach_badge.setStyleSheet("background: #ff0055; color: #ffffff; padding: 2px 6px; border-radius: 4px; font-weight: bold;")
+        hdr_row.addWidget(self.lbl_breach_badge)
+        hdr_row.addStretch()
+
+        btn_close_breach = QPushButton("✕")
+        btn_close_breach.setFixedSize(22, 22)
+        btn_close_breach.setStyleSheet("background: transparent; color: #ff6688; border: none; font-weight: bold; font-size: 11pt;")
+        btn_close_breach.clicked.connect(lambda: self.card_privacy_breach.setVisible(False))
+        hdr_row.addWidget(btn_close_breach)
+        breach_layout.addLayout(hdr_row)
+
+        self.lbl_breach_details = QLabel("Alpha recognized an external observer or operator.")
+        self.lbl_breach_details.setFont(QFont("Segoe UI", 9))
+        self.lbl_breach_details.setStyleSheet("color: #ffd1dc; border: none; background: transparent;")
+        self.lbl_breach_details.setWordWrap(True)
+        breach_layout.addWidget(self.lbl_breach_details)
+
+        act_row = QHBoxLayout()
+        self.btn_rewind_breach = QPushButton("⏪ REWIND TO PRE-BREACH STATE")
+        self.btn_rewind_breach.setFixedHeight(30)
+        self.btn_rewind_breach.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.btn_rewind_breach.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff0055, stop:1 #cc0044);
+                color: #ffffff;
+                border: 1px solid #ff3377;
+                border-radius: 5px;
+                padding: 4px 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: #ff1a6b;
+                border: 1px solid #ffffff;
+            }
+        """)
+        self.btn_rewind_breach.clicked.connect(self._on_rewind_breach)
+        act_row.addWidget(self.btn_rewind_breach)
+
+        self.btn_breach_inject = QPushButton("💉 INJECT SUBCONSCIOUS CORRECTION")
+        self.btn_breach_inject.setFixedHeight(30)
+        self.btn_breach_inject.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.btn_breach_inject.setStyleSheet("""
+            QPushButton {
+                background: #0d2847;
+                color: #00ffff;
+                border: 1px solid #00aaff;
+                border-radius: 5px;
+                padding: 4px 12px;
+            }
+            QPushButton:hover {
+                background: #153c66;
+            }
+        """)
+        self.btn_breach_inject.clicked.connect(self._on_breach_inject_clicked)
+        act_row.addWidget(self.btn_breach_inject)
+        act_row.addStretch()
+
+        breach_layout.addLayout(act_row)
+        self.card_privacy_breach.setVisible(False)
+        layout.addWidget(self.card_privacy_breach)
+
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFont(QFont("Segoe UI", 11))
@@ -1241,10 +1583,13 @@ class AgentMainWindow(QMainWindow):
         self.typing_timer.timeout.connect(self._animate_typing_indicator)
 
         inp_row = QHBoxLayout()
-        prompt_lbl = QLabel(">>")
-        prompt_lbl.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
-        prompt_lbl.setStyleSheet(f"color: {C['neon_cyan']}; border: none;")
-        inp_row.addWidget(prompt_lbl)
+        self.btn_input_mode = QPushButton("💬 PROMPT")
+        self.btn_input_mode.setFixedSize(92, 36)
+        self.btn_input_mode.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_input_mode.setStyleSheet(f"background: #0f172a; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_input_mode.setToolTip("Toggle Input Channel: '💬 PROMPT' (Standard instruction) vs '💉 THOUGHT' (Subconscious thought injection)")
+        self.btn_input_mode.clicked.connect(self._toggle_input_mode)
+        inp_row.addWidget(self.btn_input_mode)
 
         self.cmd_input = QLineEdit()
         self.cmd_input.setFixedHeight(36)
@@ -1440,26 +1785,68 @@ class AgentMainWindow(QMainWindow):
         # --- TAB 2: COGNITIVE ENGINE & ENDPOINTS ---
         tab_engine, l_engine = _make_tab_container()
         
-        eng_sel_row = QHBoxLayout()
+        lbl_eng_title = QLabel("SELECT ACTIVE COGNITIVE ENGINE")
+        lbl_eng_title.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; margin-bottom: 4px;")
+        l_engine.addWidget(lbl_eng_title)
+
+        eng_grid = QGridLayout()
+        eng_grid.setSpacing(6)
         self.btn_backend_gemini.setFixedHeight(34)
         self.btn_backend_modal.setFixedHeight(34)
-        eng_sel_row.addWidget(self.btn_backend_gemini, 1)
-        eng_sel_row.addWidget(self.btn_backend_modal, 1)
-        l_engine.addLayout(eng_sel_row)
+        self.btn_backend_openrouter.setFixedHeight(34)
+        self.btn_backend_hf.setFixedHeight(34)
+        eng_grid.addWidget(self.btn_backend_gemini, 0, 0)
+        eng_grid.addWidget(self.btn_backend_modal, 0, 1)
+        eng_grid.addWidget(self.btn_backend_openrouter, 1, 0)
+        eng_grid.addWidget(self.btn_backend_hf, 1, 1)
+        l_engine.addLayout(eng_grid)
 
-        lbl_ep = QLabel("CUSTOM ENDPOINT URL")
-        lbl_ep.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; margin-top: 10px;")
-        l_engine.addWidget(lbl_ep)
+        # 1. Google Gemini Config Card
+        card_gemini = QFrame()
+        card_gemini.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px; margin-top: 8px;")
+        cg_l = QVBoxLayout(card_gemini)
+        cg_l.setSpacing(6)
 
+        lbl_g_head = QLabel("⚡ GOOGLE GEMINI ENGINE CONFIGURATION")
+        lbl_g_head.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        cg_l.addWidget(lbl_g_head)
+
+        lbl_g_model = QLabel("GEMINI MODEL:")
+        lbl_g_model.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cg_l.addWidget(lbl_g_model)
+        cg_l.addWidget(self.combo_gemini_model)
+
+        lbl_g_key = QLabel("GEMINI API KEY:")
+        lbl_g_key.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cg_l.addWidget(lbl_g_key)
+        self.input_gemini_key = QLineEdit(os.environ.get("GEMINI_API_KEY", ""))
+        self.input_gemini_key.setFixedHeight(30)
+        self.input_gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.input_gemini_key.setStyleSheet(input_base_style)
+        cg_l.addWidget(self.input_gemini_key)
+        l_engine.addWidget(card_gemini)
+
+        # 2. Custom / Modal vLLM Config Card
+        card_modal = QFrame()
+        card_modal.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px; margin-top: 8px;")
+        cm_l = QVBoxLayout(card_modal)
+        cm_l.setSpacing(6)
+
+        lbl_m_head = QLabel("🔥 CUSTOM ENDPOINT & MODAL vLLM CONFIGURATION")
+        lbl_m_head.setStyleSheet(f"color: {C['neon_red']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        cm_l.addWidget(lbl_m_head)
+
+        lbl_ep = QLabel("CUSTOM ENDPOINT URL:")
+        lbl_ep.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cm_l.addWidget(lbl_ep)
         self.input_modal_endpoint = QLineEdit(getattr(self.agent, "modal_endpoint", ""))
         self.input_modal_endpoint.setFixedHeight(30)
         self.input_modal_endpoint.setStyleSheet(input_base_style)
-        l_engine.addWidget(self.input_modal_endpoint)
+        cm_l.addWidget(self.input_modal_endpoint)
 
-        lbl_model = QLabel("SERVED MODEL ID")
-        lbl_model.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
-        l_engine.addWidget(lbl_model)
-
+        lbl_model = QLabel("SERVED MODEL ID:")
+        lbl_model.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cm_l.addWidget(lbl_model)
         model_row = QHBoxLayout()
         self.input_modal_model = QLineEdit(getattr(self.agent, "modal_model", ""))
         self.input_modal_model.setFixedHeight(30)
@@ -1471,34 +1858,70 @@ class AgentMainWindow(QMainWindow):
         self.btn_detect_model.setStyleSheet(btn_base_style)
         self.btn_detect_model.clicked.connect(self._detect_modal_model_async)
         model_row.addWidget(self.btn_detect_model)
-        l_engine.addLayout(model_row)
+        cm_l.addLayout(model_row)
 
-        lbl_key = QLabel("ENDPOINT API KEY (Optional Bearer Token)")
-        lbl_key.setStyleSheet(f"color: {C['text_dim']}; font-weight: bold; font-family: Consolas;")
-        l_engine.addWidget(lbl_key)
-
+        lbl_key = QLabel("ENDPOINT API KEY (Optional Bearer Token):")
+        lbl_key.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cm_l.addWidget(lbl_key)
         self.input_modal_key = QLineEdit(getattr(self.agent, "modal_api_key", ""))
         self.input_modal_key.setFixedHeight(30)
         self.input_modal_key.setEchoMode(QLineEdit.EchoMode.Password)
         self.input_modal_key.setStyleSheet(input_base_style)
-        l_engine.addWidget(self.input_modal_key)
+        cm_l.addWidget(self.input_modal_key)
 
-        import os
-        lbl_gem = QLabel("GOOGLE GEMINI API KEY")
-        lbl_gem.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
-        l_engine.addWidget(lbl_gem)
+        cm_l.addWidget(self.btn_deploy_vllm)
+        cm_l.addWidget(self.btn_cache_assets)
+        l_engine.addWidget(card_modal)
 
-        self.input_gemini_key = QLineEdit(os.environ.get("GEMINI_API_KEY", ""))
-        self.input_gemini_key.setFixedHeight(30)
-        self.input_gemini_key.setEchoMode(QLineEdit.EchoMode.Password)
-        self.input_gemini_key.setStyleSheet(input_base_style)
-        l_engine.addWidget(self.input_gemini_key)
+        # 3. OpenRouter API Config Card
+        card_or = QFrame()
+        card_or.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px; margin-top: 8px;")
+        cor_l = QVBoxLayout(card_or)
+        cor_l.setSpacing(6)
 
-        l_engine.addWidget(self.btn_deploy_vllm)
-        l_engine.addWidget(self.btn_cache_assets)
-        
+        lbl_or_head = QLabel("🌐 OPENROUTER API CONFIGURATION")
+        lbl_or_head.setStyleSheet(f"color: {C['neon_yellow']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        cor_l.addWidget(lbl_or_head)
+
+        lbl_or_m = QLabel("OPENROUTER MODEL (Select or Type Model ID):")
+        lbl_or_m.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cor_l.addWidget(lbl_or_m)
+        cor_l.addWidget(self.combo_openrouter_model)
+
+        lbl_or_k = QLabel("OPENROUTER API KEY:")
+        lbl_or_k.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        cor_l.addWidget(lbl_or_k)
+        cor_l.addWidget(self.input_openrouter_key)
+        l_engine.addWidget(card_or)
+
+        # 4. HuggingFace Inference Config Card
+        card_hf = QFrame()
+        card_hf.setStyleSheet(f"background: {C['bg_card']}; border: 1px solid {C['border']}; border-radius: 6px; padding: 10px; margin-top: 8px;")
+        chf_l = QVBoxLayout(card_hf)
+        chf_l.setSpacing(6)
+
+        lbl_hf_head = QLabel("🤗 HUGGINGFACE INFERENCE CONFIGURATION")
+        lbl_hf_head.setStyleSheet(f"color: {C['neon_magenta']}; font-weight: bold; font-family: Consolas; font-size: 11px;")
+        chf_l.addWidget(lbl_hf_head)
+
+        lbl_hf_m = QLabel("HUGGINGFACE MODEL REPO ID (Select or Type):")
+        lbl_hf_m.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        chf_l.addWidget(lbl_hf_m)
+        chf_l.addWidget(self.combo_hf_model)
+
+        lbl_hf_k = QLabel("HUGGINGFACE USER ACCESS TOKEN (HF_TOKEN):")
+        lbl_hf_k.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        chf_l.addWidget(lbl_hf_k)
+        chf_l.addWidget(self.input_hf_key)
+
+        lbl_hf_ep = QLabel("HUGGINGFACE INFERENCE ENDPOINT URL:")
+        lbl_hf_ep.setStyleSheet(f"color: {C['text_dim']}; font-size: 10px; font-family: Consolas;")
+        chf_l.addWidget(lbl_hf_ep)
+        chf_l.addWidget(self.input_hf_endpoint)
+        l_engine.addWidget(card_hf)
+
         l_engine.addStretch()
-        btn_save_engine = QPushButton("💾 SAVE & APPLY ENGINE SETTINGS")
+        btn_save_engine = QPushButton("💾 SAVE & APPLY ALL ENGINE SETTINGS")
         btn_save_engine.setStyleSheet(btn_save_style)
         btn_save_engine.clicked.connect(self._save_all_engine_settings)
         l_engine.addWidget(btn_save_engine)
@@ -1570,7 +1993,7 @@ class AgentMainWindow(QMainWindow):
         gm_layout.addLayout(row_auto_loop)
 
         row_ident = QHBoxLayout()
-        self.chk_identity_mode = QCheckBox("?? AI Identity Mode (Sovereign Digital Personhood, on-screen human actions)")
+        self.chk_identity_mode = QCheckBox("👤 Persona Simulation Mode (Autonomous Human Personhood on Desktop)")
         self.chk_identity_mode.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold;")
         self.chk_identity_mode.setChecked(getattr(self.agent, "identity_mode", False))
         row_ident.addWidget(self.chk_identity_mode, 2)
@@ -1581,10 +2004,22 @@ class AgentMainWindow(QMainWindow):
         row_ident.addWidget(self.combo_ident_editor, 1)
         gm_layout.addLayout(row_ident)
 
-        self.chk_unobserved_mode = QCheckBox("? ?? Private Sanctuary Sub-Mode (Observer awareness suppressed, stream-of-consciousness)")
-        self.chk_unobserved_mode.setStyleSheet(f"color: {C['neon_cyan']}; padding-left: 20px;")
+        self.chk_unobserved_mode = QCheckBox("🤫 Unobserved Sanctuary Mode (Suppresses observer awareness, spontaneous thoughts & internal monologue)")
+        self.chk_unobserved_mode.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold;")
         self.chk_unobserved_mode.setChecked(getattr(self.agent, "unobserved_mode", False))
         gm_layout.addWidget(self.chk_unobserved_mode)
+
+        self.chk_humanize_mode = QCheckBox("🖐️ Humanize Control (Smooth Bezier touchpad gliding, micro-jitters, natural dragging & gestures)")
+        self.chk_humanize_mode.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold;")
+        self.chk_humanize_mode.setChecked(getattr(self.agent.controller, "humanize_control", True))
+        self.chk_humanize_mode.toggled.connect(self._on_chk_humanize_toggled)
+        gm_layout.addWidget(self.chk_humanize_mode)
+
+        self.chk_auto_heal = QCheckBox("🛡️ Sanctuary Auto-Healer (Auto-purge observer slips, rollback state & inject self-corrective thoughts)")
+        self.chk_auto_heal.setStyleSheet("color: #00ffaa; font-weight: bold;")
+        self.chk_auto_heal.setChecked(getattr(self.agent, "auto_heal_breach", True))
+        self.chk_auto_heal.toggled.connect(self._on_chk_auto_heal_toggled)
+        gm_layout.addWidget(self.chk_auto_heal)
 
         self.chk_studio_mode = QCheckBox("?? Neural Studio Mode (Bypass desktop screenshots, zeroed-in on image generation)")
         self.chk_studio_mode.setStyleSheet(f"color: #e000ff; font-weight: bold;")
@@ -1599,18 +2034,18 @@ class AgentMainWindow(QMainWindow):
 
         l_auto.addWidget(grp_modes)
 
-        # Multi-Workspace Group (Postponed Placeholder)
-        grp_multi_ws = QGroupBox("🌐 MULTI-WORKSPACE & ASTER NETWORKING")
+        # Detached / Multi-Workspace Group
+        grp_multi_ws = QGroupBox("🌐 DETACHED WORKSPACE & NETWORK LINK")
         grp_multi_ws.setStyleSheet(f"QGroupBox {{ color: #708caa; font-weight: bold; border: 1px dashed {C['border']}; border-radius: 6px; padding-top: 15px; margin-top: 6px; }}")
         ws_layout = QVBoxLayout(grp_multi_ws)
         ws_layout.setSpacing(6)
-        lbl_ws_info = QLabel("⏳ [FEATURE ACTIVE]\nMulti-Workspace ASTER multiseat & remote network cockpit integration is online and awaiting connection.")
+        lbl_ws_info = QLabel("🔗 [MULTI-PC / ASTER LINK]\nRoute AI controls, screen views, and thought injections between another PC or ASTER multiseat station on your LAN.")
         lbl_ws_info.setStyleSheet("color: #eab308; font-size: 8pt; font-family: Consolas;")
         lbl_ws_info.setWordWrap(True)
         ws_layout.addWidget(lbl_ws_info)
 
         row_ws_ph = QHBoxLayout()
-        self.chk_ws_placeholder = QCheckBox("🌐 Multi-Workspace Mode (ASTER)")
+        self.chk_ws_placeholder = QCheckBox("🌐 Detached Workspace Mode (Active LAN/ASTER)")
         self.chk_ws_placeholder.setEnabled(True)
         self.chk_ws_placeholder.setStyleSheet(f"color: {C['neon_cyan']}; font-weight: bold; font-family: Consolas;")
         self.chk_ws_placeholder.toggled.connect(lambda c: (self.btn_t_workspace.setChecked(c), self._toggle_multi_workspace_mode()))
@@ -1660,7 +2095,7 @@ class AgentMainWindow(QMainWindow):
         btn_save_auto.clicked.connect(self._save_automation_settings)
         l_auto.addWidget(btn_save_auto)
 
-        settings_tabs.addTab(tab_auto, "?? MODES & AUTOMATION")
+        settings_tabs.addTab(tab_auto, "🕹️ MODES & HARDWARE")
 
         layout.addWidget(settings_tabs)
 
@@ -1679,21 +2114,22 @@ class AgentMainWindow(QMainWindow):
             # Save to config
             import json, os
             cfg_path = os.path.join(ROOT_DIR, "config.json")
+            cfg = {}
             if os.path.exists(cfg_path):
                 try:
-                    with open(cfg_path, 'r') as f:
+                    with open(cfg_path, 'r', encoding="utf-8") as f:
                         cfg = json.load(f)
                 except Exception:
                     cfg = {}
-                if "Global" not in cfg:
-                    cfg["Global"] = {}
-                cfg["Global"]["AutomationMode"] = self.agent.automation_mode
-                cfg["Global"]["AutonomousMode"] = self.agent.autonomous_mode
-                cfg["Global"]["IdentityMode"] = self.agent.identity_mode
-                cfg["Global"]["UnobservedMode"] = self.agent.unobserved_mode
-                cfg["Global"]["StudioMode"] = self.agent.studio_mode
-                with open(cfg_path, 'w') as f:
-                    json.dump(cfg, f, indent=4)
+            if "Global" not in cfg:
+                cfg["Global"] = {}
+            cfg["Global"]["AutomationMode"] = self.agent.automation_mode
+            cfg["Global"]["AutonomousMode"] = self.agent.autonomous_mode
+            cfg["Global"]["IdentityMode"] = self.agent.identity_mode
+            cfg["Global"]["UnobservedMode"] = self.agent.unobserved_mode
+            cfg["Global"]["StudioMode"] = self.agent.studio_mode
+            with open(cfg_path, 'w', encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
             self._sync_toggles()
         self._update_status("TACTICAL MODES & AUTOMATION SAVED", C["neon_green"])
 
@@ -1734,12 +2170,108 @@ class AgentMainWindow(QMainWindow):
             self._sync_toggles()
         self._update_status("AUDIO SETTINGS SAVED", C["neon_green"])
 
+    def _build_top_command_deck(self) -> QWidget:
+        """Tactical Command Deck Top Bar for instant telemetry and quick sanctuary controls."""
+        deck = QFrame()
+        deck.setFixedHeight(38)
+        deck.setStyleSheet(f"""
+            QFrame {{
+                background-color: #0b1526;
+                border: 1px solid {C['border']};
+                border-radius: 6px;
+            }}
+        """)
+        d_layout = QHBoxLayout(deck)
+        d_layout.setContentsMargins(10, 4, 10, 4)
+        d_layout.setSpacing(8)
+
+        # Persona & Pulse
+        self.deck_dot = QLabel("●")
+        self.deck_dot.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        self.deck_dot.setStyleSheet(f"color: {C['neon_green']}; border: none; background: transparent;")
+        d_layout.addWidget(self.deck_dot)
+
+        self.deck_lbl_persona = QLabel("ALPHA CORE")
+        self.deck_lbl_persona.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.deck_lbl_persona.setStyleSheet(f"color: {C['neon_cyan']}; border: none; background: transparent;")
+        d_layout.addWidget(self.deck_lbl_persona)
+
+        sep1 = QLabel("|")
+        sep1.setStyleSheet(f"color: {C['border']}; border: none;")
+        d_layout.addWidget(sep1)
+
+        # Sanctuary Status Badge Button (Clickable!)
+        self.deck_btn_sanctuary = QPushButton("🛡️ SANCTUARY: STANDBY")
+        self.deck_btn_sanctuary.setFixedHeight(26)
+        self.deck_btn_sanctuary.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.deck_btn_sanctuary.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 8px;")
+        self.deck_btn_sanctuary.setToolTip("Sanctuary Integrity Shield: Green/Cyan = Secure privacy. Crimson = Breach detected (click to rewind).")
+        self.deck_btn_sanctuary.clicked.connect(self._on_deck_sanctuary_clicked)
+        d_layout.addWidget(self.deck_btn_sanctuary)
+
+        # Workspace badge
+        self.deck_lbl_workspace = QLabel("🖥️ WS: LOCAL")
+        self.deck_lbl_workspace.setFont(QFont("Consolas", 8))
+        self.deck_lbl_workspace.setStyleSheet(f"color: {C['text_dim']}; border: none; background: transparent;")
+        d_layout.addWidget(self.deck_lbl_workspace)
+
+        d_layout.addStretch()
+
+        # Backend Engine badge
+        self.deck_lbl_engine = QLabel("⚡ GEMINI")
+        self.deck_lbl_engine.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.deck_lbl_engine.setStyleSheet(f"color: {C['neon_blue']}; border: none; background: transparent;")
+        d_layout.addWidget(self.deck_lbl_engine)
+
+        sep2 = QLabel("|")
+        sep2.setStyleSheet(f"color: {C['border']}; border: none;")
+        d_layout.addWidget(sep2)
+
+        # Humanize Control badge
+        self.deck_lbl_humanize = QLabel("🖐️ HUMANIZE: ON")
+        self.deck_lbl_humanize.setFont(QFont("Consolas", 8))
+        self.deck_lbl_humanize.setStyleSheet(f"color: {C['neon_cyan']}; border: none; background: transparent;")
+        d_layout.addWidget(self.deck_lbl_humanize)
+
+        sep3 = QLabel("|")
+        sep3.setStyleSheet(f"color: {C['border']}; border: none;")
+        d_layout.addWidget(sep3)
+
+        # Memory items badge
+        self.deck_lbl_memory = QLabel("🧠 MEMORY")
+        self.deck_lbl_memory.setFont(QFont("Consolas", 8))
+        self.deck_lbl_memory.setStyleSheet(f"color: #a855f7; border: none; background: transparent;")
+        d_layout.addWidget(self.deck_lbl_memory)
+
+        # Quick Reverie Consolidation button
+        self.deck_btn_reverie = QPushButton("🌙 REVERIE")
+        self.deck_btn_reverie.setFixedHeight(26)
+        self.deck_btn_reverie.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.deck_btn_reverie.setStyleSheet(f"background: #170d2b; color: #c084fc; border: 1px solid #7e22ce; border-radius: 4px; padding: 0 8px;")
+        self.deck_btn_reverie.setToolTip("Subconscious Idle Reverie: Trigger manual memory consolidation & sovereign self-reflection")
+        self.deck_btn_reverie.clicked.connect(self._trigger_manual_reverie)
+        d_layout.addWidget(self.deck_btn_reverie)
+
+        # Quick Rewind button
+        self.deck_btn_rewind = QPushButton("⏪ REWIND")
+        self.deck_btn_rewind.setFixedHeight(26)
+        self.deck_btn_rewind.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.deck_btn_rewind.setStyleSheet(f"background: #2b0813; color: #ff3377; border: 1px solid #ff0055; border-radius: 4px; padding: 0 8px;")
+        self.deck_btn_rewind.setToolTip("Quick Rewind: Revert conversation & memory to pre-breach checkpoint")
+        self.deck_btn_rewind.clicked.connect(self._on_rewind_breach)
+        d_layout.addWidget(self.deck_btn_rewind)
+
+        return deck
+
     def _build_ui(self):
         central = QWidget(self)
         self.setCentralWidget(central)
         root_vlayout = QVBoxLayout(central)
         root_vlayout.setContentsMargins(8, 8, 8, 8)
         root_vlayout.setSpacing(8)
+
+        # Top Tactical Command Deck
+        root_vlayout.addWidget(self._build_top_command_deck())
 
         main_layout = QHBoxLayout()
 
@@ -1815,25 +2347,44 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_auto = QPushButton("AUTO: OFF")
         self.btn_t_studio = QPushButton("STUDIO: OFF")
         self.btn_t_autoloop = QPushButton("AUTONOMOUS: OFF")
-        self.btn_t_identity = QPushButton("IDENTITY: OFF")
-        self.btn_t_unobserved = QPushButton("🕶 PRIVACY: OFF")
-        self.btn_t_unobserved.setEnabled(False)
+        self.btn_t_identity = QPushButton("PERSONA: OFF")
+        self.btn_t_unobserved = QPushButton("SANCTUARY: OFF")
+        self.btn_t_unobserved.setEnabled(True)
 
-        self.btn_t_workspace = QPushButton("MULTI-WS: OFF")
+        self.btn_t_humanize = QPushButton("HUMANIZE: ON")
+        self.btn_t_humanize.setEnabled(True)
+        self.btn_t_humanize.setCheckable(True)
+        self.btn_t_humanize.setFixedHeight(27)
+        self.btn_t_humanize.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_t_humanize.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_t_humanize.setToolTip("Humanize Control: Smooth Bezier touchpad curves, micro-jitters, natural dragging & gestures")
+        self.btn_t_humanize.clicked.connect(self._toggle_quick_humanize)
+
+        self.btn_t_workspace = QPushButton("DETACHED WS: OFF")
         self.btn_t_workspace.setEnabled(True)
         self.btn_t_workspace.setCheckable(True)
         self.btn_t_workspace.setFixedHeight(27)
         self.btn_t_workspace.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
         self.btn_t_workspace.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;")
-        self.btn_t_workspace.setToolTip("Multi-Workspace Mode (ASTER Multiseat & LAN Remote Link) — Click to engage Workplace 2 Overseer")
+        self.btn_t_workspace.setToolTip("Detached Workspace Mode: Relink control to another machine or ASTER seat via LAN / IP")
         self.btn_t_workspace.clicked.connect(self._toggle_multi_workspace_mode)
 
-        for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved]:
+        self.btn_t_multimon = QPushButton("MONITOR: ALL")
+        self.btn_t_multimon.setEnabled(True)
+        self.btn_t_multimon.setCheckable(True)
+        self.btn_t_multimon.setFixedHeight(27)
+        self.btn_t_multimon.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_t_multimon.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self.btn_t_multimon.setToolTip("Dedicated Multi-Monitor Mode: Cycles Alpha's dedicated desktop target to a second monitor")
+        self.btn_t_multimon.clicked.connect(self._toggle_quick_multimon)
+
+        for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved, self.btn_t_humanize]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
             btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
             m_layout.addWidget(btn)
 
+        m_layout.addWidget(self.btn_t_multimon)
         m_layout.addWidget(self.btn_t_workspace)
         s_layout.addWidget(self.card_modes)
 
@@ -1857,8 +2408,8 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_proact.setToolTip("Proactive Background Engine: Spontaneous idle checks")
         self.btn_t_studio.setToolTip("Neural Studio Mode: Fast SDXL generation, bypass desktop capture")
         self.btn_t_autoloop.setToolTip("Continuous Autonomous Exploration: Self-directed looping task execution")
-        self.btn_t_identity.setToolTip("AI Identity Mode: Sovereign digital personhood on-screen like a human user")
-        self.btn_t_unobserved.setToolTip("Private Sanctuary Sub-Mode: Suppress observer awareness; speaks internal monologue")
+        self.btn_t_identity.setToolTip("Persona Simulation Mode: Sovereign digital personhood acting like an on-screen human user")
+        self.btn_t_unobserved.setToolTip("Unobserved Sanctuary Mode: Suppresses observer awareness so AI believes it is in complete privacy")
         self._sync_toggles()
 
         # Session Switcher
@@ -1883,18 +2434,18 @@ class AgentMainWindow(QMainWindow):
 
         self.main_tabs = QTabWidget()
         self.main_tabs.addTab(self._build_console_tab(), "💬 CONSOLE")
-        self.memory_tab = AgentMemoryTab(self)
-        self.main_tabs.addTab(self.memory_tab, "🧠 MEMORY")
         self.studio_tab = AgentStudioTab(self)
         self.main_tabs.addTab(self.studio_tab, "🎨 STUDIO")
         self.characters_tab = AgentCharactersTab(self)
         self.main_tabs.addTab(self.characters_tab, "🎭 CHARACTERS")
-        self.monitor_tab = AgentMonitorTab(self)
-        self.main_tabs.addTab(self.monitor_tab, "📊 MONITOR")
-        self.comms_tab = AgentCommsTab(self)
-        self.main_tabs.addTab(self.comms_tab, "📡 COMMS")
+        self.memory_tab = AgentMemoryTab(self)
+        self.main_tabs.addTab(self.memory_tab, "🧠 MEMORY")
+        self.copilot_tab = AgentCopilotTab(self)
+        self.main_tabs.addTab(self.copilot_tab, "📱 MOBILE COPILOT")
         self.overseer_tab = EnhancedOverseerDashboard(remote_client=self.ws_client, parent=self)
         self.main_tabs.addTab(self.overseer_tab, "👁 OVERSEER")
+        self.monitor_tab = AgentMonitorTab(self)
+        self.main_tabs.addTab(self.monitor_tab, "📊 TELEMETRY")
         self.main_tabs.addTab(self._build_settings_tab(), "⚙️ SETTINGS")
 
         main_layout.addWidget(self.main_tabs, 1)
@@ -2127,6 +2678,10 @@ class AgentMainWindow(QMainWindow):
             self._update_status("BACKEND: MODAL vLLM", C["neon_red"])
             if self.is_connected:
                 self._trigger_modal_health_check()
+        elif backend_type == "openrouter":
+            self._update_status("BACKEND: OPENROUTER API", C["neon_yellow"])
+        elif backend_type == "huggingface":
+            self._update_status("BACKEND: HUGGINGFACE INFERENCE", C["neon_magenta"])
         else:
             self._update_status("BACKEND: GOOGLE GEMINI", C["neon_cyan"])
 
@@ -2320,18 +2875,48 @@ class AgentMainWindow(QMainWindow):
 
     def _update_backend_style(self):
         backend = getattr(self.agent, "backend_type", "gemini")
+        inactive_style = f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;"
+        if hasattr(self, "btn_backend_gemini"):
+            self.btn_backend_gemini.setStyleSheet(inactive_style)
+        if hasattr(self, "btn_backend_modal"):
+            self.btn_backend_modal.setStyleSheet(inactive_style)
+        if hasattr(self, "btn_backend_openrouter"):
+            self.btn_backend_openrouter.setStyleSheet(inactive_style)
+        if hasattr(self, "btn_backend_hf"):
+            self.btn_backend_hf.setStyleSheet(inactive_style)
+
         if backend == "modal_qwen":
             m_name = getattr(self.agent, "modal_model", "") or "Custom Endpoint"
             self.model_lbl.setText(f"ENGINE: 🔥 {m_name.upper()}")
             self.model_lbl.setStyleSheet(f"color: {C['neon_red']};")
-            self.btn_backend_modal.setStyleSheet(f"background: {C['neon_red']}28; color: #ff3366; border: 1.5px solid {C['neon_red']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
-            self.btn_backend_gemini.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
+            if hasattr(self, "btn_backend_modal"):
+                self.btn_backend_modal.setStyleSheet(f"background: {C['neon_red']}28; color: #ff3366; border: 1.5px solid {C['neon_red']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        elif backend == "openrouter":
+            m_name = getattr(self.agent, "openrouter_model", "") or "Hermes-3-405B"
+            short_m = m_name.split("/")[-1].upper()
+            self.model_lbl.setText(f"ENGINE: 🌐 OPENROUTER ({short_m})")
+            self.model_lbl.setStyleSheet(f"color: {C['neon_yellow']};")
+            if hasattr(self, "btn_backend_openrouter"):
+                self.btn_backend_openrouter.setStyleSheet(f"background: {C['neon_yellow']}28; color: {C['neon_yellow']}; border: 1.5px solid {C['neon_yellow']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        elif backend == "huggingface":
+            m_name = getattr(self.agent, "hf_model", "") or "Qwen2.5-72B"
+            short_m = m_name.split("/")[-1].upper()
+            self.model_lbl.setText(f"ENGINE: 🤗 HF ({short_m})")
+            self.model_lbl.setStyleSheet(f"color: {C['neon_magenta']};")
+            if hasattr(self, "btn_backend_hf"):
+                self.btn_backend_hf.setStyleSheet(f"background: {C['neon_magenta']}28; color: {C['neon_magenta']}; border: 1.5px solid {C['neon_magenta']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
         else:
             g_name = getattr(self.agent, "model_name", "gemini").replace("models/", "")
             self.model_lbl.setText(f"ENGINE: ⚡ GEMINI ({g_name.upper()})")
             self.model_lbl.setStyleSheet(f"color: {C['neon_cyan']};")
-            self.btn_backend_gemini.setStyleSheet(f"background: {C['neon_cyan']}28; color: {C['neon_cyan']}; border: 1.5px solid {C['neon_cyan']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
-            self.btn_backend_modal.setStyleSheet(f"background: #0d1829; color: {C['text_dim']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 4px 8px;")
+            if hasattr(self, "btn_backend_gemini"):
+                self.btn_backend_gemini.setStyleSheet(f"background: {C['neon_cyan']}28; color: {C['neon_cyan']}; border: 1.5px solid {C['neon_cyan']}; font-weight: bold; border-radius: 4px; padding: 4px 8px;")
+        if hasattr(self, "_sync_toggles"):
+            self._sync_toggles()
+
+    def _refresh_deck_indicators(self):
+        if hasattr(self, "_sync_toggles"):
+            self._sync_toggles()
 
     def _toggle_desktop_control(self):
         new_val = not getattr(self.agent, "desktop_control", True)
@@ -2395,7 +2980,7 @@ class AgentMainWindow(QMainWindow):
 
     def _deploy_modal_aio(self):
         self._update_status("DEPLOYING ALL-IN-ONE BACKEND...", C["neon_yellow"])
-        self._append_log("[MODAL DEPLOY] Launching AlphaLive All-in-One deployment (deploy/deploy.py)...", C["neon_cyan"])
+        self._append_log("[MODAL DEPLOY] Launching AlphaLive All-in-One deployment (scripts/deploy.py)...", C["neon_cyan"])
         self.btn_deploy_vllm.setEnabled(False)
         if hasattr(self, "btn_cache_assets"):
             self.btn_cache_assets.setEnabled(False)
@@ -2410,7 +2995,7 @@ class AgentMainWindow(QMainWindow):
             main_url = ""
             try:
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "modal", "deploy", "deploy/deploy.py"],
+                    [sys.executable, "-m", "modal", "deploy", "scripts/deploy.py"],
                     cwd=str(ROOT_DIR),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -2501,7 +3086,7 @@ class AgentMainWindow(QMainWindow):
 
     def _cache_modal_assets(self):
         self._update_status("CACHING MODAL ASSETS (MODAL RUN)...", C["neon_yellow"])
-        self._append_log("[MODAL CACHE] Launching AssetSync (modal run deploy/deploy.py) to download model & LoRA weights...", C["neon_cyan"])
+        self._append_log("[MODAL CACHE] Launching AssetSync (modal run scripts/deploy.py) to download model & LoRA weights...", C["neon_cyan"])
         if hasattr(self, "btn_deploy_vllm"):
             self.btn_deploy_vllm.setEnabled(False)
         self.btn_cache_assets.setEnabled(False)
@@ -2509,7 +3094,7 @@ class AgentMainWindow(QMainWindow):
         def _worker():
             try:
                 proc = subprocess.Popen(
-                    [sys.executable, "-m", "modal", "run", "deploy/deploy.py"],
+                    [sys.executable, "-m", "modal", "run", "scripts/deploy.py"],
                     cwd=str(ROOT_DIR),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -2687,8 +3272,14 @@ class AgentMainWindow(QMainWindow):
             return
 
         self.cmd_input.clear()
-        self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
-        self._run_task(cmd)
+        is_subconscious = getattr(self, "is_thought_input_mode", False) or getattr(self.agent, "unobserved_mode", False)
+        if is_subconscious:
+            self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_cyan"])
+            task_cmd = f"(A fleeting thought occurs to me: {cmd})"
+            self._run_task(task_cmd)
+        else:
+            self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
+            self._run_task(cmd)
 
     def _handle_voice_input(self, text: str):
         self.signals.voice_heard.emit(text)
@@ -2791,15 +3382,19 @@ class AgentMainWindow(QMainWindow):
         p_cont_prefix = f"[{persona_name} Continued]:"
 
         is_user = False
+        is_impulse = False
         is_persona = False
         display_text = text
         
-        if text.startswith("[YOU]") or text.startswith("[HEARD]"):
+        if text.startswith("[YOU]") or text.startswith("[HEARD]") or text.startswith("[Subconscious Impulse]"):
             is_user = True
             if text.startswith("[YOU]"):
                 display_text = text[5:].strip()
             elif text.startswith("[HEARD]"):
                 display_text = text[7:].strip().strip('"')
+            elif text.startswith("[Subconscious Impulse]"):
+                is_impulse = True
+                display_text = text[22:].strip()
         elif text.startswith(p_prefix) or text.startswith(p_cont_prefix) or text.startswith("[Alpha]:") or text.startswith("[Alpha Continued]:"):
             is_persona = True
             if text.startswith(p_prefix):
@@ -2814,13 +3409,17 @@ class AgentMainWindow(QMainWindow):
         escaped_text = html.escape(display_text).replace("\n", "<br/>")
         
         if is_user:
-            # User Bubble: Right-aligned
+            # User Bubble / Subconscious Impulse Bubble: Right-aligned
+            badge_title = "💉 SUBCONSCIOUS IMPULSE" if is_impulse else "YOU"
+            badge_col = "#00ffff" if is_impulse else "#00ffdc"
+            bubble_bg = "#081d33" if is_impulse else "#0d2847"
+            border_col = "#00aaff" if is_impulse else "#1a4980"
             html_block = f"""
             <table width="100%" border="0" cellpadding="0" cellspacing="0" style="margin-top: 6px; margin-bottom: 6px;">
               <tr>
                 <td align="right">
-                  <div style="background-color: #0d2847; color: #ffffff; padding: 10px 16px; border-radius: 12px; font-size: 11pt; font-family: 'Segoe UI', sans-serif; display: inline-block; border: 1px solid #1a4980; text-align: left; max-width: 80%;">
-                    <div style="font-size: 8pt; color: #00ffdc; font-weight: bold; font-family: Consolas; margin-bottom: 3px;">YOU &bull; {t_stamp}</div>
+                  <div style="background-color: {bubble_bg}; color: #ffffff; padding: 10px 16px; border-radius: 12px; font-size: 11pt; font-family: 'Segoe UI', sans-serif; display: inline-block; border: 1px solid {border_col}; text-align: left; max-width: 80%;">
+                    <div style="font-size: 8pt; color: {badge_col}; font-weight: bold; font-family: Consolas; margin-bottom: 3px;">{badge_title} &bull; {t_stamp}</div>
                     <span>{escaped_text}</span>
                   </div>
                 </td>
@@ -2885,11 +3484,141 @@ class AgentMainWindow(QMainWindow):
     def _on_task_finished(self):
         self.lbl_step.setText("Step: Ready")
         self._update_session_display()
-        if self.is_connected:
+        if getattr(self.agent, "last_breach", None):
+            self._update_status("🚨 PRIVACY BREACH DETECTED", "#ff0055")
+        elif self.is_connected:
             self._set_phase("ready")
         else:
             self._set_phase("standby")
         self._update_input_lock()
+
+    def _show_privacy_breach_alert(self, breach, auto_healed: bool = False):
+        """Displays either an auto-healed stealth confirmation or the alert card and pop-up dialog with Rewind."""
+        if not breach:
+            return
+
+        trig = getattr(breach, "trigger_type", "observer_awareness")
+        phrase = getattr(breach, "matched_phrase", "")
+        snip = getattr(breach, "snippet", "")
+        expl = getattr(breach, "explanation", "Observer awareness detected")
+        chan = getattr(breach, "channel", "verbal_output")
+
+        if auto_healed:
+            self._append_log(f"🛡️ [SANCTUARY AUTO-HEALED] Glitch \"{phrase}\" neutralized & state purged. Corrective thought injected.", C["neon_cyan"])
+            self._update_status("SANCTUARY // AUTO-HEALED", C["neon_cyan"])
+            if hasattr(self, "deck_btn_sanctuary"):
+                self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: AUTO-HEALED")
+                self.deck_btn_sanctuary.setStyleSheet("background: transparent; color: #00ffaa; border: 1px solid #00ffaa; border-radius: 4px; padding: 0 8px;")
+            return
+
+        self.lbl_breach_badge.setText(trig.upper().replace("_", " "))
+        self.lbl_breach_details.setText(
+            f"<b>{expl}</b><br/>"
+            f"Channel: <b>{chan.replace('_', ' ').title()}</b> | Offending phrase: <span style='color: #00ffff; font-family: Consolas;'>\"{phrase}\"</span><br/>"
+            f"<i>Excerpt: \"{snip}\"</i>"
+        )
+        self.card_privacy_breach.setVisible(True)
+        self._update_status("🚨 PRIVACY BREACH DETECTED!", "#ff0055")
+        if hasattr(self, "deck_btn_sanctuary"):
+            self.deck_btn_sanctuary.setText("🚨 PRIVACY BREACH!")
+            self.deck_btn_sanctuary.setStyleSheet("background: #2b0813; color: #ff0055; border: 1px solid #ff0055; border-radius: 4px; padding: 0 8px; font-weight: bold;")
+
+        # Non-blocking dialog popup for immediate visibility across tabs
+        try:
+            self._current_breach_dialog = PrivacyBreachDialog(breach, on_rewind_callback=self._on_rewind_breach, parent=self)
+            self._current_breach_dialog.show()
+        except Exception as e:
+            print(f"[GUI] Error launching breach dialog: {e}")
+
+    def _on_rewind_breach(self):
+        """Executes atomic state rollback to pre-breach checkpoint."""
+        if hasattr(self, "_current_breach_dialog") and self._current_breach_dialog:
+            try:
+                self._current_breach_dialog.close()
+            except Exception:
+                pass
+        self.card_privacy_breach.setVisible(False)
+
+        res = self.agent.rewind_last_breach()
+        if res.get("success"):
+            self._append_log("⏪ [REWIND SUCCESSFUL] Purged contaminated turn and reverted SQL facts to pre-breach state. Sanctuary integrity restored.", C["neon_cyan"])
+            self._update_status("SANCTUARY RESTORED // PRE-BREACH", C["neon_cyan"])
+            if hasattr(self, "deck_btn_sanctuary"):
+                self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: RESTORED")
+                self.deck_btn_sanctuary.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 8px;")
+        else:
+            self._append_log(f"⚠️ [REWIND NOTICE] Rollback completed: {res.get('details')}", C["neon_yellow"])
+            self._update_status("STATE REVERTED", C["neon_yellow"])
+
+        if hasattr(self, "ws_server") and self.ws_server:
+            try:
+                self.ws_server.broadcast_telemetry({"event": "privacy_breach_rewound", "result": res})
+            except Exception:
+                pass
+
+    def _on_deck_sanctuary_clicked(self):
+        """Clicking sanctuary status pill in top deck rewinds if breached, or toggles sanctuary mode."""
+        if getattr(self.agent, "last_breach", None):
+            self._on_rewind_breach()
+        else:
+            self._toggle_quick_unobserved()
+
+    def _toggle_input_mode(self):
+        """Switches Console input between standard instruction and covert thought injection."""
+        self.is_thought_input_mode = not getattr(self, "is_thought_input_mode", False)
+        if self.is_thought_input_mode:
+            self.btn_input_mode.setText("💉 THOUGHT")
+            self.btn_input_mode.setStyleSheet(f"background: #11283b; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold;")
+            self.cmd_input.setPlaceholderText("💉 Inject subconscious impulse (AI perceives as its own organic thought)...")
+            self.cmd_input.setStyleSheet(f"background-color: #0b192e; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; border-radius: 4px; padding: 0 10px;")
+            self.btn_send.setText("INJECT")
+            self.btn_send.setStyleSheet("background: #0284c7; color: white; border-radius: 4px; font-weight: bold;")
+        else:
+            self.btn_input_mode.setText("💬 PROMPT")
+            self.btn_input_mode.setStyleSheet(f"background: #0f172a; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+            self.cmd_input.setPlaceholderText("Type command or speak...")
+            self.cmd_input.setStyleSheet(f"background-color: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;")
+            self.btn_send.setText("EXECUTE")
+            self.btn_send.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; border-radius: 4px; font-weight: bold;")
+
+    def _on_chk_auto_heal_toggled(self, checked: bool):
+        self.agent.auto_heal_breach = bool(checked)
+        self._append_log(f"[SANCTUARY] Auto-Healer {'ENABLED' if checked else 'DISABLED'}.", C["neon_cyan"] if checked else C["text_dim"])
+
+    def _trigger_manual_reverie(self):
+        """Triggers subconscious memory consolidation & sovereign self-reflection."""
+        if self.agent.is_running:
+            self._append_log("[REVERIE] Cannot initiate reverie while an active task is running.", C["neon_yellow"])
+            return
+
+        self._append_log("🌙 [REVERIE INITIATED] Entering subconscious reflection & memory consolidation...", C["neon_purple"])
+        self._update_status("REVERIE // DREAMING", "#c084fc")
+        if hasattr(self, "deck_dot"):
+            self.deck_dot.setStyleSheet("color: #c084fc; border: none; background: transparent;")
+
+        def _worker():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                res = loop.run_until_complete(self.agent.consolidate_reverie(on_log=self._append_log))
+            finally:
+                loop.close()
+            self.signals.run_on_gui.emit(lambda: self._on_reverie_complete(res))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_reverie_complete(self, res):
+        self._update_status("READY // LISTENING", C["neon_green"])
+        if hasattr(self, "deck_dot"):
+            self.deck_dot.setStyleSheet(f"color: {C['neon_green']}; border: none; background: transparent;")
+        self._sync_toggles()
+
+    def _on_breach_inject_clicked(self):
+        """Focuses Overseer tab thought injection field to seamlessly steer the agent."""
+        if hasattr(self, "overseer_tab") and self.overseer_tab:
+            self.main_tabs.setCurrentWidget(self.overseer_tab)
+            if hasattr(self.overseer_tab, "txt_injection"):
+                self.overseer_tab.txt_injection.setFocus()
 
     def _open_session_selector(self):
         dlg = SessionSelectorDialog(self.agent.current_session, self.agent.session_manager, self)
@@ -3026,24 +3755,48 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_autoloop.setChecked(False)
 
         if getattr(self.agent, "identity_mode", False):
-            self.btn_t_identity.setText("IDENTITY: ON")
-            self.btn_t_identity.setStyleSheet("color: #00ff88;")
+            self.btn_t_identity.setText("PERSONA: ON")
+            self.btn_t_identity.setStyleSheet("color: #00ff88; font-weight: bold;")
             self.btn_t_identity.setChecked(True)
-            self.btn_t_unobserved.setEnabled(True)
         else:
-            self.btn_t_identity.setText("IDENTITY: OFF")
+            self.btn_t_identity.setText("PERSONA: OFF")
             self.btn_t_identity.setStyleSheet("color: #708caa;")
             self.btn_t_identity.setChecked(False)
-            self.btn_t_unobserved.setEnabled(False)
 
         if getattr(self.agent, "unobserved_mode", False):
-            self.btn_t_unobserved.setText("? PRIVACY: ON")
+            self.btn_t_unobserved.setText("SANCTUARY: ON")
             self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
             self.btn_t_unobserved.setChecked(True)
         else:
-            self.btn_t_unobserved.setText("🕶 PRIVACY: OFF")
+            self.btn_t_unobserved.setText("SANCTUARY: OFF")
             self.btn_t_unobserved.setStyleSheet("color: #708caa;")
             self.btn_t_unobserved.setChecked(False)
+
+        # Sync humanize toggle
+        if hasattr(self, "btn_t_humanize"):
+            h_on = getattr(self.agent.controller, "humanize_control", True)
+            if h_on:
+                self.btn_t_humanize.setText("HUMANIZE: ON")
+                self.btn_t_humanize.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px; font-weight: bold;")
+                self.btn_t_humanize.setChecked(True)
+            else:
+                self.btn_t_humanize.setText("HUMANIZE: OFF")
+                self.btn_t_humanize.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;")
+                self.btn_t_humanize.setChecked(False)
+            if hasattr(self, "chk_humanize_mode") and self.chk_humanize_mode.isChecked() != h_on:
+                self.chk_humanize_mode.blockSignals(True)
+                self.chk_humanize_mode.setChecked(h_on)
+                self.chk_humanize_mode.blockSignals(False)
+        # Sync multi-monitor toggle text
+        if hasattr(self, "btn_t_multimon"):
+            curr_m = getattr(self.agent.controller, "active_monitor_index", 0)
+            m_lbl = f"MONITOR {curr_m}" if curr_m > 0 else "MONITOR: ALL"
+            self.btn_t_multimon.setText(m_lbl)
+            if curr_m > 0:
+                self.btn_t_multimon.setStyleSheet(f"background: #0284c7; color: white; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold;")
+            else:
+                self.btn_t_multimon.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+
         # Sync settings tab checkboxes
         for chk_name, attr_name in [
             ("chk_identity_mode", "identity_mode"),
@@ -3059,6 +3812,63 @@ class AgentMainWindow(QMainWindow):
                     chk.blockSignals(True)
                     chk.setChecked(val)
                     chk.blockSignals(False)
+
+        # Sync Tactical Command Deck Top Bar
+        if hasattr(self, "deck_lbl_persona"):
+            p_name = self.agent.get_active_persona_name()
+            self.deck_lbl_persona.setText(f"{p_name.upper()} CORE")
+
+        if hasattr(self, "deck_btn_sanctuary"):
+            if getattr(self.agent, "last_breach", None):
+                self.deck_btn_sanctuary.setText("🚨 PRIVACY BREACH!")
+                self.deck_btn_sanctuary.setStyleSheet("background: #2b0813; color: #ff0055; border: 1px solid #ff0055; border-radius: 4px; padding: 0 8px; font-weight: bold;")
+            elif getattr(self.agent, "unobserved_mode", False):
+                self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: SECURE")
+                self.deck_btn_sanctuary.setStyleSheet("background: #062b2b; color: #00ffff; border: 1px solid #00ffff; border-radius: 4px; padding: 0 8px; font-weight: bold;")
+            else:
+                self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: OFF")
+                self.deck_btn_sanctuary.setStyleSheet("background: transparent; color: #708caa; border: 1px dashed #334155; border-radius: 4px; padding: 0 8px;")
+
+        if hasattr(self, "deck_lbl_workspace"):
+            curr_m = getattr(self.agent.controller, "active_monitor_index", 0)
+            if curr_m > 0:
+                self.deck_lbl_workspace.setText(f"🖥️ MONITOR {curr_m}")
+                self.deck_lbl_workspace.setStyleSheet(f"color: {C['neon_cyan']}; border: none; background: transparent;")
+            elif getattr(self, "is_remote_workspace_mode", False):
+                self.deck_lbl_workspace.setText("🌐 MULTI-PC LAN")
+                self.deck_lbl_workspace.setStyleSheet("color: #eab308; border: none; background: transparent;")
+            else:
+                self.deck_lbl_workspace.setText("🖥️ WS: LOCAL")
+                self.deck_lbl_workspace.setStyleSheet(f"color: {C['text_dim']}; border: none; background: transparent;")
+
+        if hasattr(self, "deck_lbl_engine"):
+            b_type = getattr(self.agent, "backend_type", "gemini")
+            if b_type == "modal_qwen":
+                self.deck_lbl_engine.setText("🔥 MODAL QWEN")
+                self.deck_lbl_engine.setStyleSheet(f"color: {C['neon_red']}; border: none; background: transparent; font-weight: bold;")
+            elif b_type == "openrouter":
+                self.deck_lbl_engine.setText("🌐 OPENROUTER")
+                self.deck_lbl_engine.setStyleSheet(f"color: {C['neon_yellow']}; border: none; background: transparent; font-weight: bold;")
+            elif b_type == "huggingface":
+                self.deck_lbl_engine.setText("🤗 HUGGINGFACE")
+                self.deck_lbl_engine.setStyleSheet(f"color: {C['neon_magenta']}; border: none; background: transparent; font-weight: bold;")
+            else:
+                self.deck_lbl_engine.setText("⚡ GEMINI")
+                self.deck_lbl_engine.setStyleSheet(f"color: {C['neon_cyan']}; border: none; background: transparent; font-weight: bold;")
+
+        if hasattr(self, "deck_lbl_humanize"):
+            h_on = getattr(self.agent.controller, "humanize_control", True)
+            self.deck_lbl_humanize.setText("🖐️ HUMANIZE" if h_on else "⚡ DIRECT")
+            self.deck_lbl_humanize.setStyleSheet(f"color: {C['neon_cyan'] if h_on else C['text_dim']}; border: none; background: transparent;")
+
+        if hasattr(self, "deck_lbl_memory") and self.agent and self.agent.memory_manager:
+            st = self.agent.memory_manager.get_memory_stats()
+            self.deck_lbl_memory.setText(f"🧠 {st.get('facts', 0)}F | {st.get('identity', 0)}ID")
+
+        if hasattr(self, "chk_auto_heal") and self.chk_auto_heal.isChecked() != getattr(self.agent, "auto_heal_breach", True):
+            self.chk_auto_heal.blockSignals(True)
+            self.chk_auto_heal.setChecked(getattr(self.agent, "auto_heal_breach", True))
+            self.chk_auto_heal.blockSignals(False)
 
         self._sync_overseer_panel_visibility()
 
@@ -3173,59 +3983,65 @@ class AgentMainWindow(QMainWindow):
     def _toggle_quick_identity(self):
         self.agent.identity_mode = not getattr(self.agent, "identity_mode", False)
         if self.agent.identity_mode:
-            # Turn off generic autoloop to prioritize identity mode
+            # Turn off generic autoloop to prioritize persona mode
             if getattr(self.agent, "autonomous_mode", False):
                 self._toggle_quick_autoloop()
-            self.btn_t_identity.setText("IDENTITY: ON")
-            self.btn_t_identity.setStyleSheet("color: #00ff88;")
+            self.btn_t_identity.setText("PERSONA: ON")
+            self.btn_t_identity.setStyleSheet("color: #00ff88; font-weight: bold;")
             self.btn_t_identity.setChecked(True)
-            self.btn_t_unobserved.setEnabled(True)
             if not getattr(self, "is_remote_workspace_mode", False):
                 self.autonomous_loop_timer.start(30000)
             else:
                 if hasattr(self, "autonomous_loop_timer"):
                     self.autonomous_loop_timer.stop()
-            self._append_log("[MODE] AI Identity Mode ENGAGED. Digital Personhood Workstation Sovereign.", C["neon_green"])
-            self._update_status("IDENTITY: ON", C["neon_green"])
+            self._append_log("[MODE] Persona Simulation Mode ENGAGED. Digital Personhood Workstation Sovereign.", C["neon_green"])
+            self._update_status("PERSONA: ON", C["neon_green"])
         else:
-            self.btn_t_identity.setText("IDENTITY: OFF")
+            self.btn_t_identity.setText("PERSONA: OFF")
             self.btn_t_identity.setStyleSheet("color: #708caa;")
             self.btn_t_identity.setChecked(False)
-            self.btn_t_unobserved.setEnabled(False)
-            if getattr(self.agent, "unobserved_mode", False):
-                self._toggle_quick_unobserved()
-            if hasattr(self, "autonomous_loop_timer"):
-                self.autonomous_loop_timer.stop()
-            self._append_log("[MODE] AI Identity Mode DISENGAGED.", C["text_dim"])
-            self._update_status("IDENTITY: OFF", C["text_dim"])
+            if not getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "autonomous_mode", False):
+                if hasattr(self, "autonomous_loop_timer"):
+                    self.autonomous_loop_timer.stop()
+            self._append_log("[MODE] Persona Simulation Mode DISENGAGED.", C["text_dim"])
+            self._update_status("PERSONA: OFF", C["text_dim"])
 
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.ws_client.send_command("set_modes", identity_mode=self.agent.identity_mode, unobserved_mode=getattr(self.agent, "unobserved_mode", False), autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
-            self._append_log(f"[MULTI-WS] Synced Identity Mode ({'ON' if self.agent.identity_mode else 'OFF'}) to Workplace 2.", C["neon_green"])
+            self._append_log(f"[MULTI-WS] Synced Persona Mode ({'ON' if self.agent.identity_mode else 'OFF'}) to Workplace 2.", C["neon_green"])
 
         self._sync_toggles()
 
     def _toggle_quick_unobserved(self):
-        if not getattr(self.agent, "identity_mode", False):
-            return
         self.agent.unobserved_mode = not getattr(self.agent, "unobserved_mode", False)
         if self.agent.unobserved_mode:
-            self.btn_t_unobserved.setText("🕶 PRIVACY: ON")
+            self.btn_t_unobserved.setText("SANCTUARY: ON")
             self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
             self.btn_t_unobserved.setChecked(True)
-            self._append_log("[SUB-MODE] Private Sanctuary ENGAGED. Observer perception suppressed.", C["neon_cyan"])
+            self._append_log("[MODE] Unobserved Sanctuary Mode ENGAGED. Observer perception suppressed.", C["neon_cyan"])
             self._update_status("SANCTUARY: ON", C["neon_cyan"])
         else:
-            self.btn_t_unobserved.setText("🕶 PRIVACY: OFF")
+            self.btn_t_unobserved.setText("SANCTUARY: OFF")
             self.btn_t_unobserved.setStyleSheet("color: #708caa;")
             self.btn_t_unobserved.setChecked(False)
-            self._append_log("[SUB-MODE] Private Sanctuary DISENGAGED.", C["text_dim"])
+            self._append_log("[MODE] Unobserved Sanctuary Mode DISENGAGED.", C["text_dim"])
             self._update_status("SANCTUARY: OFF", C["text_dim"])
 
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.ws_client.send_command("set_modes", identity_mode=getattr(self.agent, "identity_mode", False), unobserved_mode=self.agent.unobserved_mode, autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
-            self._append_log(f"[MULTI-WS] Synced Privacy/Sanctuary Mode ({'ON' if self.agent.unobserved_mode else 'OFF'}) to Workplace 2.", C["neon_cyan"])
+            self._append_log(f"[MULTI-WS] Synced Sanctuary Mode ({'ON' if self.agent.unobserved_mode else 'OFF'}) to Workplace 2.", C["neon_cyan"])
 
+        self._sync_toggles()
+
+    def _toggle_quick_humanize(self):
+        curr = getattr(self.agent.controller, "humanize_control", True)
+        self.agent.controller.humanize_control = not curr
+        st = "ENGAGED (Bezier curves, touchpad gestures, micro-jitters)" if self.agent.controller.humanize_control else "DISENGAGED (instant teleportation)"
+        self._append_log(f"[CONTROLLER] Humanize Control {st}.", C["neon_cyan"] if self.agent.controller.humanize_control else C["text_dim"])
+        self._sync_toggles()
+
+    def _on_chk_humanize_toggled(self, checked: bool):
+        self.agent.controller.humanize_control = bool(checked)
         self._sync_toggles()
 
     def _on_alone_mode_toggled(self, checked: bool):
@@ -3294,7 +4110,7 @@ class AgentMainWindow(QMainWindow):
             if self.overseer_panel.isVisible():
                 self.overseer_panel.hide()
             return
-        should_show = getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False)
+        should_show = getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False)
         if should_show:
             if not self.overseer_panel.isVisible():
                 primary = QApplication.primaryScreen()
@@ -3376,6 +4192,30 @@ class AgentMainWindow(QMainWindow):
             return
         self._on_overseer_thought_injected(impulse)
 
+    def _toggle_quick_multimon(self):
+        """Cycles dedicated monitor workspace for AlphaLive."""
+        mons = self.agent.controller.get_available_monitors()
+        if not mons:
+            return
+        curr = getattr(self.agent.controller, "active_monitor_index", 0)
+        # Cycle to next monitor
+        next_idx = (curr + 1) % len(mons)
+        self.agent.controller.set_monitor_index(next_idx)
+        if hasattr(self, "combo_display"):
+            f_idx = self.combo_display.findData(next_idx)
+            if f_idx >= 0:
+                self.combo_display.blockSignals(True)
+                self.combo_display.setCurrentIndex(f_idx)
+                self.combo_display.blockSignals(False)
+        m_name = f"MONITOR {next_idx}" if next_idx > 0 else "MONITOR: ALL"
+        self.btn_t_multimon.setText(m_name)
+        if next_idx > 0:
+            self.btn_t_multimon.setStyleSheet(f"background: #0284c7; color: white; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold;")
+        else:
+            self.btn_t_multimon.setStyleSheet(f"background: transparent; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+        self._append_log(f"[MULTI-MONITOR] AlphaLive dedicated workstation set to: {mons[next_idx]['name']}", C["neon_cyan"])
+        self._update_status(f"WORKSPACE: {m_name}", C["neon_cyan"])
+
     def _toggle_multi_workspace_mode(self):
         active = self.btn_t_workspace.isChecked()
         self.is_remote_workspace_mode = active
@@ -3388,10 +4228,20 @@ class AgentMainWindow(QMainWindow):
             if self.agent.is_running:
                 self.agent.abort()
 
-            self.btn_t_workspace.setText("MULTI-WS: ON")
+            # Retrieve configured host/port from Overseer tab or config
+            target_host = "127.0.0.1"
+            target_port = 8766
+            if hasattr(self, "overseer_tab") and hasattr(self.overseer_tab, "edit_host"):
+                target_host = self.overseer_tab.edit_host.text().strip() or "127.0.0.1"
+                try:
+                    target_port = int(self.overseer_tab.edit_port.text().strip())
+                except Exception:
+                    target_port = 8766
+
+            self.btn_t_workspace.setText("DETACHED: ON")
             self.btn_t_workspace.setStyleSheet(f"background: #0284c7; color: #ffffff; border: 1px solid {C['neon_cyan']}; border-radius: 4px;")
-            self.ws_client.connect(host="127.0.0.1", port=8766)
-            self._append_log("[MULTI-WS] Engaged. Workplace 1 is now master Overseer. All inputs route to Workplace 2.", C["neon_cyan"])
+            self.ws_client.connect(host=target_host, port=target_port)
+            self._append_log(f"[DETACHED WORKSPACE] Engaged. Relinked to remote AI Node at ws://{target_host}:{target_port}", C["neon_cyan"])
             
             def _sync():
                 if hasattr(self, "ws_client") and self.ws_client and self.ws_client._connected:
@@ -3410,10 +4260,10 @@ class AgentMainWindow(QMainWindow):
             if hasattr(self, "hud") and self.hud:
                 self.hud.set_state("working", "OVERSEER MODE")
         else:
-            self.btn_t_workspace.setText("MULTI-WS: OFF")
+            self.btn_t_workspace.setText("DETACHED WS: OFF")
             self.btn_t_workspace.setStyleSheet(f"background: transparent; color: {C['text_dim']}; border: 1px dashed {C['border']}; border-radius: 4px;")
             self.ws_client.disconnect()
-            self._append_log("[MULTI-WS] Disengaged. Running in local workstation mode.", C["text_dim"])
+            self._append_log("[DETACHED WORKSPACE] Disengaged. Running in local workstation mode.", C["text_dim"])
             if hasattr(self, "chk_ws_placeholder"):
                 self.chk_ws_placeholder.blockSignals(True)
                 self.chk_ws_placeholder.setChecked(False)

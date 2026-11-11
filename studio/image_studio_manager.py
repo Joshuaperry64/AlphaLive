@@ -9,9 +9,21 @@ from pathlib import Path
 from contextlib import contextmanager
 from typing import Optional, Callable, Dict, Any, List, Tuple
 
+try:
+    from memory.memory_manager import is_private_or_explicit_text
+except ImportError:
+    import re as _re
+    def is_private_or_explicit_text(text: str) -> bool:
+        return bool(_re.search(r"\b(nsfw|nude|naked|sex|sexual|erotic|lust|porn|explicit|kink|fetish)\b", str(text or ""), _re.I))
+
 DB_PATH = Path(os.getenv("ALPHALIVE_DB_PATH", Path(__file__).parent.parent / "memory" / "memory.db"))
 IMAGES_DIR = Path(__file__).parent.parent / "history" / "images"
 SCRIPTS_DIR = Path(__file__).parent.parent / "core"
+
+PUBLIC_SAFE_MODELS = {"jugg", "cyber", "epic", "autism"}
+RESTRICTED_NSFW_MODELS = {"lust", "freedom", "unholy"}
+RESTRICTED_NSFW_LORAS = {"Cowgirl", "Missionary", "SpyCam"}
+
 
 # Model catalog mapping to AlphaCoreTech safetensors
 MODEL_CATALOG = {
@@ -52,8 +64,48 @@ DEFAULT_NEGATIVE_PROMPT = (
 class ImageStudioManager:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
+        self.primary_append: str = ""
+        self.alone_mode: bool = False  # Strictly defaults to False (Public Demo Safe)
+        self._load_primary_append()
         IMAGES_DIR.mkdir(parents=True, exist_ok=True)
         self._init_db()
+
+    def _load_primary_append(self, cfg_path: Optional[Path] = None):
+        """Loads PRIMARY APPEND prefix from config.json if available."""
+        if cfg_path is None:
+            cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+        if cfg_path.exists():
+            try:
+                import json
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                self.primary_append = cfg.get("Studio", {}).get("PrimaryAppend", "")
+            except Exception as e:
+                print(f"[ImageStudioManager] Error loading PrimaryAppend from config: {e}")
+
+    def set_primary_append(self, prefix: str, cfg_path: Optional[Path] = None) -> bool:
+        """Sets and persists the PRIMARY APPEND prefix in config.json."""
+        self.primary_append = prefix.strip()
+        if cfg_path is None:
+            cfg_path = Path(__file__).resolve().parent.parent / "config.json"
+        try:
+            import json
+            cfg = {}
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                except Exception:
+                    cfg = {}
+            if "Studio" not in cfg:
+                cfg["Studio"] = {}
+            cfg["Studio"]["PrimaryAppend"] = self.primary_append
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4)
+            return True
+        except Exception as e:
+            print(f"[ImageStudioManager] Error saving PrimaryAppend to config: {e}")
+            return False
 
     @contextmanager
     def _get_conn(self, timeout: float = 10.0):
@@ -132,21 +184,25 @@ class ImageStudioManager:
             return None
 
     def generate_character_image(self, character_name: str, model_key: str = "freedom", lora_key: str = "none", upscaler_key: str = "realesrgan-x4plus"):
-        """Generates an image for a character using their NSFW description."""
+        """Generates an image for a character using their visual description."""
         character = self.get_character_details(character_name)
-        if not character or not character.get("nsfw_description"):
-            print(f"[ImageStudioManager] No character or NSFW description found for {character_name}")
+        if not character:
+            print(f"[ImageStudioManager] No character found for {character_name}")
+            return None
+        if getattr(self, "alone_mode", False):
+            prompt = character.get("nsfw_description") or character.get("description", "") or character.get("personality", "")
+        else:
+            prompt = character.get("description", "") or f"Portrait of {character_name}, {character.get('personality', 'confident and intelligent')}, sfw, clothed"
+            if model_key in RESTRICTED_NSFW_MODELS:
+                model_key = "jugg"
+            if lora_key in RESTRICTED_NSFW_LORAS:
+                lora_key = "none"
+        if not prompt:
+            print(f"[ImageStudioManager] No visual description found for character {character_name}")
             return None
 
-        prompt = character["nsfw_description"]
-        # Here you would call your actual image generation logic
-        # For now, we'll just log it and return a placeholder
-        print(f"Generating image for {character_name} with prompt: {prompt}")
-        
-        # Placeholder for image generation call
-        # image_data = self.generate_image(prompt, model_key, lora_key, upscaler_key)
-        # return image_data
-        return "path/to/placeholder.png"
+        print(f"[ImageStudioManager] Generating image for character '{character_name}' with prompt: {prompt}")
+        return self.generate_image(prompt=prompt, model_name=model_key, lora=lora_key)
 
     def get_learnings(self) -> List[Dict[str, Any]]:
         """Fetch all stored prompt learnings ordered by rating weight."""
@@ -392,15 +448,55 @@ class ImageStudioManager:
         guidance: float = 7.0,
         seed: int = -1,
         lora: str = "none",
-        progress_callback: Optional[Callable[[int, int, str], None]] = None
+        progress_callback: Optional[Callable[[int, int, str], None]] = None,
+        lora_name: Optional[str] = None,
+        character_name: Optional[str] = None,
+        **kwargs
     ) -> Dict[str, Any]:
         """
         Executes an image generation request via Modal endpoint or local pipeline,
-        refines prompts automatically, writes output to disk, and registers with memory.db.
+        prepends PRIMARY APPEND prefix, refines prompts automatically, writes output to disk,
+        and registers with memory.db.
         """
+        if lora_name and lora == "none":
+            lora = lora_name
+
+        is_alone = bool(getattr(self, "alone_mode", False))
+
+        if character_name and not prompt.strip():
+            char = self.get_character_details(character_name)
+            if char:
+                if is_alone:
+                    prompt = char.get("nsfw_description") or char.get("description", "")
+                else:
+                    prompt = char.get("description", "") or f"Portrait of {character_name}, clothed, professional portrait"
+
+        # Enforce Public Demo Discretion when Alone Mode is OFF
+        if not is_alone:
+            if is_private_or_explicit_text(prompt):
+                return {
+                    "status": "blocked",
+                    "error": "I can't do that right now. We can try again later.",
+                    "image_path": "",
+                    "id": -1,
+                }
+            if model_name in RESTRICTED_NSFW_MODELS:
+                model_name = "jugg"
+            if lora in RESTRICTED_NSFW_LORAS:
+                lora = "none"
+
+        # Apply PRIMARY APPEND prefix if configured (e.g. 'realistic' + 'red car' -> 'realistic red car')
+        if getattr(self, "primary_append", ""):
+            clean_prefix = self.primary_append.strip()
+            if clean_prefix and (is_alone or not is_private_or_explicit_text(clean_prefix)):
+                if not prompt.lower().startswith(clean_prefix.lower()):
+                    prompt = f"{clean_prefix} {prompt.strip()}"
+
         refined_p, refined_neg = self.refine_prompt(prompt, model_name)
         if negative_prompt:
             refined_neg = f"{negative_prompt}, {refined_neg}"
+        if not is_alone:
+            refined_neg = f"nsfw, nude, nudity, naked, explicit, sexual, revealing, topless, lingerie, {refined_neg}"
 
         if seed < 0:
             seed = random.randint(100000, 999999999)
@@ -520,6 +616,7 @@ class ImageStudioManager:
         )
 
         return {
+            "status": "success",
             "id": gen_id,
             "image_path": str(out_path),
             "file_name": out_filename,

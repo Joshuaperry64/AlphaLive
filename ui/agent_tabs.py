@@ -161,9 +161,9 @@ class AgentMemoryTab(QWidget):
         self.profile_widget = self._build_profile_subtab()
         self.subtabs.addTab(self.profile_widget, "PERSONAL INTELLIGENCE")
 
-        # Subtab 5: AI Identity Memory
+        # Subtab 5: Sovereign Sanctuary Vault & Identity Memory
         self.identity_widget = self._build_identity_subtab()
-        self.subtabs.addTab(self.identity_widget, "🤖 AI IDENTITY MEMORY")
+        self.subtabs.addTab(self.identity_widget, "🛡️ SANCTUARY & IDENTITY VAULT")
 
         root.addWidget(self.subtabs, 1)
 
@@ -549,7 +549,7 @@ class AgentMemoryTab(QWidget):
         top.addWidget(self.identity_search, 1)
 
         self.identity_domain_filter = QComboBox()
-        self.identity_domain_filter.addItems(["ALL DOMAINS", "project", "goal", "diary", "thought", "fact", "preference", "general"])
+        self.identity_domain_filter.addItems(["ALL DOMAINS", "project", "reverie", "dream", "autonomous_cognition", "goal", "diary", "thought", "fact", "preference", "general"])
         self.identity_domain_filter.setStyleSheet(f"background: {C['bg_deep']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; font-family: {FONT_FAMILY}; font-size: 11px; padding: 4px;")
         self.identity_domain_filter.currentTextChanged.connect(self._filter_identity)
         top.addWidget(self.identity_domain_filter)
@@ -922,6 +922,35 @@ class AgentStudioTab(QWidget):
         hdr.addWidget(self.btn_open_folder)
         root.addLayout(hdr)
 
+        # 1b. Primary Append Prefix Bar (Auto-prepended to all AI generations)
+        append_frame = QFrame()
+        append_frame.setStyleSheet(f"background: {C['bg_deep']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px;")
+        app_layout = QHBoxLayout(append_frame)
+        app_layout.setContentsMargins(4, 2, 4, 2)
+        app_layout.setSpacing(6)
+
+        lbl_app = QLabel("⚡ PRIMARY APPEND:")
+        lbl_app.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        lbl_app.setStyleSheet(f"color: {C['neon_yellow']};")
+        app_layout.addWidget(lbl_app)
+
+        self.txt_primary_append = QLineEdit()
+        self.txt_primary_append.setPlaceholderText("Prefix prepended to all AI generations (e.g. realistic, cinematic, masterpiece)...")
+        self.txt_primary_append.setStyleSheet(f"background: {C['bg_dark']}; color: {C['neon_yellow']}; border: 1px solid {C['border']}; border-radius: 3px; padding: 3px 6px; font-weight: bold;")
+        init_append = getattr(self.sm, "primary_append", "") if self.sm else ""
+        self.txt_primary_append.setText(init_append)
+        self.txt_primary_append.textChanged.connect(self._on_primary_append_changed)
+        app_layout.addWidget(self.txt_primary_append, 1)
+
+        self.btn_save_append = QPushButton("💾 SAVE")
+        self.btn_save_append.setFixedHeight(24)
+        self.btn_save_append.setFont(QFont(FONT_FAMILY, 8, QFont.Weight.Bold))
+        self.btn_save_append.setStyleSheet(f"background: {C['bg_card']}; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 3px; padding: 0 8px;")
+        self.btn_save_append.clicked.connect(self._save_primary_append)
+        app_layout.addWidget(self.btn_save_append)
+
+        root.addWidget(append_frame)
+
         # 2. Progress Bar
         self.progress_bar = QProgressBar()
         self.progress_bar.setFixedHeight(4)
@@ -1189,11 +1218,40 @@ class AgentStudioTab(QWidget):
         self.fullscreen_viewer.update_image(self.current_img_path)
         self.fullscreen_viewer.showFullScreen()
 
+    def _on_primary_append_changed(self, text: str):
+        if self.sm:
+            self.sm.primary_append = text
+        if hasattr(self.main_win, "agent") and self.main_win.agent and getattr(self.main_win.agent, "studio_manager", None):
+            self.main_win.agent.studio_manager.primary_append = text
+
+    def _save_primary_append(self):
+        text = self.txt_primary_append.text().strip()
+        saved = False
+        if self.sm and hasattr(self.sm, "set_primary_append"):
+            saved = self.sm.set_primary_append(text)
+        if hasattr(self.main_win, "agent") and self.main_win.agent and getattr(self.main_win.agent, "studio_manager", None):
+            self.main_win.agent.studio_manager.set_primary_append(text)
+            saved = True
+        self.lbl_pipeline_status.setText(f"Primary Append saved: '{text}'" if saved else f"Primary Append set: '{text}'")
+
     def on_image_generated(self, img_path: str, gen_res: dict):
-        """Called automatically by AlphaAgent upon generation completion."""
+        """Called automatically by AlphaAgent upon generation completion or external media update."""
         self.lbl_pipeline_status.setText(f"New generation received: {os.path.basename(img_path)}")
         self._refresh_history()
         self._load_image_by_index(0)
+
+        # Update latest studio image reference on agent
+        if hasattr(self.main_win, "agent") and self.main_win.agent:
+            self.main_win.agent.latest_studio_image = img_path
+            # Trigger autonomous AI response/commentary if agent is not currently executing a turn
+            if not getattr(self.main_win.agent, "is_running", False) and hasattr(self.main_win, "_run_task"):
+                bname = os.path.basename(img_path)
+                critique_note = gen_res.get("ai_critique", "") if isinstance(gen_res, dict) else ""
+                trigger_text = (
+                    f"[Visual Telemetry: A new image was generated/updated in Studio at '{bname}'. "
+                    f"View it via your studio media vision, critique the aesthetics and rendering, and comment to Josh.]"
+                )
+                self.main_win._run_task(trigger_text)
 
     def _on_manual_generate(self):
         prompt = self.txt_prompt.text().strip()
@@ -1265,8 +1323,7 @@ class AgentStudioTab(QWidget):
             up_path = res.get("upscaled_path")
             if up_path and os.path.exists(up_path):
                 self.lbl_pipeline_status.setText("Upscale 4x complete!")
-                self._refresh_history()
-                self._load_image_by_index(0)
+                self.on_image_generated(up_path, res)
             self.btn_upscale.setEnabled(True)
 
         def _on_err(err_msg):

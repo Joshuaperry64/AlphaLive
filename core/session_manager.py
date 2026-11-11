@@ -150,6 +150,62 @@ class SessionManager:
             except Exception as e:
                 print(f"[SessionManager] Auto extract facts error: {e}")
 
+    def get_session_checkpoint(self, session_name: str) -> dict:
+        """Capture the exact file size and memory checkpoint before executing a turn."""
+        clean = self.sanitize_name(session_name)
+        file = self.get_session_file(clean)
+        file_size = file.stat().st_size if file.exists() else 0
+        mem_cp = self.mm.get_memory_checkpoint() if self.mm else {}
+        return {
+            "session_name": clean,
+            "file_size": file_size,
+            "memory_checkpoint": mem_cp,
+            "timestamp": time.time(),
+        }
+
+    def rollback_session(self, session_name: str, checkpoint: dict) -> bool:
+        """Rollback session file and SQL memory to exact state before the turn."""
+        if not checkpoint:
+            return False
+        clean = self.sanitize_name(session_name)
+        file = self.get_session_file(clean)
+        ok = True
+        try:
+            if file.exists() and "file_size" in checkpoint:
+                target_size = checkpoint["file_size"]
+                with open(file, "r+b") as f:
+                    f.truncate(target_size)
+        except Exception as e:
+            print(f"[SessionManager] Rollback file error: {e}")
+            ok = False
+
+        if self.mm and checkpoint.get("memory_checkpoint"):
+            self.mm.rollback_memory(checkpoint["memory_checkpoint"])
+
+        return ok
+
+    def pop_last_turn(self, session_name: str) -> bool:
+        """Pops the most recent conversational turn from the session file."""
+        clean = self.sanitize_name(session_name)
+        file = self.get_session_file(clean)
+        if not file.exists():
+            return False
+        try:
+            with open(file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            pattern = re.compile(r"(\[(?:You|Alpha|Internal Impulse|[A-Za-z0-9_\-]+)\]:\s*.*?\n\[Alpha\]:\s*.*?\n\n)", re.DOTALL)
+            matches = list(pattern.finditer(content))
+            if not matches:
+                return False
+            last_m = matches[-1]
+            new_content = content[:last_m.start()] + content[last_m.end():]
+            with open(file, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            return True
+        except Exception as e:
+            print(f"[SessionManager] Error popping last turn: {e}")
+            return False
+
     def build_session_context(self, session_name: str, max_chars: int = 15000) -> str:
         """
         Build full structured session context including prior conversation and personal intelligence.

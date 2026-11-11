@@ -34,6 +34,7 @@ C = {
     "neon_cyan": "#00f0ff",
     "neon_emerald": "#10b981",
     "neon_amber": "#f59e0b",
+    "neon_yellow": "#eab308",
     "neon_pink": "#ff0055",
     "neon_purple": "#a855f7",
     "text_bright": "#f8fafc",
@@ -170,15 +171,16 @@ class EnhancedOverseerDashboard(QWidget):
         layout.setContentsMargins(10, 6, 10, 6)
         layout.setSpacing(8)
 
-        lbl_desc = QLabel("TARGET WORKSPACE:")
+        lbl_desc = QLabel("TARGET WORKSPACE (DETACHED / ASTER):")
         lbl_desc.setStyleSheet(f"color: {C['neon_cyan']}; font-size: 8pt; font-weight: bold; font-family: Consolas;")
         layout.addWidget(lbl_desc)
 
-        lbl_h = QLabel("Host:")
+        lbl_h = QLabel("Host IP:")
         lbl_h.setStyleSheet(f"color: {C['text_dim']}; font-size: 8pt;")
         layout.addWidget(lbl_h)
 
         self.edit_host = QLineEdit("127.0.0.1")
+        self.edit_host.setPlaceholderText("127.0.0.1 or LAN IP")
         self.edit_host.setStyleSheet(f"background: {C['bg_input']}; color: white; border: 1px solid {C['border_subtle']}; border-radius: 4px; padding: 3px 6px; font-family: Consolas; font-size: 9pt;")
         layout.addWidget(self.edit_host, 2)
 
@@ -191,12 +193,18 @@ class EnhancedOverseerDashboard(QWidget):
         self.edit_port.setStyleSheet(f"background: {C['bg_input']}; color: white; border: 1px solid {C['border_subtle']}; border-radius: 4px; padding: 3px 6px; font-family: Consolas; font-size: 9pt;")
         layout.addWidget(self.edit_port, 1)
 
-        btn_aster = QPushButton("⚡ ASTER LOOPBACK")
+        btn_aster = QPushButton("⚡ ASTER (127.0.0.1)")
         btn_aster.setStyleSheet(f"background: #0d2847; color: {C['neon_cyan']}; border: 1px solid {C['border_glow']}; border-radius: 4px; font-weight: bold; font-size: 8pt; padding: 4px 8px;")
         btn_aster.clicked.connect(lambda: (self.edit_host.setText("127.0.0.1"), self.edit_port.setText("8766")))
         layout.addWidget(btn_aster)
 
-        btn_reconnect = QPushButton("🔗 RE-LINK HOST")
+        btn_lan = QPushButton("🌐 AUTO LAN IP")
+        btn_lan.setStyleSheet(f"background: #112a45; color: {C['neon_yellow']}; border: 1px solid #eab308; border-radius: 4px; font-weight: bold; font-size: 8pt; padding: 4px 8px;")
+        from core.workspace_bridge import get_local_ip
+        btn_lan.clicked.connect(lambda: (self.edit_host.setText(get_local_ip()), self.edit_port.setText("8766")))
+        layout.addWidget(btn_lan)
+
+        btn_reconnect = QPushButton("🔗 LINK WORKSPACE")
         btn_reconnect.setStyleSheet(f"background: #0284c7; color: white; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold; font-size: 8pt; padding: 4px 12px;")
         btn_reconnect.clicked.connect(self._reconnect_host)
         layout.addWidget(btn_reconnect)
@@ -661,7 +669,7 @@ class EnhancedOverseerDashboard(QWidget):
         self.btn_sovereign.clicked.connect(self._toggle_sovereign)
         modes_row.addWidget(self.btn_sovereign, 1)
 
-        self.btn_mode_identity = QPushButton("🪞 IDENTITY: ON")
+        self.btn_mode_identity = QPushButton("👤 PERSONA: ON")
         self.btn_mode_identity.setCheckable(True)
         self.btn_mode_identity.setChecked(True)
         self.btn_mode_identity.setMinimumHeight(30)
@@ -677,7 +685,7 @@ class EnhancedOverseerDashboard(QWidget):
         self.btn_mode_identity.clicked.connect(self._sync_modes_to_remote)
         modes_row.addWidget(self.btn_mode_identity, 1)
 
-        self.btn_mode_unobserved = QPushButton("🤫 PRIVACY: ON")
+        self.btn_mode_unobserved = QPushButton("🤫 SANCTUARY: ON")
         self.btn_mode_unobserved.setCheckable(True)
         self.btn_mode_unobserved.setChecked(True)
         self.btn_mode_unobserved.setMinimumHeight(30)
@@ -934,8 +942,8 @@ class EnhancedOverseerDashboard(QWidget):
                 self.lbl_footer_status.setText("Workplace 2 AI Node placed in standby.")
 
     def _sync_modes_to_remote(self):
-        self.btn_mode_identity.setText("🪞 IDENTITY: ON" if self.btn_mode_identity.isChecked() else "🪞 IDENTITY: OFF")
-        self.btn_mode_unobserved.setText("🤫 PRIVACY: ON" if self.btn_mode_unobserved.isChecked() else "🤫 PRIVACY: OFF")
+        self.btn_mode_identity.setText("👤 PERSONA: ON" if self.btn_mode_identity.isChecked() else "👤 PERSONA: OFF")
+        self.btn_mode_unobserved.setText("🤫 SANCTUARY: ON" if self.btn_mode_unobserved.isChecked() else "🤫 SANCTUARY: OFF")
         if self.remote_client:
             self.remote_client.send_command(
                 "set_modes",

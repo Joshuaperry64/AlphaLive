@@ -2,8 +2,24 @@ import os
 import sys
 import subprocess
 
-# Ensure we can import from sibling packages
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Ensure project root and sibling packages are on path
+base_dir = os.path.dirname(os.path.abspath(__file__))
+if base_dir not in sys.path:
+    sys.path.insert(0, base_dir)
+parent_dir = os.path.dirname(base_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Load environment variables from .env
+try:
+    from dotenv import load_dotenv
+    env_file = os.path.join(base_dir, ".env")
+    if os.path.exists(env_file):
+        load_dotenv(dotenv_path=env_file)
+    else:
+        load_dotenv()
+except ImportError:
+    pass
 
 def _excepthook(exc_type, exc_value, exc_traceback):
     if issubclass(exc_type, KeyboardInterrupt):

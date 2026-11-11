@@ -17,6 +17,17 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+# Load environment variables from .env
+try:
+    from dotenv import load_dotenv
+    env_file = os.path.join(BASE_DIR, ".env")
+    if os.path.exists(env_file):
+        load_dotenv(dotenv_path=env_file)
+    else:
+        load_dotenv()
+except ImportError:
+    pass
+
 from PyQt6.QtWidgets import QApplication
 from core.workspace_bridge import WorkspaceClient
 from ui.overseer_dashboard import EnhancedOverseerDashboard

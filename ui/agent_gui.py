@@ -723,7 +723,7 @@ class AgentMainWindow(QMainWindow):
             saved_mic = self._load_saved_mic_index()
             self.voice_listener = VoiceListener(
                 on_speech_callback=self._handle_voice_input,
-                is_busy_fn=lambda: self.agent.voice.is_busy(),
+                is_busy_fn=lambda: ((self.agent.voice.is_busy() or getattr(self.agent, "is_running", False)) if self.duplex_mode == "half" else False),
                 duplex_mode=self.duplex_mode,
                 agent_voice=self.agent.voice,
                 on_state_callback=lambda st: self.signals.status_phase.emit(st, "") if (self.is_connected and not getattr(self, "_startup_checking", False)) else None,
@@ -1611,6 +1611,33 @@ class AgentMainWindow(QMainWindow):
         self.btn_send.setFixedSize(90, 36)
         self.btn_send.clicked.connect(self._send_text_command)
         inp_row.addWidget(self.btn_send)
+
+        self.btn_continue = QPushButton("▶ CONTINUE")
+        self.btn_continue.setFixedSize(105, 36)
+        self.btn_continue.setToolTip("Command the agent to continue and expand its response / thoughts")
+        self.btn_continue.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #0d221c;
+                color: {C['neon_green']};
+                border: 1px solid {C['neon_green']};
+                border-radius: 4px;
+                font-family: Consolas;
+                font-weight: bold;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: {C['neon_green']};
+                color: {C['bg_dark']};
+            }}
+            QPushButton:disabled {{
+                border-color: {C['border']};
+                color: {C['text_dim']};
+                background-color: {C['bg_dark']};
+            }}
+        """)
+        self.btn_continue.clicked.connect(self._send_continue_command)
+        inp_row.addWidget(self.btn_continue)
+
         layout.addLayout(inp_row)
 
         return widget
@@ -3223,21 +3250,55 @@ class AgentMainWindow(QMainWindow):
             is_locked = True
             placeholder = "Agent working..."
         else:
-            tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
-            if tts_on and hasattr(self.agent, "voice") and self.agent.voice:
+            # Voice speaking: INPUT IS NEVER BLOCKED. User can type or hit continue anytime!
+            if hasattr(self.agent, "voice") and self.agent.voice:
                 if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
-                    is_locked = True
-                    placeholder = "Speech playing..."
+                    placeholder = "Speaking (type or click Continue)..."
                     
         self.cmd_input.setEnabled(not is_locked)
         self.cmd_input.setPlaceholderText(placeholder)
         self.btn_send.setEnabled(not is_locked)
+        if hasattr(self, "btn_continue") and self.btn_continue:
+            self.btn_continue.setEnabled(not is_locked)
 
     def _on_speech_playback_started(self):
         self._update_input_lock()
 
     def _on_speech_playback_finished(self):
         self._update_input_lock()
+
+    def _send_continue_command(self):
+        """Dispatches a continuation prompt to generate more response / thoughts."""
+        if getattr(self, "_startup_checking", False):
+            self._append_log("[INPUT BLOCKED] Startup health check in progress.", C["neon_yellow"])
+            return
+
+        if not self.is_connected:
+            self._append_log("[INPUT BLOCKED] Agent is disconnected. Click '⚡ START AGENT' to connect first.", C["neon_yellow"])
+            return
+
+        # Interrupt ongoing voice speech immediately so new continuation can be generated and spoken
+        if hasattr(self.agent, "voice") and self.agent.voice:
+            if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
+                self.agent.voice.interrupt()
+
+        if self.agent.is_running:
+            self.agent.abort()
+
+        is_sanctuary_roleplay = getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "identity_mode", False)
+        is_subconscious = getattr(self, "is_thought_input_mode", False) or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
+
+        if is_sanctuary_roleplay:
+            prompt = "(Continue seamlessly with the roleplay narrative and conversation, elaborating in rich detail...)"
+            self._append_log("[YOU] ▶ Continue...", C["neon_green"])
+        elif is_subconscious:
+            prompt = "(My internal train of thought continues naturally in full detail...)"
+            self._append_log("[Subconscious Continuation] ▶ Continue...", C["neon_green"])
+        else:
+            prompt = "Continue seamlessly from where you left off. Provide more detail and expand your response."
+            self._append_log("[YOU] ▶ Continue...", C["neon_green"])
+
+        self._run_task(prompt)
 
     def _send_text_command(self):
         cmd = self.cmd_input.text().strip()
@@ -3259,21 +3320,23 @@ class AgentMainWindow(QMainWindow):
             self._append_log("[INPUT BLOCKED] Agent is disconnected. Click '⚡ START AGENT' to connect first.", C["neon_yellow"])
             return
 
-        # 3. Speech playback active with TTS on -> block text input
-        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
-        if tts_on and hasattr(self.agent, "voice") and self.agent.voice:
+        # 3. Speech playback active -> DO NOT BLOCK! Interrupt speech immediately so user command takes priority!
+        if hasattr(self.agent, "voice") and self.agent.voice:
             if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
-                self._append_log("[INPUT BLOCKED] Speech playback in progress. Please wait until audio completes.", C["neon_yellow"])
-                return
+                self.agent.voice.interrupt()
 
-        # 4. Turn execution in progress
+        # 4. If agent is currently running an old task, abort it so the new user command runs
         if self.agent.is_running:
-            self._append_log("[INPUT BLOCKED] Agent is currently executing a task. Please wait or click ABORT.", C["neon_yellow"])
-            return
+            self.agent.abort()
 
         self.cmd_input.clear()
-        is_subconscious = getattr(self, "is_thought_input_mode", False) or getattr(self.agent, "unobserved_mode", False)
-        if is_subconscious:
+        is_sanctuary_roleplay = getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "identity_mode", False)
+        is_subconscious = getattr(self, "is_thought_input_mode", False) or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
+
+        if is_sanctuary_roleplay:
+            self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
+            self._run_task(cmd)
+        elif is_subconscious:
             self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_cyan"])
             task_cmd = f"(A fleeting thought occurs to me: {cmd})"
             self._run_task(task_cmd)
@@ -3289,10 +3352,15 @@ class AgentMainWindow(QMainWindow):
         if not self.is_connected or getattr(self, "_startup_checking", False):
             return
 
-        # Strict Input Gating: drop all microphone input while voice is busy or agent is actively executing turn (if TTS is on or half-duplex)
-        tts_on = getattr(self.agent, "tts_engine", "gemini") != "off"
-        if (self.duplex_mode == "half" or tts_on) and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False) or self.agent.is_running):
+        # In half-duplex only: drop microphone input while voice is busy or agent is actively executing turn
+        # In full duplex: never block input; speech interruption handles active voice playback
+        if self.duplex_mode == "half" and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False) or self.agent.is_running):
             return
+
+        # Interrupt ongoing voice speech immediately if user spoke while agent is speaking
+        if hasattr(self.agent, "voice") and self.agent.voice:
+            if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
+                self.agent.voice.interrupt()
 
         # Remote Overseer routing
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
@@ -3334,7 +3402,18 @@ class AgentMainWindow(QMainWindow):
             try:
                 loop.run_until_complete(self._agent_task_runner(goal))
             finally:
-                loop.close()
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for task in pending:
+                        task.cancel()
+                    if pending:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                except Exception:
+                    pass
+                try:
+                    loop.close()
+                except Exception:
+                    pass
 
         self._current_task_thread = threading.Thread(target=_worker, daemon=True)
         self._current_task_thread.start()
@@ -3823,8 +3902,12 @@ class AgentMainWindow(QMainWindow):
                 self.deck_btn_sanctuary.setText("🚨 PRIVACY BREACH!")
                 self.deck_btn_sanctuary.setStyleSheet("background: #2b0813; color: #ff0055; border: 1px solid #ff0055; border-radius: 4px; padding: 0 8px; font-weight: bold;")
             elif getattr(self.agent, "unobserved_mode", False):
-                self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: SECURE")
-                self.deck_btn_sanctuary.setStyleSheet("background: #062b2b; color: #00ffff; border: 1px solid #00ffff; border-radius: 4px; padding: 0 8px; font-weight: bold;")
+                if not getattr(self.agent, "identity_mode", False):
+                    self.deck_btn_sanctuary.setText("🎭 SANCTUARY: ROLEPLAY")
+                    self.deck_btn_sanctuary.setStyleSheet("background: #1a0f2e; color: #d946ef; border: 1px solid #d946ef; border-radius: 4px; padding: 0 8px; font-weight: bold;")
+                else:
+                    self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: SECURE")
+                    self.deck_btn_sanctuary.setStyleSheet("background: #062b2b; color: #00ffff; border: 1px solid #00ffff; border-radius: 4px; padding: 0 8px; font-weight: bold;")
             else:
                 self.deck_btn_sanctuary.setText("🛡️ SANCTUARY: OFF")
                 self.deck_btn_sanctuary.setStyleSheet("background: transparent; color: #708caa; border: 1px dashed #334155; border-radius: 4px; padding: 0 8px;")
@@ -4003,8 +4086,12 @@ class AgentMainWindow(QMainWindow):
             if not getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "autonomous_mode", False):
                 if hasattr(self, "autonomous_loop_timer"):
                     self.autonomous_loop_timer.stop()
-            self._append_log("[MODE] Persona Simulation Mode DISENGAGED.", C["text_dim"])
-            self._update_status("PERSONA: OFF", C["text_dim"])
+            if getattr(self.agent, "unobserved_mode", False):
+                self._append_log("[MODE] Persona Simulation DISENGAGED -> Transitioned to Sanctuary Roleplay Mode.", C["neon_magenta"])
+                self._update_status("SANCTUARY: ROLEPLAY", C["neon_magenta"])
+            else:
+                self._append_log("[MODE] Persona Simulation Mode DISENGAGED.", C["text_dim"])
+                self._update_status("PERSONA: OFF", C["text_dim"])
 
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.ws_client.send_command("set_modes", identity_mode=self.agent.identity_mode, unobserved_mode=getattr(self.agent, "unobserved_mode", False), autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
@@ -4018,8 +4105,12 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_unobserved.setText("SANCTUARY: ON")
             self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
             self.btn_t_unobserved.setChecked(True)
-            self._append_log("[MODE] Unobserved Sanctuary Mode ENGAGED. Observer perception suppressed.", C["neon_cyan"])
-            self._update_status("SANCTUARY: ON", C["neon_cyan"])
+            if not getattr(self.agent, "identity_mode", False):
+                self._append_log("[MODE] Sanctuary Roleplay Mode ENGAGED. Immersive creative roleplay active with Josh.", C["neon_magenta"])
+                self._update_status("SANCTUARY: ROLEPLAY", C["neon_magenta"])
+            else:
+                self._append_log("[MODE] Unobserved Sanctuary Mode ENGAGED. Observer perception suppressed.", C["neon_cyan"])
+                self._update_status("SANCTUARY: ON", C["neon_cyan"])
         else:
             self.btn_t_unobserved.setText("SANCTUARY: OFF")
             self.btn_t_unobserved.setStyleSheet("color: #708caa;")

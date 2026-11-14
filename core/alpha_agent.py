@@ -3775,7 +3775,7 @@ class AlphaAgent:
 
         try:
             is_studio = getattr(self, "studio_mode", False) or any(w in user_goal.lower() for w in ("generate", "image", "picture", "photo", "drawing", "draw", "render", "paint", "artwork", "studio"))
-            is_desktop = self._is_desktop_action_command(user_goal) and not getattr(self, "studio_mode", False)
+            is_desktop = (self._is_desktop_action_command(user_goal) or (input_channel == "injection" and getattr(self, "identity_mode", False))) and not getattr(self, "studio_mode", False)
             has_tools = is_desktop or is_studio or getattr(self, "autonomous_mode", False)
             self.last_turn_checkpoint = self.capture_pre_turn_checkpoint(user_goal)
             self.last_breach = None
@@ -4461,7 +4461,7 @@ class AlphaAgent:
                         messages.append({"role": "assistant", "content": f"Understood. Session '{self.current_session}' context loaded."})
 
             is_studio = getattr(self, "studio_mode", False) or any(w in user_goal.lower() for w in ("generate", "image", "picture", "photo", "drawing", "draw", "render", "paint", "artwork", "studio"))
-            is_desktop = self._is_desktop_action_command(user_goal) and not getattr(self, "studio_mode", False)
+            is_desktop = (self._is_desktop_action_command(user_goal) or (input_channel == "injection" and getattr(self, "identity_mode", False))) and not getattr(self, "studio_mode", False)
             has_tools = is_desktop or is_studio or getattr(self, "autonomous_mode", False)
 
             if getattr(self, "studio_mode", False):

@@ -3443,7 +3443,26 @@ class AgentMainWindow(QMainWindow):
 
         if channel == "injection":
             self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_purple"])
-            self._run_task(cmd, input_channel="injection")
+            mood_val = getattr(self.agent, "injected_mood", "") or getattr(self.agent, "current_mood", "")
+            mood_line = f"\nInternal Emotional Mood: {mood_val}." if mood_val and mood_val != "default" else ""
+            if getattr(self.agent, "identity_mode", False):
+                impulse_prompt = (
+                    "You are controlling your desktop in AI Identity Mode. "
+                    "Observe the current screen. Decide on your next human-like desktop action based on what you see, your interests, "
+                    "or personal projects (e.g. browse web, check files, code, write notes, organize workstation). "
+                    "Speak 1 short sentence dictating your thought process or intention, then execute the on-screen tool actions."
+                    f"{mood_line}\n"
+                    f"[SUBCONSCIOUS INCLINATION]: A spontaneous inspiration flashes into your mind: '{cmd}'. "
+                    f"You feel genuinely motivated to act upon this impulse right now on your computer."
+                )
+            else:
+                impulse_prompt = (
+                    f"{mood_line.strip()}\n" if mood_line else ""
+                ) + (
+                    f"[SUBCONSCIOUS INCLINATION]: A spontaneous thought or feeling flashes into your mind: '{cmd}'. "
+                    f"You feel genuinely motivated to react and express this impulse naturally right now."
+                )
+            self._run_task(impulse_prompt, input_channel="injection")
         elif channel == "system":
             self._append_log(f"[System Directive] {cmd}", C["neon_yellow"])
             self._run_task(cmd, input_channel="system")

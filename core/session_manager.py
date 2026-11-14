@@ -184,6 +184,24 @@ class SessionManager:
 
         return ok
 
+    def replace_turn_text(self, session_name: str, old_text: str, new_text: str) -> bool:
+        """Replace a specific response's text in the session transcript file."""
+        clean = self.sanitize_name(session_name)
+        file = self.get_session_file(clean)
+        if not file.exists() or not old_text or not new_text:
+            return False
+        try:
+            with open(file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            if old_text.strip() in content:
+                updated = content.replace(old_text.strip(), new_text.strip(), 1)
+                with open(file, "w", encoding="utf-8") as f:
+                    f.write(updated)
+                return True
+        except Exception as e:
+            print(f"[SessionManager] Error replacing turn text: {e}")
+        return False
+
     def pop_last_turn(self, session_name: str) -> bool:
         """Pops the most recent conversational turn from the session file."""
         clean = self.sanitize_name(session_name)

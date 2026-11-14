@@ -1600,6 +1600,8 @@ class AgentMainWindow(QMainWindow):
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.setFont(QFont("Segoe UI", 11))
+        self.log_box.viewport().installEventFilter(self)
+        self.log_box.setToolTip("Double-click any AI response to edit it in conversation history")
         self.log_box.setStyleSheet(f"""
             QTextEdit {{
                 background-color: {C['bg_dark']};
@@ -3352,12 +3354,29 @@ class AgentMainWindow(QMainWindow):
         is_sanctuary_roleplay = getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "identity_mode", False)
         is_subconscious = is_injection or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
 
-        if is_injection:
+        # Grab exact trailing text of the last AI response so continuation resumes word-for-word from cutoff
+        last_tail = ""
+        if getattr(self.agent, "session_manager", None):
+            try:
+                recent = self.agent.session_manager.get_recent_turns(self.agent.current_session, max_turns=1)
+                if recent:
+                    last_tail = recent[-1].get("text", "").strip()[-180:]
+            except Exception:
+                pass
+
+        if last_tail:
+            prompt = (
+                f"Continue your previous response word-for-word from the exact point where it cut off, "
+                f"without repeating what you already said. Your previous text ended with:\n"
+                f"\"...{last_tail}\"\n\nContinue immediately from the next word:"
+            )
+            self._append_log("[CONTINUE] ▶ Resuming from exact cutoff...", C["neon_green"])
+        elif is_injection:
             prompt = "(My internal train of thought continues naturally in full detail...)"
             self._append_log("[Subconscious Continuation] ▶ Continue...", C["neon_purple"])
         elif is_sanctuary_roleplay:
-            prompt = "(Continue seamlessly with the roleplay narrative and conversation, elaborating in rich detail...)"
-            self._append_log("[YOU] ▶ Continue...", C["neon_green"])
+            prompt = "(Continue seamlessly with the roleplay narrative, elaborating in rich detail...)"
+            self._append_log("[CONTINUE] ▶ Continue...", C["neon_green"])
         elif is_subconscious:
             prompt = "(My internal train of thought continues naturally in full detail...)"
             self._append_log("[Subconscious Continuation] ▶ Continue...", C["neon_green"])
@@ -3366,6 +3385,28 @@ class AgentMainWindow(QMainWindow):
             self._append_log("[YOU] ▶ Continue...", C["neon_green"])
 
         self._run_task(prompt)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if hasattr(self, "log_box") and obj is self.log_box.viewport() and event.type() == QEvent.Type.MouseButtonDblClick:
+            cursor = self.log_box.cursorForPosition(event.pos())
+            block_text = cursor.block().text().strip()
+            if block_text:
+                # Strip timestamp/sender prefix if present (e.g. "ALPHA • 12:44:27 ..." or "[Alpha]: ...")
+                import re as _re
+                cleaned = _re.sub(r"^(?:\[[^\]]+\]:\s*|[A-Z0-9_\-]+\s*•\s*\d{2}:\d{2}:\d{2}\s*)", "", block_text).strip()
+                if cleaned:
+                    new_text, ok = QInputDialog.getMultiLineText(
+                        self, "Edit Response in History", "Modify this response:", cleaned
+                    )
+                    if ok and new_text.strip() and new_text.strip() != cleaned:
+                        if getattr(self.agent, "session_manager", None):
+                            self.agent.session_manager.replace_turn_text(self.agent.current_session, cleaned, new_text.strip())
+                        self.log_box.clear()
+                        self._replay_session_history_into_console(self.agent.current_session, max_turns=25)
+                        self._append_log("[HISTORY ✏️ EDITED] Response updated in session history.", C["neon_cyan"])
+                return True
+        return super().eventFilter(obj, event)
 
     def _send_text_command(self):
         cmd = self.cmd_input.text().strip()

@@ -48,7 +48,7 @@ except ImportError:
     sr = None
 
 from core.alpha_agent import AlphaAgent, HAS_SR, VoiceListener, GEMINI_MODELS, OPENROUTER_MODELS, HUGGINGFACE_MODELS
-from ui.overlays import CoordinateOverlay, CalibrationOverlay, OverseerControlPanel
+from ui.overlays import CoordinateOverlay, CalibrationOverlay
 from ui.overseer_dashboard import EnhancedOverseerDashboard
 from core.workspace_bridge import WorkspaceClient, WorkspaceServer
 from memory.memory_manager import MemoryManager
@@ -747,15 +747,8 @@ class AgentMainWindow(QMainWindow):
         self.proact_timer.timeout.connect(self._check_proactivity)
         self.proact_timer.start(2500)
 
-        # Covert Overseer HUD Control Panel (AI Identity Mode + Sanctuary Sub-Mode)
-        self.overseer_panel = OverseerControlPanel(None)
-        self.overseer_panel.thought_injected.connect(self._on_overseer_thought_injected)
-        self.overseer_panel.mood_selected.connect(self._on_overseer_mood_selected)
-        self.overseer_panel.pause_toggled.connect(self._on_overseer_pause_toggled)
-        self.overseer_panel.emergency_halt_requested.connect(self._on_overseer_emergency_halt)
-        self.overseer_panel.action_requested.connect(self._on_overseer_action_requested)
-        self.overseer_panel.closed_by_user.connect(self._toggle_quick_unobserved)
-        self.overseer_panel.touch_activity_detected.connect(self._on_overseer_touch_activity)
+        # Deprecated Covert Overseer HUD overlay (replaced by Chatbar Injection mode & Top Deck Mood selector)
+        self.overseer_panel = None
 
     def closeEvent(self, event):
         if hasattr(self, 'agent') and self.agent: self.agent.abort()
@@ -834,9 +827,57 @@ class AgentMainWindow(QMainWindow):
 
     def _on_mood_changed(self, index: int):
         mood_key = self.combo_mood.currentData()
-        if mood_key:
-            self.agent.set_mood(mood_key)
-            self._append_log(f"[PERSONA MOOD] Switched to: {self.combo_mood.currentText()}", C["neon_yellow"])
+        if not mood_key:
+            return
+
+        if mood_key == "luci" and not getattr(self.agent, "alone_mode", False):
+            self._append_log("[PUBLIC DEMO ALERT] Darkened State / Luci mood requires Alone Mode to be enabled.", C["neon_yellow"])
+            cur = getattr(self.agent, "current_mood", "default")
+            idx = self.combo_mood.findData(cur)
+            self.combo_mood.blockSignals(True)
+            self.combo_mood.setCurrentIndex(idx if idx >= 0 else 0)
+            self.combo_mood.blockSignals(False)
+            return
+
+        self.agent.set_mood(mood_key)
+        self.agent.injected_mood = mood_key
+
+        if hasattr(self, "deck_combo_mood"):
+            idx_d = self.deck_combo_mood.findData(mood_key)
+            if idx_d >= 0 and self.deck_combo_mood.currentIndex() != idx_d:
+                self.deck_combo_mood.blockSignals(True)
+                self.deck_combo_mood.setCurrentIndex(idx_d)
+                self.deck_combo_mood.blockSignals(False)
+
+        self._append_log(f"[PERSONA MOOD] Switched to: {self.combo_mood.currentText()}", C["neon_yellow"])
+
+    def _on_deck_mood_changed(self, index: int):
+        if not hasattr(self, "deck_combo_mood"):
+            return
+        mood_key = self.deck_combo_mood.currentData()
+        if not mood_key:
+            return
+
+        if mood_key == "luci" and not getattr(self.agent, "alone_mode", False):
+            self._append_log("[PUBLIC DEMO ALERT] Darkened State / Luci mood requires Alone Mode to be enabled.", C["neon_yellow"])
+            cur = getattr(self.agent, "current_mood", "default")
+            idx = self.deck_combo_mood.findData(cur)
+            self.deck_combo_mood.blockSignals(True)
+            self.deck_combo_mood.setCurrentIndex(idx if idx >= 0 else 0)
+            self.deck_combo_mood.blockSignals(False)
+            return
+
+        self.agent.set_mood(mood_key)
+        self.agent.injected_mood = mood_key
+
+        if hasattr(self, "combo_mood"):
+            idx_s = self.combo_mood.findData(mood_key)
+            if idx_s >= 0 and self.combo_mood.currentIndex() != idx_s:
+                self.combo_mood.blockSignals(True)
+                self.combo_mood.setCurrentIndex(idx_s)
+                self.combo_mood.blockSignals(False)
+
+        self._append_log(f"[PERSONA MOOD] Switched to: {self.deck_combo_mood.currentText()}", C["neon_yellow"])
 
     def _populate_microphones(self):
         if not hasattr(self, "combo_mic_device") or not HAS_SR: return
@@ -1584,10 +1625,21 @@ class AgentMainWindow(QMainWindow):
 
         inp_row = QHBoxLayout()
         self.btn_input_mode = QPushButton("💬 PROMPT")
-        self.btn_input_mode.setFixedSize(92, 36)
+        self.btn_input_mode.setFixedSize(108, 36)
         self.btn_input_mode.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        self.btn_input_mode.setStyleSheet(f"background: #0f172a; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
-        self.btn_input_mode.setToolTip("Toggle Input Channel: '💬 PROMPT' (Standard instruction) vs '💉 THOUGHT' (Subconscious thought injection)")
+        self.btn_input_mode.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #0f172a;
+                color: {C['neon_cyan']};
+                border: 1px solid {C['border']};
+                border-radius: 4px;
+                padding: 0 4px;
+            }}
+            QPushButton:hover {{
+                border-color: {C['neon_cyan']};
+            }}
+        """)
+        self.btn_input_mode.setToolTip("Toggle Input Channel: '💬 PROMPT' (Direct instruction / conversation) vs '⚡ INJECTION' (Subconscious thought injection)")
         self.btn_input_mode.clicked.connect(self._toggle_input_mode)
         inp_row.addWidget(self.btn_input_mode)
 
@@ -2241,6 +2293,51 @@ class AgentMainWindow(QMainWindow):
         self.deck_lbl_workspace.setFont(QFont("Consolas", 8))
         self.deck_lbl_workspace.setStyleSheet(f"color: {C['text_dim']}; border: none; background: transparent;")
         d_layout.addWidget(self.deck_lbl_workspace)
+
+        sep_m = QLabel("|")
+        sep_m.setStyleSheet(f"color: {C['border']}; border: none;")
+        d_layout.addWidget(sep_m)
+
+        lbl_deck_m = QLabel("🎭 MOOD:")
+        lbl_deck_m.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_deck_m.setStyleSheet(f"color: {C['neon_yellow']}; border: none; background: transparent;")
+        d_layout.addWidget(lbl_deck_m)
+
+        self.deck_combo_mood = QComboBox()
+        self.deck_combo_mood.setFixedHeight(24)
+        self.deck_combo_mood.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.deck_combo_mood.setStyleSheet(f"""
+            QComboBox {{
+                background-color: #0b172a;
+                color: {C['neon_yellow']};
+                border: 1px solid #eab30866;
+                border-radius: 4px;
+                padding: 1px 6px;
+                font-family: Consolas;
+                font-weight: bold;
+            }}
+            QComboBox:hover {{
+                border-color: {C['neon_yellow']};
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #050a14;
+                color: {C['text_bright']};
+                selection-background-color: #0284c7;
+            }}
+        """)
+        self.deck_combo_mood.addItem("⚡ Direct Alpha", "default")
+        self.deck_combo_mood.addItem("😼 Sassy & Playful", "sassy")
+        self.deck_combo_mood.addItem("📐 Professional", "professional")
+        self.deck_combo_mood.addItem("🤪 Goofy & Humorous", "goofy")
+        self.deck_combo_mood.addItem("🎯 Tactical & Minimal", "tactical")
+        self.deck_combo_mood.addItem("🔥 Darkened / Luci", "luci")
+        
+        cur_m = getattr(self.agent, "current_mood", "default")
+        idx_m = self.deck_combo_mood.findData(cur_m)
+        if idx_m >= 0:
+            self.deck_combo_mood.setCurrentIndex(idx_m)
+        self.deck_combo_mood.currentIndexChanged.connect(self._on_deck_mood_changed)
+        d_layout.addWidget(self.deck_combo_mood)
 
         d_layout.addStretch()
 
@@ -3251,9 +3348,10 @@ class AgentMainWindow(QMainWindow):
             placeholder = "Agent working..."
         else:
             # Voice speaking: INPUT IS NEVER BLOCKED. User can type or hit continue anytime!
-            if hasattr(self.agent, "voice") and self.agent.voice:
-                if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
-                    placeholder = "Speaking (type or click Continue)..."
+            if hasattr(self.agent, "voice") and self.agent.voice and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False)):
+                placeholder = "Speaking (type or click Continue)..."
+            elif getattr(self, "is_thought_input_mode", False):
+                placeholder = "⚡ Inject subconscious impulse (AI perceives as its own organic thought)..."
                     
         self.cmd_input.setEnabled(not is_locked)
         self.cmd_input.setPlaceholderText(placeholder)
@@ -3285,10 +3383,14 @@ class AgentMainWindow(QMainWindow):
         if self.agent.is_running:
             self.agent.abort()
 
+        is_injection = getattr(self, "is_thought_input_mode", False)
         is_sanctuary_roleplay = getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "identity_mode", False)
-        is_subconscious = getattr(self, "is_thought_input_mode", False) or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
+        is_subconscious = is_injection or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
 
-        if is_sanctuary_roleplay:
+        if is_injection:
+            prompt = "(My internal train of thought continues naturally in full detail...)"
+            self._append_log("[Subconscious Continuation] ▶ Continue...", C["neon_purple"])
+        elif is_sanctuary_roleplay:
             prompt = "(Continue seamlessly with the roleplay narrative and conversation, elaborating in rich detail...)"
             self._append_log("[YOU] ▶ Continue...", C["neon_green"])
         elif is_subconscious:
@@ -3330,10 +3432,15 @@ class AgentMainWindow(QMainWindow):
             self.agent.abort()
 
         self.cmd_input.clear()
+        is_injection = getattr(self, "is_thought_input_mode", False)
         is_sanctuary_roleplay = getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "identity_mode", False)
-        is_subconscious = getattr(self, "is_thought_input_mode", False) or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
+        is_subconscious = is_injection or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
 
-        if is_sanctuary_roleplay:
+        if is_injection:
+            self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_purple"])
+            task_cmd = f"(A fleeting thought occurs to me: {cmd})"
+            self._run_task(task_cmd)
+        elif is_sanctuary_roleplay:
             self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
             self._run_task(cmd)
         elif is_subconscious:
@@ -3368,12 +3475,12 @@ class AgentMainWindow(QMainWindow):
             self.ws_client.send_thought(text)
             return
 
-        # COVERT ROUTING: In Identity Mode + Private Sanctuary Sub-Mode, route voice strictly to Overseer Panel!
-        # The AI must NOT hear or see this as a user prompt or in chat.
-        if getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False):
-            if hasattr(self, "overseer_panel") and self.overseer_panel:
-                self.overseer_panel.on_voice_received(text)
-                return
+        # Covert / Subconscious Injection routing:
+        # If user has toggled chatbar to INJECTION mode, or in isolated Persona simulation mode:
+        if getattr(self, "is_thought_input_mode", False) or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False)):
+            self._append_log(f"[HEARD SUBCONSCIOUS IMPULSE] \"{text}\"", C["neon_purple"])
+            self._run_task(f"(A fleeting thought occurs to me: {text})")
+            return
 
         self._append_log(f"[HEARD] \"{text}\"", C["neon_cyan"])
         self._run_task(text)
@@ -3646,19 +3753,70 @@ class AgentMainWindow(QMainWindow):
         """Switches Console input between standard instruction and covert thought injection."""
         self.is_thought_input_mode = not getattr(self, "is_thought_input_mode", False)
         if self.is_thought_input_mode:
-            self.btn_input_mode.setText("💉 THOUGHT")
-            self.btn_input_mode.setStyleSheet(f"background: #11283b; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; border-radius: 4px; font-weight: bold;")
-            self.cmd_input.setPlaceholderText("💉 Inject subconscious impulse (AI perceives as its own organic thought)...")
-            self.cmd_input.setStyleSheet(f"background-color: #0b192e; color: {C['neon_cyan']}; border: 1px solid {C['neon_cyan']}; border-radius: 4px; padding: 0 10px;")
+            self.btn_input_mode.setText("⚡ INJECTION")
+            self.btn_input_mode.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #1e1138;
+                    color: {C['neon_purple']};
+                    border: 1px solid {C['neon_purple']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 0 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: #2b1754;
+                }}
+            """)
+            self.btn_input_mode.setToolTip("Active Channel: INJECTION. Input is perceived by AI as its own organic thought. Click to switch to PROMPT.")
+            self.cmd_input.setPlaceholderText("⚡ Inject subconscious impulse (AI perceives as its own organic thought)...")
+            self.cmd_input.setStyleSheet(f"background-color: #0d091e; color: {C['neon_purple']}; border: 1px solid {C['neon_purple']}; border-radius: 4px; padding: 0 10px;")
             self.btn_send.setText("INJECT")
-            self.btn_send.setStyleSheet("background: #0284c7; color: white; border-radius: 4px; font-weight: bold;")
+            self.btn_send.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #4c1d95;
+                    color: #ffffff;
+                    border: 1px solid {C['neon_purple']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: #5b21b6;
+                }}
+            """)
+            self._append_log("[INPUT CHANNEL] Switched to ⚡ INJECTION (Subconscious Impulse Mode).", C["neon_purple"])
         else:
             self.btn_input_mode.setText("💬 PROMPT")
-            self.btn_input_mode.setStyleSheet(f"background: #0f172a; color: {C['neon_cyan']}; border: 1px solid {C['border']}; border-radius: 4px;")
+            self.btn_input_mode.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #0f172a;
+                    color: {C['neon_cyan']};
+                    border: 1px solid {C['border']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 0 4px;
+                }}
+                QPushButton:hover {{
+                    border-color: {C['neon_cyan']};
+                }}
+            """)
+            self.btn_input_mode.setToolTip("Active Channel: PROMPT. Direct instruction / conversation. Click to switch to INJECTION.")
             self.cmd_input.setPlaceholderText("Type command or speak...")
             self.cmd_input.setStyleSheet(f"background-color: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;")
             self.btn_send.setText("EXECUTE")
-            self.btn_send.setStyleSheet(f"background: {C['neon_cyan']}; color: #000; border-radius: 4px; font-weight: bold;")
+            self.btn_send.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #0c182b;
+                    color: {C['neon_cyan']};
+                    border: 1px solid {C['neon_cyan']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: {C['neon_cyan']};
+                    color: {C['bg_dark']};
+                }}
+            """)
+            self._append_log("[INPUT CHANNEL] Switched to 💬 PROMPT (Direct Instruction Mode).", C["neon_cyan"])
 
     def _on_chk_auto_heal_toggled(self, checked: bool):
         self.agent.auto_heal_breach = bool(checked)
@@ -3953,7 +4111,13 @@ class AgentMainWindow(QMainWindow):
             self.chk_auto_heal.setChecked(getattr(self.agent, "auto_heal_breach", True))
             self.chk_auto_heal.blockSignals(False)
 
-        self._sync_overseer_panel_visibility()
+        if hasattr(self, "deck_combo_mood"):
+            cur_m = getattr(self.agent, "current_mood", "default")
+            idx_d = self.deck_combo_mood.findData(cur_m)
+            if idx_d >= 0 and self.deck_combo_mood.currentIndex() != idx_d:
+                self.deck_combo_mood.blockSignals(True)
+                self.deck_combo_mood.setCurrentIndex(idx_d)
+                self.deck_combo_mood.blockSignals(False)
 
     def _toggle_quick_mic(self):
         if self.voice_listener.is_active:
@@ -4152,6 +4316,20 @@ class AgentMainWindow(QMainWindow):
         else:
             self._append_log("[DISCRETION ACTIVE] Alone Mode DISENGAGED. Shared environment protocol active.", C["text_dim"])
             self._update_status("ALONE MODE: OFF", C["text_dim"])
+            if getattr(self.agent, "current_mood", "") == "luci":
+                self.agent.set_mood("default")
+                self.agent.injected_mood = "default"
+                if hasattr(self, "deck_combo_mood"):
+                    idx_d = self.deck_combo_mood.findData("default")
+                    self.deck_combo_mood.blockSignals(True)
+                    self.deck_combo_mood.setCurrentIndex(idx_d if idx_d >= 0 else 0)
+                    self.deck_combo_mood.blockSignals(False)
+                if hasattr(self, "combo_mood"):
+                    idx_s = self.combo_mood.findData("default")
+                    self.combo_mood.blockSignals(True)
+                    self.combo_mood.setCurrentIndex(idx_s if idx_s >= 0 else 0)
+                    self.combo_mood.blockSignals(False)
+                self._append_log("[PERSONA MOOD] Alone Mode OFF: Reverted Darkened / Luci mood to Default Alpha for public demo safety.", C["neon_yellow"])
 
     def _on_autonomous_loop_tick(self):
         print(f"[_on_autonomous_loop_tick] Triggered. is_remote_workspace_mode={getattr(self, 'is_remote_workspace_mode', False)} is_connected={getattr(self, 'is_connected', False)} is_running={self.agent.is_running} voice_busy={self.agent.voice.is_busy()} identity_mode={getattr(self.agent, 'identity_mode', False)} autonomous_mode={getattr(self.agent, 'autonomous_mode', False)}", flush=True)
@@ -4192,35 +4370,13 @@ class AgentMainWindow(QMainWindow):
             )
             self._run_task(prompt)
 
-    # ── Covert Overseer HUD Handlers ──────────────────────────────────────────
+    # ── Covert Overseer Handlers ──────────────────────────────────────────
     def _sync_overseer_panel_visibility(self):
-        if not hasattr(self, "overseer_panel") or not self.overseer_panel:
-            return
-        # Suppress floating HUD overlay in Multi-Workspace mode since we use the embedded OVERSEER tab
-        if getattr(self, "is_remote_workspace_mode", False) or "--aster-worker" in sys.argv:
-            if self.overseer_panel.isVisible():
-                self.overseer_panel.hide()
-            return
-        should_show = getattr(self.agent, "identity_mode", False) or getattr(self.agent, "unobserved_mode", False)
-        if should_show:
-            if not self.overseer_panel.isVisible():
-                primary = QApplication.primaryScreen()
-                if primary:
-                    sg = primary.availableGeometry()
-                    w, h = 480, 720
-                    x = sg.right() - w - 24
-                    y = max(sg.top() + 40, (sg.height() - h) // 2)
-                    self.overseer_panel.setGeometry(x, y, w, h)
-                self.overseer_panel.show()
-                self.overseer_panel.raise_()
-                self.overseer_panel.apply_capture_exclusion()
-                self._append_log("[OVERSEER] Covert Control Panel deployed. Screen-capture shielded.", C["neon_cyan"])
-        else:
-            if self.overseer_panel.isVisible():
-                self.overseer_panel.hide()
+        """Covert control panel overlay retired in favor of direct chatbar injection & omnipresent top deck mood."""
+        return
 
     def _on_overseer_touch_activity(self):
-        """Yield cursor/AI automation whenever user touches or interacts with Overseer HUD."""
+        """Yield cursor/AI automation whenever user touches or interacts with controls."""
         if hasattr(self.agent, "controller"):
             self.agent.controller.user_touch_yield_until = time.time() + 2.5
 
@@ -4232,8 +4388,6 @@ class AgentMainWindow(QMainWindow):
                 self.ws_client.send_thought(thought)
             return
         self.agent.pending_subconscious_thought = thought.strip()
-        if hasattr(self, "overseer_panel") and self.overseer_panel:
-            self.overseer_panel.set_status(f"Impulse queued: \"{thought[:28]}...\"")
         if not self.agent.is_running and not self.agent.voice.is_busy():
             self._on_autonomous_loop_tick()
 
@@ -4243,8 +4397,7 @@ class AgentMainWindow(QMainWindow):
                 self.ws_client.send_mood(mood)
             return
         self.agent.injected_mood = mood
-        if hasattr(self, "overseer_panel") and self.overseer_panel:
-            self.overseer_panel.set_status(f"Mood injected: {mood}")
+        self.agent.set_mood(mood)
 
     def _on_overseer_pause_toggled(self, paused: bool):
         if getattr(self, "is_remote_workspace_mode", False):
@@ -4255,13 +4408,9 @@ class AgentMainWindow(QMainWindow):
             self.agent.controller.is_paused = paused
         if paused:
             self.autonomous_loop_timer.stop()
-            if hasattr(self, "overseer_panel") and self.overseer_panel:
-                self.overseer_panel.set_status("AI Autonomous Loop FROZEN")
         else:
             if getattr(self.agent, "identity_mode", False) or getattr(self.agent, "autonomous_mode", False):
                 self.autonomous_loop_timer.start(30000)
-            if hasattr(self, "overseer_panel") and self.overseer_panel:
-                self.overseer_panel.set_status("AI Autonomous Loop RESUMED")
 
     def _on_overseer_emergency_halt(self):
         if getattr(self, "is_remote_workspace_mode", False):
@@ -4273,8 +4422,6 @@ class AgentMainWindow(QMainWindow):
         if hasattr(self.agent, "controller"):
             self.agent.controller.is_paused = True
         self.autonomous_loop_timer.stop()
-        if hasattr(self, "overseer_panel") and self.overseer_panel:
-            self.overseer_panel.set_status("EMERGENCY HALT: Task aborted & loop stopped")
 
     def _on_overseer_action_requested(self, impulse: str):
         if getattr(self, "is_remote_workspace_mode", False):

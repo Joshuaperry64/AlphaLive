@@ -32,23 +32,35 @@ def run_tests():
     assert hasattr(win, "btn_t_multimon")
     print("[TEST] Sidebar quick toggles verified (including DETACHED WS & HUMANIZE).")
 
-    # 3. Verify Identity Mode and Private Sanctuary Sub-Mode
+    # 3. Verify Identity Mode and Sanctuary Mode
     win._toggle_quick_identity()
     assert win.agent.identity_mode is True
     assert win.btn_t_unobserved.isEnabled() is True
     win._toggle_quick_unobserved()
     assert win.agent.unobserved_mode is True
-    assert win.overseer_panel.isVisible() is True
-    print("[TEST] Identity Mode and Private Sanctuary Sub-Mode verified.")
+    assert getattr(win, "overseer_panel", None) is None, "Covert control panel overlay should be retired"
+    print("[TEST] Identity Mode and Sanctuary Mode verified (floating overlay retired).")
 
-    # 4. Verify Overseer Panel Controls
-    win.overseer_panel._inject_thought()
-    win.overseer_panel._on_mood_selected("Tactical & Focused")
-    win.overseer_panel._on_pause_clicked(True)
-    assert win.agent.controller.is_paused is True
-    win.overseer_panel._on_pause_clicked(False)
-    assert win.agent.controller.is_paused is False
-    print("[TEST] Overseer Control Panel local interactions verified.")
+    # 4. Verify Chatbar Input Mode (PROMPT vs INJECTION) and Top Command Deck Mood Selector
+    assert win.btn_input_mode.text() == "💬 PROMPT"
+    assert win.is_thought_input_mode is False
+    win._toggle_input_mode()
+    assert win.btn_input_mode.text() == "⚡ INJECTION"
+    assert win.is_thought_input_mode is True
+    assert win.btn_send.text() == "INJECT"
+    win._toggle_input_mode()
+    assert win.btn_input_mode.text() == "💬 PROMPT"
+    assert win.is_thought_input_mode is False
+    assert win.btn_send.text() == "EXECUTE"
+
+    # Top Deck Mood Selector
+    assert hasattr(win, "deck_combo_mood")
+    win.deck_combo_mood.setCurrentIndex(win.deck_combo_mood.findData("sassy"))
+    assert win.agent.current_mood == "sassy"
+    assert win.combo_mood.currentData() == "sassy"
+    win.deck_combo_mood.setCurrentIndex(win.deck_combo_mood.findData("default"))
+    assert win.agent.current_mood == "default"
+    print("[TEST] Chatbar Prompt/Injection toggle and Top Command Deck Mood selector verified.")
 
     # 5. Verify Alone Mode (Default strictly OFF)
     assert win.agent.alone_mode is False

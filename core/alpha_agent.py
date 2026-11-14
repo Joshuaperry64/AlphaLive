@@ -3806,10 +3806,8 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                         parts=[types.Part.from_text(text=ack_text)]
                     ))
 
-            if is_isolated:
+            if is_isolated or getattr(self, "unobserved_mode", False):
                 prompt_text = f"(A thought occurs to me: {user_goal})"
-            elif getattr(self, "unobserved_mode", False):
-                prompt_text = f"Josh: {user_goal}"
             else:
                 prompt_text = f"User: {user_goal}"
             history.append(types.Content(
@@ -4472,18 +4470,14 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                     user_prompt = f"Architect: {user_goal}{media_info}"
             elif is_desktop:
                 screen_summary = await self.controller.get_screen_ocr_summary(fast_mode=False)
-                if is_isolated:
+                if is_isolated or getattr(self, "unobserved_mode", False):
                     # Natural cognitive framing: seamlessly reads as the AI's internal curiosity / thought spark
                     user_prompt = f"(A fleeting thought occurs to me: {user_goal})\n\n[What I see on my screen right now]:\n{screen_summary}"
-                elif getattr(self, "unobserved_mode", False):
-                    user_prompt = f"Josh: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
                 else:
                     user_prompt = f"Architect's Instruction: {user_goal}\n\n[Current Desktop State]:\n{screen_summary}"
             else:
-                if is_isolated:
+                if is_isolated or getattr(self, "unobserved_mode", False):
                     user_prompt = f"(A thought crosses my mind: {user_goal})"
-                elif getattr(self, "unobserved_mode", False):
-                    user_prompt = f"Josh: {user_goal}"
                 else:
                     user_prompt = f"Architect: {user_goal}"
             messages.append({"role": "user", "content": user_prompt})

@@ -3402,8 +3402,9 @@ class AgentMainWindow(QMainWindow):
             task_cmd = f"(A fleeting thought occurs to me: {cmd})"
             self._run_task(task_cmd)
         elif is_sanctuary_roleplay:
-            self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
-            self._run_task(cmd)
+            self._append_log(f"[Director Instruction] {cmd}", C["neon_cyan"])
+            task_cmd = f"[DIRECTOR INSTRUCTION - adjust your response/scene accordingly]: {cmd}"
+            self._run_task(task_cmd)
         elif is_subconscious:
             self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_cyan"])
             task_cmd = f"(A fleeting thought occurs to me: {cmd})"
@@ -4291,8 +4292,10 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
             self.btn_t_unobserved.setChecked(True)
             if not getattr(self.agent, "identity_mode", False):
-                self._append_log("[MODE] Sanctuary Roleplay Mode ENGAGED. Immersive creative roleplay active with Josh.", C["neon_magenta"])
+                self._append_log("[MODE] Sanctuary Roleplay Mode ENGAGED. Defaulting input to ⚡ INJECTION (thought injections).", C["neon_magenta"])
                 self._update_status("SANCTUARY: ROLEPLAY", C["neon_magenta"])
+                if not getattr(self, "is_thought_input_mode", False):
+                    self._toggle_input_mode()
             else:
                 self._append_log("[MODE] Unobserved Sanctuary Mode ENGAGED. Observer perception suppressed.", C["neon_cyan"])
                 self._update_status("SANCTUARY: ON", C["neon_cyan"])

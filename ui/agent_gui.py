@@ -1641,8 +1641,10 @@ class AgentMainWindow(QMainWindow):
                 border-color: {C['neon_cyan']};
             }}
         """)
-        self.btn_input_mode.setToolTip("Toggle Input Channel: '💬 PROMPT' (Direct instruction / conversation) vs '⚡ INJECTION' (Subconscious thought injection)")
+        self.btn_input_mode.setToolTip("Cycle Input Channel: '💬 PROMPT' -> '⚡ INJECTION' -> '⚙️ SYSTEM'")
         self.btn_input_mode.clicked.connect(self._toggle_input_mode)
+        self.input_channel = "prompt"
+        self.is_thought_input_mode = False
         inp_row.addWidget(self.btn_input_mode)
 
         self.cmd_input = QLineEdit()
@@ -3318,8 +3320,10 @@ class AgentMainWindow(QMainWindow):
             placeholder = "Agent working (type to interrupt & send)..."
         elif hasattr(self.agent, "voice") and self.agent.voice and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False)):
             placeholder = "Speaking (type or click Continue)..."
-        elif getattr(self, "is_thought_input_mode", False):
+        elif getattr(self, "input_channel", "prompt") == "injection" or getattr(self, "is_thought_input_mode", False):
             placeholder = "⚡ Inject subconscious impulse (AI perceives as its own organic thought)..."
+        elif getattr(self, "input_channel", "prompt") == "system":
+            placeholder = "⚙️ System directive (e.g., USER IS OFFLINE, scene update, response rule)..."
 
         # Text prompt box is NEVER blocked
         self.cmd_input.setEnabled(True)
@@ -3434,25 +3438,24 @@ class AgentMainWindow(QMainWindow):
             self.agent.abort()
 
         self.cmd_input.clear()
-        is_injection = getattr(self, "is_thought_input_mode", False)
+        channel = getattr(self, "input_channel", "injection" if getattr(self, "is_thought_input_mode", False) else "prompt")
         is_sanctuary_roleplay = getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "identity_mode", False)
-        is_subconscious = is_injection or (getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False))
 
-        if is_injection:
+        if channel == "injection":
             self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_purple"])
-            task_cmd = f"(A fleeting thought occurs to me: {cmd})"
-            self._run_task(task_cmd)
+            self._run_task(cmd, input_channel="injection")
+        elif channel == "system":
+            self._append_log(f"[System Directive] {cmd}", C["neon_yellow"])
+            self._run_task(cmd, input_channel="system")
         elif is_sanctuary_roleplay:
             self._append_log(f"[Director Instruction] {cmd}", C["neon_cyan"])
-            task_cmd = f"[DIRECTOR INSTRUCTION - adjust your response/scene accordingly]: {cmd}"
-            self._run_task(task_cmd)
-        elif is_subconscious:
+            self._run_task(f"[DIRECTOR INSTRUCTION - adjust your response/scene accordingly]: {cmd}", input_channel="system")
+        elif getattr(self.agent, "identity_mode", False) and getattr(self.agent, "unobserved_mode", False):
             self._append_log(f"[Subconscious Impulse] {cmd}", C["neon_cyan"])
-            task_cmd = f"(A fleeting thought occurs to me: {cmd})"
-            self._run_task(task_cmd)
+            self._run_task(cmd, input_channel="injection")
         else:
             self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
-            self._run_task(cmd)
+            self._run_task(cmd, input_channel="prompt")
 
     def _on_rp_impersonate(self):
         """Generate the next roleplay message/action from Josh's first-person perspective."""
@@ -3571,11 +3574,11 @@ class AgentMainWindow(QMainWindow):
         self._append_log(f"[HEARD] \"{text}\"", C["neon_cyan"])
         self._run_task(text)
 
-    def _run_task(self, goal: str):
+    def _run_task(self, goal: str, input_channel: str = "prompt"):
         if getattr(self, "is_remote_workspace_mode", False):
             # Master Overseer safety guard: NEVER execute local desktop actions on Workplace 1!
             if hasattr(self, "ws_client") and self.ws_client:
-                if getattr(self.agent, "identity_mode", False):
+                if input_channel == "injection" or getattr(self.agent, "identity_mode", False):
                     self.ws_client.send_thought(goal)
                 else:
                     self.ws_client.send_command("run_task", goal=goal)
@@ -3593,7 +3596,7 @@ class AgentMainWindow(QMainWindow):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(self._agent_task_runner(goal))
+                loop.run_until_complete(self._agent_task_runner(goal, input_channel=input_channel))
             finally:
                 try:
                     pending = asyncio.all_tasks(loop)
@@ -3611,7 +3614,7 @@ class AgentMainWindow(QMainWindow):
         self._current_task_thread = threading.Thread(target=_worker, daemon=True)
         self._current_task_thread.start()
 
-    async def _agent_task_runner(self, goal: str):
+    async def _agent_task_runner(self, goal: str, input_channel: str = "prompt"):
         def _safe_emit(sig_name: str, *args):
             try:
                 if hasattr(self, 'signals') and self.signals:
@@ -3628,7 +3631,7 @@ class AgentMainWindow(QMainWindow):
             _safe_emit("log_message", txt, col)
 
         try:
-            await self.agent.execute_turn(goal, on_step=_on_step, on_log=_on_log, on_status=_on_status)
+            await self.agent.execute_turn(goal, on_step=_on_step, on_log=_on_log, on_status=_on_status, input_channel=input_channel)
         except Exception as e:
             _safe_emit("log_message", f"[Agent Execution Error]: {e}", C["neon_red"])
         finally:
@@ -3835,10 +3838,13 @@ class AgentMainWindow(QMainWindow):
         else:
             self._toggle_quick_unobserved()
 
-    def _toggle_input_mode(self):
-        """Switches Console input between standard instruction and covert thought injection."""
-        self.is_thought_input_mode = not getattr(self, "is_thought_input_mode", False)
-        if self.is_thought_input_mode:
+    def _set_input_channel(self, channel: str):
+        """Switches Console input channel between 'prompt', 'injection', and 'system'."""
+        if channel not in ("prompt", "injection", "system"):
+            channel = "prompt"
+        self.input_channel = channel
+        self.is_thought_input_mode = (channel == "injection")
+        if channel == "injection":
             self.btn_input_mode.setText("⚡ INJECTION")
             self.btn_input_mode.setStyleSheet(f"""
                 QPushButton {{
@@ -3853,7 +3859,7 @@ class AgentMainWindow(QMainWindow):
                     background-color: #2b1754;
                 }}
             """)
-            self.btn_input_mode.setToolTip("Active Channel: INJECTION. Input is perceived by AI as its own organic thought. Click to switch to PROMPT.")
+            self.btn_input_mode.setToolTip("Active Channel: INJECTION. Input is perceived by AI as its own organic thought. Click to cycle to SYSTEM.")
             self.cmd_input.setPlaceholderText("⚡ Inject subconscious impulse (AI perceives as its own organic thought)...")
             self.cmd_input.setStyleSheet(f"background-color: #0d091e; color: {C['neon_purple']}; border: 1px solid {C['neon_purple']}; border-radius: 4px; padding: 0 10px;")
             self.btn_send.setText("INJECT")
@@ -3870,6 +3876,38 @@ class AgentMainWindow(QMainWindow):
                 }}
             """)
             self._append_log("[INPUT CHANNEL] Switched to ⚡ INJECTION (Subconscious Impulse Mode).", C["neon_purple"])
+        elif channel == "system":
+            self.btn_input_mode.setText("⚙️ SYSTEM")
+            self.btn_input_mode.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #291e05;
+                    color: {C['neon_yellow']};
+                    border: 1px solid {C['neon_yellow']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                    padding: 0 4px;
+                }}
+                QPushButton:hover {{
+                    background-color: #3d2d08;
+                }}
+            """)
+            self.btn_input_mode.setToolTip("Active Channel: SYSTEM. Authoritative system/environment directives (e.g., USER IS OFFLINE). Click to cycle to PROMPT.")
+            self.cmd_input.setPlaceholderText("⚙️ System directive (e.g., USER IS OFFLINE, scene update, response rule)...")
+            self.cmd_input.setStyleSheet(f"background-color: #141004; color: {C['neon_yellow']}; border: 1px solid {C['neon_yellow']}; border-radius: 4px; padding: 0 10px;")
+            self.btn_send.setText("DIRECTIVE")
+            self.btn_send.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #854d0e;
+                    color: #ffffff;
+                    border: 1px solid {C['neon_yellow']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                }}
+                QPushButton:hover {{
+                    background-color: #a16207;
+                }}
+            """)
+            self._append_log("[INPUT CHANNEL] Switched to ⚙️ SYSTEM (System / Environment Directive Mode).", C["neon_yellow"])
         else:
             self.btn_input_mode.setText("💬 PROMPT")
             self.btn_input_mode.setStyleSheet(f"""
@@ -3885,7 +3923,7 @@ class AgentMainWindow(QMainWindow):
                     border-color: {C['neon_cyan']};
                 }}
             """)
-            self.btn_input_mode.setToolTip("Active Channel: PROMPT. Direct instruction / conversation. Click to switch to INJECTION.")
+            self.btn_input_mode.setToolTip("Active Channel: PROMPT. Direct instruction / conversation. Click to cycle to INJECTION.")
             self.cmd_input.setPlaceholderText("Type command or speak...")
             self.cmd_input.setStyleSheet(f"background-color: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 0 10px;")
             self.btn_send.setText("EXECUTE")
@@ -3903,6 +3941,13 @@ class AgentMainWindow(QMainWindow):
                 }}
             """)
             self._append_log("[INPUT CHANNEL] Switched to 💬 PROMPT (Direct Instruction Mode).", C["neon_cyan"])
+
+    def _toggle_input_mode(self):
+        """Cycles Console input between PROMPT -> INJECTION -> SYSTEM."""
+        order = ["prompt", "injection", "system"]
+        curr = getattr(self, "input_channel", "injection" if getattr(self, "is_thought_input_mode", False) else "prompt")
+        nxt = order[(order.index(curr) + 1) % len(order)] if curr in order else "prompt"
+        self._set_input_channel(nxt)
 
     def _on_chk_auto_heal_toggled(self, checked: bool):
         self.agent.auto_heal_breach = bool(checked)
@@ -4333,10 +4378,9 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_unobserved.setStyleSheet("color: #00ffff; font-weight: bold;")
             self.btn_t_unobserved.setChecked(True)
             if not getattr(self.agent, "identity_mode", False):
-                self._append_log("[MODE] Sanctuary Roleplay Mode ENGAGED. Defaulting input to ⚡ INJECTION (thought injections).", C["neon_magenta"])
+                self._append_log("[MODE] Sanctuary Roleplay Mode ENGAGED. Defaulting input to ⚡ INJECTION (alone & unobserved).", C["neon_magenta"])
                 self._update_status("SANCTUARY: ROLEPLAY", C["neon_magenta"])
-                if not getattr(self, "is_thought_input_mode", False):
-                    self._toggle_input_mode()
+                self._set_input_channel("injection")
             else:
                 self._append_log("[MODE] Unobserved Sanctuary Mode ENGAGED. Observer perception suppressed.", C["neon_cyan"])
                 self._update_status("SANCTUARY: ON", C["neon_cyan"])

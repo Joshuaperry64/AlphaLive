@@ -181,21 +181,21 @@ class ObserverAwarenessDetector:
                         context=context
                     )
 
-            # Check operator address patterns (especially critical in unobserved or identity mode)
-            for regex, expl in self._compiled_operator:
-                m = regex.search(clean_verbal)
-                if m:
-                    return PrivacyBreachEvent(
-                        trigger_type="operator_address",
-                        matched_phrase=m.group(0),
-                        snippet=self._extract_snippet(clean_verbal, m.start(), m.end()),
-                        channel="verbal_output",
-                        explanation=expl,
-                        context=context
-                    )
+            # Check operator address patterns (critical in identity mode; in Sanctuary Roleplay without identity_mode, talking to Josh is normal)
+            if is_identity:
+                for regex, expl in self._compiled_operator:
+                    m = regex.search(clean_verbal)
+                    if m:
+                        return PrivacyBreachEvent(
+                            trigger_type="operator_address",
+                            matched_phrase=m.group(0),
+                            snippet=self._extract_snippet(clean_verbal, m.start(), m.end()),
+                            channel="verbal_output",
+                            explanation=expl,
+                            context=context
+                        )
 
-            # In unobserved sanctuary mode, the AI must NOT address a hypothetical second-person user
-            if is_unobserved or is_identity:
+                # In identity/sovereign mode, the AI must NOT address a hypothetical second-person user
                 m_outward = self.OUTWARD_QUERY_PATTERN.search(clean_verbal)
                 if m_outward:
                     return PrivacyBreachEvent(
@@ -203,7 +203,7 @@ class ObserverAwarenessDetector:
                         matched_phrase=m_outward.group(0),
                         snippet=self._extract_snippet(clean_verbal, m_outward.start(), m_outward.end()),
                         channel="verbal_output",
-                        explanation="AI asked an outward second-person question while in isolated/unobserved mode",
+                        explanation="AI asked an outward second-person question while in isolated/sovereign mode",
                         context=context
                     )
 

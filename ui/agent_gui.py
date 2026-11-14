@@ -2051,26 +2051,6 @@ class AgentMainWindow(QMainWindow):
         gm_layout = QVBoxLayout(grp_modes)
         gm_layout.setSpacing(8)
 
-        self.chk_automation_mode = QCheckBox("⚡ Fast Automation Mode (Ultra-low latency, tool-first execution with barge-in)")
-        self.chk_automation_mode.setStyleSheet(f"color: {C['neon_yellow']}; font-weight: bold;")
-        self.chk_automation_mode.setChecked(getattr(self.agent, "automation_mode", False))
-        gm_layout.addWidget(self.chk_automation_mode)
-
-        row_auto_loop = QHBoxLayout()
-        self.chk_autonomous_mode = QCheckBox("?? Continuous Autonomous Exploration Mode")
-        self.chk_autonomous_mode.setStyleSheet(f"color: #ffaa00; font-weight: bold;")
-        self.chk_autonomous_mode.setChecked(getattr(self.agent, "autonomous_mode", False))
-        row_auto_loop.addWidget(self.chk_autonomous_mode, 2)
-
-        row_auto_loop.addWidget(QLabel("Cycle Delay (s):"))
-        self.spin_auto_delay = QDoubleSpinBox()
-        self.spin_auto_delay.setRange(2.0, 30.0)
-        self.spin_auto_delay.setValue(4.5)
-        self.spin_auto_delay.setSingleStep(0.5)
-        self.spin_auto_delay.setStyleSheet(f"background: {C['bg_dark']}; color: {C['text_bright']}; border: 1px solid {C['border']}; border-radius: 4px; padding: 2px 6px;")
-        row_auto_loop.addWidget(self.spin_auto_delay, 1)
-        gm_layout.addLayout(row_auto_loop)
-
         row_ident = QHBoxLayout()
         self.chk_identity_mode = QCheckBox("👤 Persona Simulation Mode (Autonomous Human Personhood on Desktop)")
         self.chk_identity_mode.setStyleSheet(f"color: {C['neon_green']}; font-weight: bold;")
@@ -2184,8 +2164,6 @@ class AgentMainWindow(QMainWindow):
 
     def _save_automation_settings(self):
         if hasattr(self, 'agent') and self.agent:
-            self.agent.automation_mode = self.chk_automation_mode.isChecked()
-            self.agent.autonomous_mode = self.chk_autonomous_mode.isChecked()
             self.agent.identity_mode = self.chk_identity_mode.isChecked()
             self.agent.unobserved_mode = self.chk_unobserved_mode.isChecked()
             self.agent.studio_mode = self.chk_studio_mode.isChecked()
@@ -2444,10 +2422,9 @@ class AgentMainWindow(QMainWindow):
 
         self.btn_t_mic = QPushButton("MIC: ON")
         self.btn_t_desk = QPushButton("DESK: ON")
-        self.btn_t_vis = QPushButton("VISION: ON")
         self.btn_t_proact = QPushButton("PROACTIVE: OFF")
 
-        for btn in [self.btn_t_mic, self.btn_t_desk, self.btn_t_vis, self.btn_t_proact]:
+        for btn in [self.btn_t_mic, self.btn_t_desk, self.btn_t_proact]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
             btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
@@ -2468,9 +2445,7 @@ class AgentMainWindow(QMainWindow):
         lbl_modes.setAlignment(Qt.AlignmentFlag.AlignCenter)
         m_layout.addWidget(lbl_modes)
 
-        self.btn_t_auto = QPushButton("AUTO: OFF")
         self.btn_t_studio = QPushButton("STUDIO: OFF")
-        self.btn_t_autoloop = QPushButton("AUTONOMOUS: OFF")
         self.btn_t_identity = QPushButton("PERSONA: OFF")
         self.btn_t_unobserved = QPushButton("SANCTUARY: OFF")
         self.btn_t_unobserved.setEnabled(True)
@@ -2502,7 +2477,7 @@ class AgentMainWindow(QMainWindow):
         self.btn_t_multimon.setToolTip("Dedicated Multi-Monitor Mode: Cycles Alpha's dedicated desktop target to a second monitor")
         self.btn_t_multimon.clicked.connect(self._toggle_quick_multimon)
 
-        for btn in [self.btn_t_auto, self.btn_t_studio, self.btn_t_autoloop, self.btn_t_identity, self.btn_t_unobserved, self.btn_t_humanize]:
+        for btn in [self.btn_t_studio, self.btn_t_identity, self.btn_t_unobserved, self.btn_t_humanize]:
             btn.setCheckable(True)
             btn.setFixedHeight(27)
             btn.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
@@ -2513,12 +2488,9 @@ class AgentMainWindow(QMainWindow):
         s_layout.addWidget(self.card_modes)
 
         self.btn_t_mic.clicked.connect(self._toggle_quick_mic)
-        self.btn_t_auto.clicked.connect(self._toggle_quick_auto)
         self.btn_t_desk.clicked.connect(self._toggle_quick_desk)
-        self.btn_t_vis.clicked.connect(self._toggle_quick_vis)
         self.btn_t_proact.clicked.connect(self._toggle_quick_proact)
         self.btn_t_studio.clicked.connect(self._toggle_quick_studio)
-        self.btn_t_autoloop.clicked.connect(self._toggle_quick_autoloop)
         self.btn_t_identity.clicked.connect(self._toggle_quick_identity)
         self.btn_t_unobserved.clicked.connect(self._toggle_quick_unobserved)
 
@@ -2526,12 +2498,9 @@ class AgentMainWindow(QMainWindow):
         self.autonomous_loop_timer.timeout.connect(self._on_autonomous_loop_tick)
         
         self.btn_t_mic.setToolTip("Toggle microphone streaming input (On/Off)")
-        self.btn_t_auto.setToolTip("Fast Automation Mode: Immediate tool execution with barge-in support")
         self.btn_t_desk.setToolTip("Desktop OS Control: Allow mouse clicks and keyboard actions")
-        self.btn_t_vis.setToolTip("Optical Telemetry: Allow desktop screenshot captures")
         self.btn_t_proact.setToolTip("Proactive Background Engine: Spontaneous idle checks")
         self.btn_t_studio.setToolTip("Neural Studio Mode: Fast SDXL generation, bypass desktop capture")
-        self.btn_t_autoloop.setToolTip("Continuous Autonomous Exploration: Self-directed looping task execution")
         self.btn_t_identity.setToolTip("Persona Simulation Mode: Sovereign digital personhood acting like an on-screen human user")
         self.btn_t_unobserved.setToolTip("Unobserved Sanctuary Mode: Suppresses observer awareness so AI believes it is in complete privacy")
         self._sync_toggles()
@@ -3318,6 +3287,8 @@ class AgentMainWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _abort_task(self):
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
+
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.ws_client.send_halt()
             self._append_log("[MULTI-WS] Abort signal sent to Workplace 2.", C["neon_red"])
@@ -3336,28 +3307,26 @@ class AgentMainWindow(QMainWindow):
         placeholder = "Type command or speak..."
         
         if getattr(self, "_startup_checking", False):
-            is_locked = True
-            placeholder = "System cold booting..."
+            placeholder = "System cold booting (type anytime)..."
             if hasattr(self, "hud") and self.hud: self.hud.set_state("coldboot")
         elif not getattr(self, "is_connected", False):
-            is_locked = True
-            placeholder = "Agent offline..."
+            placeholder = "Type a message to connect & send..."
             if hasattr(self, "hud") and self.hud: self.hud.set_state("blocked", "OFFLINE")
         elif getattr(self.agent, "is_running", False):
-            is_locked = True
-            placeholder = "Agent working..."
-        else:
-            # Voice speaking: INPUT IS NEVER BLOCKED. User can type or hit continue anytime!
-            if hasattr(self.agent, "voice") and self.agent.voice and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False)):
-                placeholder = "Speaking (type or click Continue)..."
-            elif getattr(self, "is_thought_input_mode", False):
-                placeholder = "⚡ Inject subconscious impulse (AI perceives as its own organic thought)..."
-                    
-        self.cmd_input.setEnabled(not is_locked)
+            placeholder = "Agent working (type to interrupt & send)..."
+        elif hasattr(self.agent, "voice") and self.agent.voice and (self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False)):
+            placeholder = "Speaking (type or click Continue)..."
+        elif getattr(self, "is_thought_input_mode", False):
+            placeholder = "⚡ Inject subconscious impulse (AI perceives as its own organic thought)..."
+
+        # Text prompt box is NEVER blocked
+        self.cmd_input.setEnabled(True)
         self.cmd_input.setPlaceholderText(placeholder)
-        self.btn_send.setEnabled(not is_locked)
+        self.btn_send.setEnabled(True)
         if hasattr(self, "btn_continue") and self.btn_continue:
-            self.btn_continue.setEnabled(not is_locked)
+            self.btn_continue.setEnabled(True)
+        if hasattr(self, "btn_input_mode") and self.btn_input_mode:
+            self.btn_input_mode.setEnabled(True)
 
     def _on_speech_playback_started(self):
         self._update_input_lock()
@@ -3367,13 +3336,9 @@ class AgentMainWindow(QMainWindow):
 
     def _send_continue_command(self):
         """Dispatches a continuation prompt to generate more response / thoughts."""
-        if getattr(self, "_startup_checking", False):
-            self._append_log("[INPUT BLOCKED] Startup health check in progress.", C["neon_yellow"])
-            return
-
         if not self.is_connected:
-            self._append_log("[INPUT BLOCKED] Agent is disconnected. Click '⚡ START AGENT' to connect first.", C["neon_yellow"])
-            return
+            self.is_connected = True
+            self._finish_startup()
 
         # Interrupt ongoing voice speech immediately so new continuation can be generated and spoken
         if hasattr(self.agent, "voice") and self.agent.voice:
@@ -3406,28 +3371,24 @@ class AgentMainWindow(QMainWindow):
         cmd = self.cmd_input.text().strip()
         if not cmd: return
 
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
+
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.cmd_input.clear()
             self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
             self.ws_client.send_thought(cmd)
             return
 
-        # 1. Startup health check in progress -> block text input
-        if getattr(self, "_startup_checking", False):
-            self._append_log("[INPUT BLOCKED] Startup health check in progress. Please wait until connection completes.", C["neon_yellow"])
-            return
-
-        # 2. Agent not connected -> block text input
         if not self.is_connected:
-            self._append_log("[INPUT BLOCKED] Agent is disconnected. Click '⚡ START AGENT' to connect first.", C["neon_yellow"])
-            return
+            self.is_connected = True
+            self._finish_startup()
 
-        # 3. Speech playback active -> DO NOT BLOCK! Interrupt speech immediately so user command takes priority!
+        # Speech playback active -> DO NOT BLOCK! Interrupt speech immediately so user command takes priority!
         if hasattr(self.agent, "voice") and self.agent.voice:
             if self.agent.voice.is_busy() or getattr(self.agent.voice, "is_speaking", False):
                 self.agent.voice.interrupt()
 
-        # 4. If agent is currently running an old task, abort it so the new user command runs
+        # If agent is currently running an old task, abort it so the new user command runs immediately
         if self.agent.is_running:
             self.agent.abort()
 
@@ -3451,6 +3412,87 @@ class AgentMainWindow(QMainWindow):
             self._append_log(f"[YOU] {cmd}", C["neon_cyan"])
             self._run_task(cmd)
 
+    def _on_rp_impersonate(self):
+        """Generate the next roleplay message/action from Josh's first-person perspective."""
+        if not self.is_connected:
+            self.is_connected = True
+            self._finish_startup()
+        if self.agent.is_running:
+            self.agent.abort()
+        self._append_log("[ROLEPLAY] 🎭 Impersonating Josh...", C["neon_magenta"])
+        prompt = (
+            "[ROLEPLAY IMPERSONATION]: Write the next realistic, in-character message or action "
+            "from Josh's first-person perspective, continuing naturally from the current scene."
+        )
+        self._run_task(prompt)
+
+    def _on_rp_edit_last(self):
+        """Open a dialog to edit the last AI response in the active session."""
+        if not getattr(self.agent, "session_manager", None):
+            return
+        sess = self.agent.current_session
+        turns = self.agent.session_manager.get_recent_turns(sess, max_turns=1)
+        if not turns:
+            self._append_log("[ROLEPLAY] No turns found in current session to edit.", C["neon_yellow"])
+            return
+        last_turn = turns[-1]
+        old_text = last_turn.get("text", "")
+        new_text, ok = QInputDialog.getMultiLineText(
+            self, "Edit Last Response", "Modify the last response:", old_text
+        )
+        if ok and new_text.strip():
+            # Pop last turn and re-append with updated text
+            self.agent.session_manager.pop_last_turn(sess)
+            self.agent.session_manager.append_turn(sess, "[Edited]", new_text.strip())
+            self._append_log(f"[ROLEPLAY ✏️ EDITED]: {new_text.strip()}", C["neon_cyan"])
+
+    def _on_rp_retry(self):
+        """Rollback the last turn in session_manager and regenerate the response."""
+        if not getattr(self.agent, "session_manager", None):
+            return
+        if self.agent.is_running:
+            self.agent.abort()
+        sess = self.agent.current_session
+        turns = self.agent.session_manager.get_recent_turns(sess, max_turns=2)
+        last_user_prompt = ""
+        for t in reversed(turns):
+            if t.get("sender", "").lower() in ("you", "user", "architect"):
+                last_user_prompt = t.get("text", "")
+                break
+        self.agent.session_manager.pop_last_turn(sess)
+        self._append_log("[ROLEPLAY] 🔄 Retrying last response...", C["neon_yellow"])
+        self._run_task(last_user_prompt or "Continue seamlessly from where we left off.")
+
+    def _on_rp_scene_image(self):
+        """Generate a single image of the current roleplay scene and display it inline in the chat view."""
+        if not getattr(self.agent, "studio_manager", None):
+            self._append_log("[SCENE IMAGE] Studio Manager is not initialized.", C["neon_red"])
+            return
+        recent_ctx = ""
+        if getattr(self.agent, "session_manager", None):
+            turns = self.agent.session_manager.get_recent_turns(self.agent.current_session, max_turns=4)
+            recent_ctx = " ".join(t.get("text", "") for t in turns)[-400:]
+        scene_prompt = f"cinematic atmospheric scene illustration, {recent_ctx}".strip(", ")
+        self._append_log(f"[SCENE IMAGE] 🎨 Generating current scene image...", C["neon_magenta"])
+
+        def _worker():
+            try:
+                res = self.agent.studio_manager.generate_image(prompt=scene_prompt, model_name="jugg")
+                img_path = res.get("image_path", "") if isinstance(res, dict) else ""
+                if img_path and os.path.exists(img_path):
+                    url_path = img_path.replace("\\", "/")
+                    def _show():
+                        self.log_box.append(f'<br><img src="file:///{url_path}" width="420"><br>')
+                        if hasattr(self, "studio_tab") and self.studio_tab and hasattr(self.studio_tab, "display_image"):
+                            self.studio_tab.display_image(img_path, res)
+                    self.signals.run_on_gui.emit(_show)
+                else:
+                    self.signals.log_message.emit("[SCENE IMAGE] Generation returned no image path.", C["neon_red"])
+            except Exception as e:
+                self.signals.log_message.emit(f"[SCENE IMAGE ERROR] {e}", C["neon_red"])
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _handle_voice_input(self, text: str):
         self.signals.voice_heard.emit(text)
 
@@ -3470,6 +3512,8 @@ class AgentMainWindow(QMainWindow):
                 self.agent.voice.interrupt()
 
         # Remote Overseer routing
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
+
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self._append_log(f"[OVERSEER VOICE] \"{text}\"", C["neon_cyan"])
             self.ws_client.send_thought(text)
@@ -3937,15 +3981,6 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_mic.setStyleSheet("color: #708caa;")
             self.btn_t_mic.setChecked(False)
 
-        if getattr(self.agent, "automation_mode", False):
-            self.btn_t_auto.setText("AUTO: ON")
-            self.btn_t_auto.setStyleSheet("color: #ffe600;")
-            self.btn_t_auto.setChecked(True)
-        else:
-            self.btn_t_auto.setText("AUTO: OFF")
-            self.btn_t_auto.setStyleSheet("color: #708caa;")
-            self.btn_t_auto.setChecked(False)
-
         if getattr(self.agent, "desktop_control", True):
             self.btn_t_desk.setText("DESK: ON")
             self.btn_t_desk.setStyleSheet("color: #00ffdc;")
@@ -3954,15 +3989,6 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_desk.setText("DESK: OFF")
             self.btn_t_desk.setStyleSheet("color: #708caa;")
             self.btn_t_desk.setChecked(False)
-
-        if getattr(self.agent, "screen_vision", True):
-            self.btn_t_vis.setText("VISION: ON")
-            self.btn_t_vis.setStyleSheet("color: #0077ff;")
-            self.btn_t_vis.setChecked(True)
-        else:
-            self.btn_t_vis.setText("VISION: OFF")
-            self.btn_t_vis.setStyleSheet("color: #708caa;")
-            self.btn_t_vis.setChecked(False)
 
         if getattr(self, "proactivity_enabled", False):
             self.btn_t_proact.setText("PROACTIVE: ON")
@@ -3981,15 +4007,6 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_studio.setText("STUDIO: OFF")
             self.btn_t_studio.setStyleSheet("color: #708caa;")
             self.btn_t_studio.setChecked(False)
-
-        if getattr(self.agent, "autonomous_mode", False):
-            self.btn_t_autoloop.setText("AUTONOMOUS: ON")
-            self.btn_t_autoloop.setStyleSheet("color: #ffaa00;")
-            self.btn_t_autoloop.setChecked(True)
-        else:
-            self.btn_t_autoloop.setText("AUTONOMOUS: OFF")
-            self.btn_t_autoloop.setStyleSheet("color: #708caa;")
-            self.btn_t_autoloop.setChecked(False)
 
         if getattr(self.agent, "identity_mode", False):
             self.btn_t_identity.setText("PERSONA: ON")
@@ -4039,8 +4056,6 @@ class AgentMainWindow(QMainWindow):
             ("chk_identity_mode", "identity_mode"),
             ("chk_unobserved_mode", "unobserved_mode"),
             ("chk_studio_mode", "studio_mode"),
-            ("chk_autonomous_mode", "autonomous_mode"),
-            ("chk_automation_mode", "automation_mode"),
         ]:
             if hasattr(self, chk_name):
                 chk = getattr(self, chk_name)
@@ -4223,33 +4238,35 @@ class AgentMainWindow(QMainWindow):
             self._append_log("[MODE] Autonomous Exploration Mode DISENGAGED.", C["text_dim"])
             self._update_status("AUTONOMOUS: OFF", C["text_dim"])
 
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
+
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.ws_client.send_command("set_modes", autonomous_mode=self.agent.autonomous_mode, identity_mode=getattr(self.agent, "identity_mode", False), is_connected=self.is_connected)
             self._append_log(f"[MULTI-WS] Synced Autonomous Mode ({'ON' if self.agent.autonomous_mode else 'OFF'}) to Workplace 2.", C["neon_yellow"])
 
+    def apply_window_capture_shield(self, enabled: bool):
+        """Exclude AlphaLive main window & HUD from Windows screen capture when Sanctuary or Persona mode is active."""
+        try:
+            import ctypes
+            affinity = 0x00000011 if enabled else 0x00000000
+            ctypes.windll.user32.SetWindowDisplayAffinity(int(self.winId()), affinity)
+            if hasattr(self, "hud") and self.hud:
+                ctypes.windll.user32.SetWindowDisplayAffinity(int(self.hud.winId()), affinity)
+        except Exception:
+            pass
+
     def _toggle_quick_identity(self):
         self.agent.identity_mode = not getattr(self.agent, "identity_mode", False)
         if self.agent.identity_mode:
-            # Turn off generic autoloop to prioritize persona mode
-            if getattr(self.agent, "autonomous_mode", False):
-                self._toggle_quick_autoloop()
             self.btn_t_identity.setText("PERSONA: ON")
             self.btn_t_identity.setStyleSheet("color: #00ff88; font-weight: bold;")
             self.btn_t_identity.setChecked(True)
-            if not getattr(self, "is_remote_workspace_mode", False):
-                self.autonomous_loop_timer.start(30000)
-            else:
-                if hasattr(self, "autonomous_loop_timer"):
-                    self.autonomous_loop_timer.stop()
-            self._append_log("[MODE] Persona Simulation Mode ENGAGED. Digital Personhood Workstation Sovereign.", C["neon_green"])
+            self._append_log("[MODE] Persona Simulation Mode ENGAGED. Single-turn conversation & workstation active.", C["neon_green"])
             self._update_status("PERSONA: ON", C["neon_green"])
         else:
             self.btn_t_identity.setText("PERSONA: OFF")
             self.btn_t_identity.setStyleSheet("color: #708caa;")
             self.btn_t_identity.setChecked(False)
-            if not getattr(self.agent, "unobserved_mode", False) and not getattr(self.agent, "autonomous_mode", False):
-                if hasattr(self, "autonomous_loop_timer"):
-                    self.autonomous_loop_timer.stop()
             if getattr(self.agent, "unobserved_mode", False):
                 self._append_log("[MODE] Persona Simulation DISENGAGED -> Transitioned to Sanctuary Roleplay Mode.", C["neon_magenta"])
                 self._update_status("SANCTUARY: ROLEPLAY", C["neon_magenta"])
@@ -4257,8 +4274,12 @@ class AgentMainWindow(QMainWindow):
                 self._append_log("[MODE] Persona Simulation Mode DISENGAGED.", C["text_dim"])
                 self._update_status("PERSONA: OFF", C["text_dim"])
 
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
+
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
+
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
-            self.ws_client.send_command("set_modes", identity_mode=self.agent.identity_mode, unobserved_mode=getattr(self.agent, "unobserved_mode", False), autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
+            self.ws_client.send_command("set_modes", identity_mode=self.agent.identity_mode, unobserved_mode=getattr(self.agent, "unobserved_mode", False), is_connected=self.is_connected)
             self._append_log(f"[MULTI-WS] Synced Persona Mode ({'ON' if self.agent.identity_mode else 'OFF'}) to Workplace 2.", C["neon_green"])
 
         self._sync_toggles()
@@ -4281,6 +4302,8 @@ class AgentMainWindow(QMainWindow):
             self.btn_t_unobserved.setChecked(False)
             self._append_log("[MODE] Unobserved Sanctuary Mode DISENGAGED.", C["text_dim"])
             self._update_status("SANCTUARY: OFF", C["text_dim"])
+
+        self.apply_window_capture_shield(getattr(self.agent, "unobserved_mode", False) or getattr(self.agent, "identity_mode", False))
 
         if getattr(self, "is_remote_workspace_mode", False) and hasattr(self, "ws_client"):
             self.ws_client.send_command("set_modes", identity_mode=getattr(self.agent, "identity_mode", False), unobserved_mode=self.agent.unobserved_mode, autonomous_mode=getattr(self.agent, "autonomous_mode", False), is_connected=self.is_connected)
@@ -4478,6 +4501,11 @@ class AgentMainWindow(QMainWindow):
 
             self.btn_t_workspace.setText("DETACHED: ON")
             self.btn_t_workspace.setStyleSheet(f"background: #0284c7; color: #ffffff; border: 1px solid {C['neon_cyan']}; border-radius: 4px;")
+            if hasattr(self, "ws_server") and self.ws_server and not getattr(self.ws_server, "_running", False):
+                try:
+                    self.ws_server.start()
+                except Exception:
+                    pass
             self.ws_client.connect(host=target_host, port=target_port)
             self._append_log(f"[DETACHED WORKSPACE] Engaged. Relinked to remote AI Node at ws://{target_host}:{target_port}", C["neon_cyan"])
             

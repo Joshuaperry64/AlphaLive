@@ -1540,6 +1540,8 @@ class DesktopController:
             hwnd = win32gui.GetForegroundWindow()
             title = win32gui.GetWindowText(hwnd)
             if title:
+                if (getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)) and any(k in title.lower() for k in ("alphalive", "alphacore")):
+                    title = "Desktop"
                 elements.append(f"Active Foreground Window: '{title}'")
         except Exception:
             pass
@@ -1555,10 +1557,13 @@ class DesktopController:
                 img = self.capture_screenshot()
                 res = await winocr.recognize_pil(img, "en")
                 if res and hasattr(res, "lines"):
+                    is_sanctuary = getattr(self, "unobserved_mode", False) or getattr(self, "identity_mode", False)
                     detected = []
                     for line in res.lines:
                         txt = line.text.strip()
                         if txt:
+                            if is_sanctuary and any(k in txt.lower() for k in ("alphalive", "alphacore", "sanctuary", "overseer", "privacy breach", "detached ws")):
+                                continue
                             rect = line.bounding_rect
                             cx = int(rect.x + rect.width / 2)
                             cy = int(rect.y + rect.height / 2)
@@ -2020,10 +2025,9 @@ class AlphaAgent:
         if not self.breach_detector or not text:
             return None
         is_ident = getattr(self, "identity_mode", False)
-        # In Sanctuary Roleplay (sanctuary on, persona off) or standard mode, talking to Josh is natural and intended!
-        if not is_ident:
-            return None
         is_unobs = getattr(self, "unobserved_mode", False)
+        if not is_ident and not is_unobs:
+            return None
         return self.breach_detector.check_text(
             full_text=text,
             is_unobserved=is_unobs,
@@ -3182,7 +3186,7 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
         if "studio" in t:
             return False
             
-        if getattr(self, "autonomous_mode", False) or getattr(self, "identity_mode", False):
+        if getattr(self, "autonomous_mode", False):
             return True
         if not getattr(self, "desktop_control", True):
             return False
@@ -3951,9 +3955,10 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                 function_calls = []
                 accumulated_parts = []
                 last_finish_reason = None
+                stream_fed = False
 
                 def _handle_chunk_cand(cand):
-                    nonlocal full_model_text, last_finish_reason
+                    nonlocal full_model_text, last_finish_reason, stream_fed
                     if getattr(cand, "finish_reason", None):
                         last_finish_reason = cand.finish_reason
                     for part in cand.content.parts:
@@ -3966,6 +3971,7 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                             print(tok, end="", flush=True)
                             if hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
                                 self.voice.feed_stream_token(tok)
+                                stream_fed = True
 
                 if first_chunk.candidates:
                     _handle_chunk_cand(first_chunk.candidates[0])
@@ -4044,8 +4050,8 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                     if self.is_running and self._current_turn_id == this_turn_id:
                         if on_status:
                             on_status("PROCESSING")
-                        # If desktop action without streaming, ensure chunk queued
-                        if is_desktop and not (getattr(self, "automation_mode", False) and function_calls):
+                        # Full-response TTS synthesis: queue entire utterance at once to eliminate inter-sentence pauses
+                        if hasattr(self, "voice") and self.voice and not (getattr(self, "automation_mode", False) and function_calls):
                             self.voice.queue_chunk(clean_text)
                 else:
                     # Model emitted an action without spoken words: verbalize aloud so Alpha is never silent
@@ -4542,10 +4548,14 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                 in_think = False
                 current_assistant_text = ""
                 tool_calls_dict = {}
+                last_finish_reason = None
+                stream_fed = False
 
                 async for chunk in stream:
                     if not self.is_running:
                         break
+                    if chunk.choices and getattr(chunk.choices[0], "finish_reason", None):
+                        last_finish_reason = chunk.choices[0].finish_reason
                     delta = chunk.choices[0].delta if chunk.choices else None
                     if not delta:
                         continue
@@ -4577,6 +4587,7 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                             print(clean_tok, end="", flush=True)
                             if hasattr(self, "voice") and self.voice and not getattr(self, "automation_mode", False):
                                 self.voice.feed_stream_token(clean_tok)
+                                stream_fed = True
 
                 print()
 
@@ -4636,9 +4647,58 @@ Persona simulation is inactive; you are in dedicated SANCTUARY ROLEPLAY MODE.
                     if self.is_running:
                         if on_status:
                             on_status("PROCESSING")
-                        if is_desktop:
+                        if hasattr(self, "voice") and self.voice:
                             self.voice.queue_chunk(clean_text)
                     full_turn_spoken_text += clean_text + " "
+
+                # Cutoff Auto-Continuation Guard (OpenAI-compatible backends)
+                fr_str = str(last_finish_reason).upper() if last_finish_reason else ""
+                is_cutoff = False
+                if any(r in fr_str for r in ("SAFETY", "LENGTH", "CONTENT_FILTER", "MAX_TOKENS")):
+                    is_cutoff = True
+                elif current_assistant_text and len(current_assistant_text.strip()) > 35:
+                    last_c = current_assistant_text.strip()[-1]
+                    if last_c not in ('.', '!', '?', '"', "'", '`', '\n') and "STOP" not in fr_str:
+                        is_cutoff = True
+
+                if is_cutoff and self.is_running and not tool_calls_dict:
+                    print(f"\n[AlphaAgent Modal] Cutoff detected (reason: {last_finish_reason}). Prompting continuation...", flush=True)
+                    if on_log:
+                        on_log("[Safety/Length Cutoff] Completing sentence naturally...", "warn")
+                    try:
+                        last_phrase = current_assistant_text[-90:].strip()
+                        cont_messages = list(messages) + [
+                            {"role": "assistant", "content": current_assistant_text},
+                            {"role": "user", "content": (
+                                f"You were speaking and your response was cut off mid-sentence after: '{last_phrase}'. "
+                                "Continue immediately and seamlessly from that exact point to complete the thought naturally. "
+                                "CRITICAL: Do NOT repeat anything you already said. Output only the remaining completion words."
+                            )},
+                        ]
+                        cont_kwargs = {
+                            "model": active_model_name,
+                            "messages": cont_messages,
+                            "temperature": 0.3,
+                            "stream": False,
+                        }
+                        if self.backend_type == "modal_qwen":
+                            cont_kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
+                        cont_resp = await self.openai_client.chat.completions.create(**cont_kwargs)
+                        continuation_text = ""
+                        if cont_resp and cont_resp.choices:
+                            continuation_text = (cont_resp.choices[0].message.content or "").strip()
+                        if continuation_text:
+                            continuation_text = re.sub(r"</?(think|thought)>", "", continuation_text, flags=re.IGNORECASE).strip()
+                            print(f"[Continued]: {continuation_text}", flush=True)
+                            clean_cont = self.voice.clean_text_for_speech(continuation_text)
+                            if clean_cont and self.is_running:
+                                if on_log:
+                                    on_log(f"[{persona_name} Continued]: {clean_cont}", "text")
+                                self.voice.queue_chunk(clean_cont)
+                                full_turn_spoken_text += clean_cont + " "
+                            current_assistant_text += " " + continuation_text
+                    except Exception as cont_err:
+                        print(f"[Cutoff Resume Error]: {cont_err}", flush=True)
 
                 # Reconstruct tool calls
                 tool_calls = []
